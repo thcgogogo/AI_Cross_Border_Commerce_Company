@@ -509,7 +509,34 @@ def login_page():
 @app.route("/company-brain")
 def company_brain_page():
     """The "企业大脑" page. Logged-out visitors are redirected to /login (302); the
-    SPA then opens the Company Brain workspace once a session exists."""
+    SPA then opens the Company Brain workspace once a session exists (the new
+    router normalizes this legacy path to /brain)."""
+    if not _current_customer():
+        return redirect("/login")
+    return send_from_directory("frontend", "index.html")
+
+
+# UI redesign Phase 2 — the SPA path router (plan §5). Every customer page is a
+# real path served by the same shell; logged-out visitors bounce to /login first
+# (the same pattern as /company-brain above). /reports/<run_id> additionally
+# gets per-report ownership checks with B7 (Phase 4) — here a session is enough
+# to load the shell, and the report data API enforces ownership already.
+FOUNDER_SPA_PAGES = ("team", "costs", "models", "fusion", "api")
+
+
+@app.route("/new")
+@app.route("/reports")
+@app.route("/reports/<int:run_id>")
+@app.route("/schedule")
+@app.route("/brain")
+@app.route("/account")
+@app.route("/founder/<founder_page>")
+def spa_page(run_id=None, founder_page=None):
+    """Serve the SPA shell for the redesigned customer pages (and the founder
+    machinery views — their is_admin gating is in the UI; the sensitive /admin*
+    pages keep their own server-side checks)."""
+    if founder_page is not None and founder_page not in FOUNDER_SPA_PAGES:
+        return jsonify({"error": "not found"}), 404
     if not _current_customer():
         return redirect("/login")
     return send_from_directory("frontend", "index.html")
