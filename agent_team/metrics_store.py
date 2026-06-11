@@ -1797,22 +1797,26 @@ def deduct_report_credit(account_id):
 
 def consume_report_credit_if_over_quota(run_id):
     """B4/C4 — make 单次报告 credits one-shot. Called when a run finishes: if
-    the run COUNTS toward the quota meter (kind='report', not failed) and the
-    company's used total now EXCEEDS the plan's base quota, this run rode on a
-    purchased credit — consume exactly one (floor 0, under a row lock).
+    the run COUNTS toward the quota meter (kind='report', not failed, not
+    already credit-funded) and the quota-metered total now EXCEEDS the plan's
+    base quota, this run rode on a purchased credit — consume exactly one AND
+    stamp the run credit_funded, which removes it from the quota counters.
+    Without the stamp the consumed credit's run would count against the base
+    quota forever, so a SECOND ¥29 purchase on the lifetime trial bought
+    nothing (used=3 ≥ 2+1).
 
     Runs that fit inside the base quota never touch credits, so a free user
     with the 2-lifetime trial + 1 credit gets 3 runs total, and a failed run
-    never eats the ¥29. Two runs finishing in the same instant may in theory
-    both see the post-quota count and consume one each — which is the correct
-    total whenever both ran on credits, and a bounded, fail-safe edge
-    otherwise. Returns True when a credit was consumed."""
+    never eats the ¥29. Two runs finishing in the same instant: the first one
+    marks+consumes and the metered count drops back to the quota, so the
+    second sees no overrun — credits can't be over-consumed (the account row
+    is locked for the decrement). Returns True when a credit was consumed."""
     if not run_id:
         return False
     with db.session_scope() as s:
         run = s.get(Run, run_id)
         if (run is None or run.kind != RUN_KIND_REPORT
-                or run.status == RUN_FAILED):
+                or run.status == RUN_FAILED or run.credit_funded):
             return False
         company_id = run.company_id
         comp = s.get(Company, company_id)
@@ -1840,6 +1844,9 @@ def consume_report_credit_if_over_quota(run_id):
         if acc is None or int(acc.report_credits or 0) < 1:
             return False
         acc.report_credits = int(acc.report_credits) - 1
+        run = s.get(Run, run_id)
+        if run is not None:
+            run.credit_funded = True
         return True
 
 
@@ -2006,9 +2013,11 @@ def set_cancel_at_period_end(account_id, flag):
 
 
 def count_runs_this_month(company_id, now=None):
-    """How many REPORT runs this company started this calendar month — the
-    plan quota meter. Failed runs don't count against the quota, and neither
-    do kind="import" back-fills (Phase 6 B1 — imports used to eat the quota)."""
+    """How many quota-metered REPORT runs this company started this calendar
+    month — the plan quota meter. Failed runs don't count, kind="import"
+    back-fills don't count (Phase 6 B1), and neither do credit_funded runs
+    (Phase 7 B4 — a consumed 单次报告 credit paid for those; counting them
+    against the base quota would make repeat purchases worthless)."""
     if not company_id:
         return 0
     now = now or datetime.utcnow()
@@ -2017,21 +2026,23 @@ def count_runs_this_month(company_id, now=None):
         return int(s.query(Run.id)
                    .filter(Run.company_id == company_id,
                            Run.kind == RUN_KIND_REPORT,
+                           Run.credit_funded.is_(False),
                            Run.started_at >= month_start,
                            Run.status != RUN_FAILED).count())
 
 
 def count_runs_total(company_id):
-    """How many REPORT runs this company has EVER started — the meter for
-    plans whose quota is a lifetime total (the 免费体验 trial, redesign B3).
-    Failed runs and kind="import" back-fills don't count, same as the monthly
-    meter."""
+    """How many quota-metered REPORT runs this company has EVER started — the
+    meter for plans whose quota is a lifetime total (the 免费体验 trial,
+    redesign B3). Failed runs, kind="import" back-fills, and credit_funded
+    runs don't count, same as the monthly meter."""
     if not company_id:
         return 0
     with db.session_scope() as s:
         return int(s.query(Run.id)
                    .filter(Run.company_id == company_id,
                            Run.kind == RUN_KIND_REPORT,
+                           Run.credit_funded.is_(False),
                            Run.status != RUN_FAILED).count())
 
 

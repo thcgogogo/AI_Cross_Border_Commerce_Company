@@ -361,13 +361,26 @@ def test_single_report_purchase_grants_credit_run_then_consumes(env):
     # Quota gate now open (2 used < 2+1 effective): empty-goal 400 = gates passed.
     assert client.post("/api/run", data={"goal": ""}).status_code == 400
 
-    # The 3rd counting run lands beyond the base quota → consumes the credit.
+    # The 3rd counting run lands beyond the base quota → consumes the credit
+    # AND is stamped credit_funded, so it stops counting against the base
+    # quota (the metered total returns to 2).
     _finished_report_runs(cid, 1)
     assert env["store"].get_by_id(acc_id)["report_credits"] == 0
+    assert metrics_store.count_runs_total(cid) == 2
 
-    # One-shot: with the credit consumed the gate closes again (3/3).
+    # One-shot: with the credit consumed the gate closes again.
     resp = client.post("/api/run", data={"goal": "做个经营周报"})
     assert resp.status_code == 402
+
+    # A SECOND ¥29 purchase must work too — without the credit_funded stamp
+    # the consumed run counted forever and this second purchase bought nothing.
+    order2 = client.post("/api/pay/create", json={"type": "single_report"}).get_json()
+    _pay(client, order2["order_no"], 29.0)
+    assert client.post("/api/run", data={"goal": ""}).status_code == 400  # gate open
+    _finished_report_runs(cid, 1)   # 4th report, rides the 2nd credit
+    assert env["store"].get_by_id(acc_id)["report_credits"] == 0
+    assert metrics_store.count_runs_total(cid) == 2   # still only base-quota runs
+    assert client.post("/api/run", data={"goal": "做个经营周报"}).status_code == 402
 
 
 def test_runs_within_base_quota_never_consume_credits(env):
@@ -455,12 +468,20 @@ def test_migration_0006_adds_report_credits_to_legacy_accounts(tmp_path):
             usage_json TEXT, status VARCHAR(9) NOT NULL,
             rpm_limit INTEGER NOT NULL, daily_cap_yuan NUMERIC(12,2),
             session_token VARCHAR(32), created_at DATETIME NOT NULL);
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL, goal_text TEXT,
+            started_at DATETIME NOT NULL, finished_at DATETIME,
+            status VARCHAR(14) NOT NULL,
+            kind VARCHAR(32) NOT NULL DEFAULT 'report',
+            total_cost_yuan FLOAT, report_path VARCHAR(255));
         CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL);
         INSERT INTO alembic_version VALUES ('0005_phase6_run_kind');
         INSERT INTO accounts (id, email, spent_yuan, requests, status,
                               rpm_limit, created_at)
             VALUES ('cus_legacy01', 'legacy@corp.com', 0, 0, 'active', 60,
                     '2026-01-01');
+        INSERT INTO runs (company_id, goal_text, started_at, status)
+            VALUES (1, '生成上周经营周报', '2026-01-03', 'succeeded');
     """)
     conn.commit()
     conn.close()
@@ -477,7 +498,12 @@ def test_migration_0006_adds_report_credits_to_legacy_accounts(tmp_path):
     notnull, default = cols["report_credits"][3], cols["report_credits"][4]
     assert notnull == 1
     assert "0" in str(default)
-    # The legacy row reads 0 credits, and the version landed at head (0006).
+    # runs.credit_funded arrives NOT NULL DEFAULT 0 and legacy rows read False.
+    rcols = {row[1]: row for row in conn.execute("PRAGMA table_info(runs)")}
+    assert "credit_funded" in rcols
+    assert rcols["credit_funded"][3] == 1
+    assert conn.execute("SELECT credit_funded FROM runs").fetchone()[0] == 0
+    # The legacy account reads 0 credits, and the version landed at head (0006).
     assert conn.execute(
         "SELECT report_credits FROM accounts").fetchone()[0] == 0
     assert conn.execute(

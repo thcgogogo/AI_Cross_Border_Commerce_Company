@@ -206,6 +206,13 @@ class Run(Base):
     # report quota nor appear in 历史报告 (redesign Phase 6 B1).
     kind = Column(String(32), nullable=False, default=RUN_KIND_REPORT,
                   server_default=RUN_KIND_REPORT)
+    # Phase 7 (B4): True when this run was paid for by a 单次报告 credit. Such
+    # runs are EXCLUDED from the plan-quota counters (they still appear in
+    # 历史报告) — otherwise a consumed credit's run would count against the
+    # base quota forever and a SECOND ¥29 purchase on the lifetime trial would
+    # buy nothing (used=3 ≥ 2+1).
+    credit_funded = Column(Boolean, nullable=False, default=False,
+                           server_default="0")
     total_cost_yuan = Column(Float, default=0.0)
     report_path = Column(String(255), nullable=True)
 
