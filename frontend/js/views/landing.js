@@ -8,16 +8,9 @@
 // sample has not been generated yet (scripts/make_sample_assets.py).
 // ===========================================================================
 import { state } from "../state.js";
-import { esc, cny } from "../components.js";
+import { esc, cny, planCard, singleReportCard } from "../components.js";
 import * as api from "../api.js";
 import { openLoginModal, openSignupModal } from "./auth.js";
-
-// Per-plan marketing blurbs (labels/prices/quotas come from /api/plans).
-const PLAN_PITCH = {
-  free:  { sub: "先看两份自己的报告再决定", points: ["2 份完整报告（含 PDF）", "手机号注册即可，无需绑卡", "历史数据导入体验"] },
-  basic: { sub: "每周一报，覆盖全月经营", points: ["每月约 20 份报告", "1 个使用账号", "企业大脑：记住指标与口径", "邮件送达 + 网页查看"] },
-  pro:   { sub: "整个团队的 AI 经营分析部", points: ["大额度报告量", "5 个使用账号", "每周一 08:00 定时自动送达", "企业微信群直达", "合同审查（每月 3 份）", "优先生成通道"] },
-};
 
 const FAQ = [
   ["我完全不懂 AI，能用吗？",
@@ -185,45 +178,20 @@ export async function mount(el) {
       .join("") + `<span class="chip chip-soon">更多行业陆续上线</span>`;
   }).catch(() => { /* strip is decorative */ });
 
-  // 定价 cards from /api/plans (+ the 单次 card from meta).
+  // 定价 cards from /api/plans (+ the 单次 card from meta) — the shared
+  // planCard/singleReportCard atoms (components.js), signup CTAs here.
   api.getPlans().then((data) => {
     const grid = el.querySelector("#pricingGrid");
     if (!grid) return;
     const plans = (data && data.plans) || [];
     const byCode = Object.fromEntries(plans.map((p) => [p.code, p]));
-    const cards = [];
-    const planCard = (p, featured) => {
-      if (!p) return "";
-      const pitch = PLAN_PITCH[p.code] || { sub: "", points: [] };
-      const quota = p.lifetime_quota
-        ? `共 ${p.monthly_report_quota} 份报告`
-        : `每月 ${p.monthly_report_quota} 份报告额度`;
-      return `<div class="card plan-card ${featured ? "featured" : ""}">
-        ${featured ? '<span class="plan-flag">最受欢迎</span>' : ""}
-        <div class="plan-name">${esc(p.label)}</div>
-        <div class="plan-price">${p.monthly_price_yuan > 0
-          ? `${esc(cny(p.monthly_price_yuan, 0))}<span class="plan-per">/月</span>` : "¥0"}</div>
-        <div class="plan-sub">${esc(pitch.sub)}</div>
-        <ul class="plan-points">
-          <li>${esc(quota)}</li>
-          ${pitch.points.map((x) => `<li>${esc(x)}</li>`).join("")}
-        </ul>
-        <button type="button" class="run-btn plan-cta" data-signup>
-          ${p.monthly_price_yuan > 0 ? "免费体验后订阅" : "立即免费体验"}</button>
-      </div>`;
-    };
-    cards.push(planCard(byCode.free, false));
-    if (single) {
-      cards.push(`<div class="card plan-card">
-        <div class="plan-name">单次报告</div>
-        <div class="plan-price">${esc(cny(single, 0))}<span class="plan-per">/份</span></div>
-        <div class="plan-sub">不订阅，按需购买</div>
-        <ul class="plan-points"><li>一份完整报告（含 PDF）</li><li>同样的溯源与核验标准</li><li>随时升级为订阅</li></ul>
-        <button type="button" class="run-btn plan-cta" data-signup>注册后购买</button>
-      </div>`);
-    }
-    cards.push(planCard(byCode.basic, true));
-    cards.push(planCard(byCode.pro, false));
+    const signupCta = (label) => ({ label, attrs: "data-signup" });
+    const cards = [
+      planCard(byCode.free, { cta: signupCta("立即免费体验") }),
+      singleReportCard(single, { cta: signupCta("注册后购买") }),
+      planCard(byCode.basic, { featured: true, cta: signupCta("免费体验后订阅") }),
+      planCard(byCode.pro, { cta: signupCta("免费体验后订阅") }),
+    ];
     grid.innerHTML = cards.join("");
     grid.querySelectorAll("[data-signup]").forEach((b) =>
       b.addEventListener("click", openSignupModal));

@@ -229,6 +229,52 @@ export function sparklineSVG(values, { width = 120, height = 34, stroke = "var(-
     </svg>`;
 }
 
+// ---- flat pricing cards (Phase 7 D2 — shared by landing §3.1⑦ + account §3.8②)
+// Per-plan marketing blurbs; labels/prices/quotas always come from /api/plans.
+export const PLAN_PITCH = {
+  free:  { sub: "先看两份自己的报告再决定", points: ["2 份完整报告（含 PDF）", "手机号注册即可，无需绑卡", "历史数据导入体验"] },
+  basic: { sub: "每周一报，覆盖全月经营", points: ["每月约 20 份报告", "1 个使用账号", "企业大脑：记住指标与口径", "邮件送达 + 网页查看"] },
+  pro:   { sub: "整个团队的 AI 经营分析部", points: ["大额度报告量", "5 个使用账号", "每周一 08:00 定时自动送达", "企业微信群直达", "合同审查（每月 3 份）", "优先生成通道"] },
+};
+
+// One flat plan card. `p` is an /api/plans row; opts:
+//   featured — the 最受欢迎 ribbon;  current — marks 当前套餐;
+//   cta — {label, attrs} for the action button (attrs go on the <button>
+//   verbatim, e.g. `data-signup` or `data-plan="basic"`); null → no button.
+export function planCard(p, { featured = false, current = false, cta = null } = {}) {
+  if (!p) return "";
+  const pitch = PLAN_PITCH[p.code] || { sub: "", points: [] };
+  const quota = p.lifetime_quota
+    ? `共 ${p.monthly_report_quota} 份报告`
+    : `每月 ${p.monthly_report_quota} 份报告额度`;
+  return `<div class="card plan-card ${featured ? "featured" : ""} ${current ? "current" : ""}">
+    ${featured ? '<span class="plan-flag">最受欢迎</span>' : ""}
+    ${current ? '<span class="plan-flag plan-flag-current">当前套餐</span>' : ""}
+    <div class="plan-name">${esc(p.label)}</div>
+    <div class="plan-price">${p.monthly_price_yuan > 0
+      ? `${esc(cny(p.monthly_price_yuan, 0))}<span class="plan-per">/月</span>` : "¥0"}</div>
+    <div class="plan-sub">${esc(pitch.sub)}</div>
+    <ul class="plan-points">
+      <li>${esc(quota)}</li>
+      ${pitch.points.map((x) => `<li>${esc(x)}</li>`).join("")}
+    </ul>
+    ${cta ? `<button type="button" class="run-btn plan-cta" ${cta.attrs || ""}>${esc(cta.label)}</button>` : ""}
+  </div>`;
+}
+
+// The 单次报告 card — same flat-card shape; price from /api/meta
+// (single_report_price_yuan), purchasable via payCreate({type:"single_report"}).
+export function singleReportCard(price, { cta = null } = {}) {
+  if (!price) return "";
+  return `<div class="card plan-card">
+    <div class="plan-name">单次报告</div>
+    <div class="plan-price">${esc(cny(price, 0))}<span class="plan-per">/份</span></div>
+    <div class="plan-sub">不订阅，按需购买</div>
+    <ul class="plan-points"><li>一份完整报告（含 PDF）</li><li>同样的溯源与核验标准</li><li>随时升级为订阅</li></ul>
+    ${cta ? `<button type="button" class="run-btn plan-cta" ${cta.attrs || ""}>${esc(cta.label)}</button>` : ""}
+  </div>`;
+}
+
 // Pill tab strip (the .freq-tab pattern generalized into a reusable atom —
 // 企业大脑 editors are its first user). Views wire the click handler and call
 // it again (or toggle .on) when the active tab changes.

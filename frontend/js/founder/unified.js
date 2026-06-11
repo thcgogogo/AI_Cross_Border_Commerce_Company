@@ -7,18 +7,18 @@
 import * as api from "../api.js";
 import { state, setAccount, loadFounderCatalog, modelsByProvider, isTextModel } from "../state.js";
 import { esc, cny, fmtNum, fmtTime } from "../components.js";
+import { openPayPanel, stopPayPoll } from "../pay.js";
 import { founderFrame, requireAdmin } from "./common.js";
 
 let dashSelected = new Set(); // model ids ticked in the editor
 let dashSeededFor = null;     // which account dashSelected was seeded from
-let payPollTimer = null;
 
 export async function mount(el) {
   if (!requireAdmin(el)) return;
   el.innerHTML = founderFrame(`<p class="muted">加载账户与目录…</p>`);
   await loadFounderCatalog();
   render(el);
-  return () => { if (payPollTimer) { clearInterval(payPollTimer); payPollTimer = null; } };
+  return () => stopPayPoll();
 }
 
 function render(el) {
@@ -209,54 +209,29 @@ async function doTopup(el, amount) {
   if (!amount || isNaN(amount) || amount <= 0) return fail("Enter an amount greater than zero.");
   try {
     const order = await api.payCreate({ type: "topup", amount });
-    openPayPanel(el, order);
+    openOrderPanel(el, order);
   } catch (e) {
     fail(e.message);
   }
 }
 
-function openPayPanel(el, order) {
-  const panel = el.querySelector("#payPanel");
-  if (!panel) return;
-  const link = order.pay_url
-    ? `<a href="${esc(order.pay_url)}" target="_blank" rel="noopener" class="run-btn" style="display:inline-block;width:auto;text-decoration:none;">打开收银台支付 ${cny(order.amount)}</a>`
-    : "";
-  const qr = order.qr_text
-    ? `<p class="muted" style="word-break:break-all;">微信扫码串（用任意二维码工具生成后扫码）：<code>${esc(order.qr_text)}</code></p>`
-    : "";
-  panel.innerHTML = `
-    <div><strong>订单 ${esc(order.order_no)}</strong> · ${cny(order.amount)} · ${esc(order.provider)}</div>
-    <div style="margin:8px 0;">${link}${qr}</div>
-    <p class="muted">等待支付确认…（支付完成后余额自动更新，可随时关闭收银台页）</p>`;
-  panel.hidden = false;
-  if (order.pay_url) window.open(order.pay_url, "_blank", "noopener");
-  pollOrder(el, order.order_no);
-}
-
-function pollOrder(el, orderNo) {
-  if (payPollTimer) clearInterval(payPollTimer);
-  let ticks = 0;
-  payPollTimer = setInterval(async () => {
-    ticks += 1;
-    if (ticks > 150) { clearInterval(payPollTimer); payPollTimer = null; return; } // ~5 min
-    try {
-      const data = await api.payStatus(orderNo);
-      if (data.status === "paid") {
-        clearInterval(payPollTimer);
-        payPollTimer = null;
-        try {
-          const me = await api.getMe();
-          state.account = (me && me.customer) || state.account;
-        } catch (e) { /* fine */ }
-        render(el);
-        const msg = el.querySelector("#topupMsg");
-        if (msg) {
-          msg.textContent = "✅ 支付成功，已到账。";
-          msg.hidden = false; msg.classList.add("ok"); msg.classList.remove("err");
-        }
+// The shared pay flow (js/pay.js) + the founder dashboard's "refresh + ✅"
+// reaction once the signed notify lands.
+function openOrderPanel(el, order) {
+  openPayPanel(el.querySelector("#payPanel"), order, {
+    async onPaid() {
+      try {
+        const me = await api.getMe();
+        state.account = (me && me.customer) || state.account;
+      } catch (e) { /* fine — keep the stale view */ }
+      render(el);
+      const msg = el.querySelector("#topupMsg");
+      if (msg) {
+        msg.textContent = "✅ 支付成功，已到账。";
+        msg.hidden = false; msg.classList.add("ok"); msg.classList.remove("err");
       }
-    } catch (e) { /* transient — keep polling */ }
-  }, 2000);
+    },
+  });
 }
 
 // ---- subscription plans + orders/fapiao panels ------------------------------
@@ -313,7 +288,7 @@ function renderPlanBox(el, box, data) {
 async function subscribePlan(el, planCode) {
   try {
     const order = await api.payCreate({ type: "subscription", plan_code: planCode });
-    openPayPanel(el, order);
+    openOrderPanel(el, order);
   } catch (e) {
     const msg = el.querySelector("#planMsg");
     if (msg) { msg.textContent = e.message; msg.hidden = false; msg.classList.add("err"); }
@@ -345,7 +320,8 @@ function renderOrdersBox(el, box, orders) {
   };
   const rows = orders.map((o) => `<tr>
       <td>${fmtTime(o.created_at)}</td>
-      <td>${o.type === "subscription" ? `订阅 ${esc(o.plan_code || "")}` : "充值"}</td>
+      <td>${o.type === "subscription" ? `订阅 ${esc(o.plan_code || "")}`
+            : o.type === "single_report" ? "单次报告" : "充值"}</td>
       <td>${cny(o.amount_yuan)}</td>
       <td>${stateCn[o.status] || esc(o.status)}${o.refunded_yuan ? `（已退 ${cny(o.refunded_yuan)}）` : ""}</td>
       <td>${esc(o.provider)}</td>

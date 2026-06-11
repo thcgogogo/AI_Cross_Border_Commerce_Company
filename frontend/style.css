@@ -444,6 +444,31 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 .plan-cta { margin-top: auto; }
 .pricing-note { text-align: center; color: var(--muted); font-size: 13.5px; margin-top: 18px; }
 
+/* 账户与套餐 (Phase 7, §3.8) */
+.plan-flag-current { background: var(--green); }
+.plan-card.current { border-color: var(--green); }
+.acct-plans .plan-card { position: relative; }
+.form-msg { margin: 10px 0 0; font-size: 13px; font-weight: 600; }
+.form-msg.ok { color: var(--green); }
+.form-msg.err { color: var(--red); }
+.acct-locked {
+  margin-top: 10px; padding: 10px 12px; border-radius: 10px;
+  background: var(--red-soft); color: var(--red); font-size: 13.5px; font-weight: 600;
+}
+.acct-sub-h { font-size: 14px; font-weight: 800; margin: 0 0 2px; }
+.acct-security { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-top: 12px; }
+@media (max-width: 700px) { .acct-security { grid-template-columns: 1fr; } }
+.acct-security .ghost-btn { width: auto; padding: 9px 18px; }
+.acct-promise { border-left: 4px solid var(--accent); }
+.pay-panel {
+  margin-top: 12px; padding: 12px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--inset); font-size: 13.5px;
+}
+.fapiao-form {
+  margin-top: 14px; padding: 14px; border: 1px dashed var(--line);
+  border-radius: 10px; background: var(--inset);
+}
+
 /* 安全与隐私 */
 .sec-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 .sec-item {
