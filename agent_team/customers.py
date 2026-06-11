@@ -262,12 +262,20 @@ class CustomerStore:
         bal = customer.get("balance")
         return bal is None or bal > 0
 
-    def record_usage(self, customer_id, model, input_tokens, output_tokens):
+    def record_usage(self, customer_id, model, input_tokens, output_tokens,
+                     should_charge_balance=True):
         """LAYER 2 — charge a call to the customer and log it.
 
         Cost comes from the catalog's per-million pricing. Decrements balance,
         bumps lifetime spend + request count, and appends a capped usage entry.
         Returns {"cost", "balance", "input_tokens", "output_tokens"}.
+
+        B8 (redesign Phase 7): `should_charge_balance=False` is the flat-plan
+        subscriber path — the ¥ balance is left UNTOUCHED (a ¥199/月 customer
+        is gated by plan quota, never by the invisible demo credit), while
+        everything that meters COGS still happens exactly as before:
+        spent_yuan, the request count, the usage log, and platform_spend.
+        The returned "balance" is then the current (undecremented) value.
 
         CONCURRENCY: the whole read-modify-write runs under the in-process lock AND
         a row lock (with_for_update → real SELECT … FOR UPDATE on Postgres), and the
@@ -298,11 +306,14 @@ class CustomerStore:
 
                 new_balance = None
                 if acc.balance_yuan is not None:
-                    nb = _q(acc.balance_yuan - cost_dec)
-                    if nb < _ZERO:
-                        nb = _ZERO                     # NEVER negative
-                    acc.balance_yuan = nb
-                    new_balance = float(nb)
+                    if should_charge_balance:
+                        nb = _q(acc.balance_yuan - cost_dec)
+                        if nb < _ZERO:
+                            nb = _ZERO                 # NEVER negative
+                        acc.balance_yuan = nb
+                        new_balance = float(nb)
+                    else:
+                        new_balance = float(_q(acc.balance_yuan))
 
                 log = _json_list(acc.usage_json)
                 log.append({"at": _now(), "model": model, "input_tokens": in_tok,

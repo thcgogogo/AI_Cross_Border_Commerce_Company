@@ -187,7 +187,12 @@ def test_wizard_demo_data_reaches_finished_first_report_e2e(
         time.sleep(0.1)
     assert run_id and os.path.isfile(pdf) and os.path.getsize(pdf) > 0
     assert state["steps"]["4"] == "completed"
-    assert store.find_by_email("wizard@corp.com")["balance"] < start_balance
+    # B8 (redesign Phase 7) — deliberately updated: this account is a PRO
+    # subscriber (subscribed above for D3), so the flat plan leaves its
+    # invisible ¥ balance untouched; the run's cost is still metered.
+    acct = store.find_by_email("wizard@corp.com")
+    assert acct["balance"] == start_balance
+    assert acct["spent"] > 0
 
     # Step 5 — ONE click creates the Monday-08:00 weekly job.
     r = _post_json(client, "/api/onboarding/schedule", {"channels": ["email"]})

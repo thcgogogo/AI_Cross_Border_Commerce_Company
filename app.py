@@ -642,23 +642,31 @@ def set_agent_model():
 # Start a run
 # ---------------------------------------------------------------------------
 def _plan_gate(customer):
-    """Phase 9 plan-gating middleware: reads the account's effective plan and
-    answers (allowed, message) for starting a new report run.
+    """B8 (redesign Phase 7) — THE billing decision for starting a billable run.
+    Returns (allowed, message, code); code ∈ {None, "locked", "no_balance",
+    "quota"} so the scheduled path can map skips to distinct last_status values.
 
-    Two rules, both derived from the subscription timestamps (correct even before
-    the daily tick persists a transition):
-      - past_due → everything locked EXCEPT data export (downloads stay open —
-        they are separate routes this gate never touches);
-      - the plan's report quota caps run starts: per calendar month normally, or
-        as a LIFETIME total when the plan sets lifetime_quota (the 免费体验
-        trial's 2 reports, redesign B3); failed runs don't count.
+    The contract (brief: flat pricing, never per-token; plan §6 B8):
+      - a past_due subscription → LOCKED for everyone (data export stays open —
+        those are separate routes this gate never touches);
+      - FREE accounts (no active plan) stay BALANCE-gated on top of their
+        2-lifetime quota: START_BALANCE_CNY is the trial's invisible internal
+        cost cap, never displayed — so the refusal copy sells the upgrade and
+        never mentions ¥;
+      - SUBSCRIBERS (basic/pro) are gated by plan quota ONLY. The ¥ balance is
+        ignored — a ¥199/月 customer must never hit a 402 because the invisible
+        demo credit ran out. Cost is still metered per run (spent_yuan +
+        runs.total_cost_yuan) for COGS; per-run budgets and the platform
+        breaker keep protecting margin.
     Quota metering is best-effort: if the brain DB hiccups we allow the run —
     a metering outage must not take the product down."""
     plan_code, _sub, locked = metrics_store.effective_plan(customer["id"])
     if locked:
         return False, ("订阅已逾期，功能已锁定（仅可导出已有数据）。"
-                       "请续费后继续使用。")
+                       "请续费后继续使用。"), "locked"
     p = config.plan(plan_code)
+    if plan_code == "free" and not CUSTOMERS.has_balance(customer):
+        return False, "免费体验额度已用完，升级套餐后可继续生成报告。", "no_balance"
     quota = int(p.get("monthly_report_quota") or 0)
     if quota:
         try:
@@ -670,14 +678,14 @@ def _plan_gate(customer):
             else:
                 used = metrics_store.count_runs_this_month(company_id)
         except Exception:
-            return True, None
+            return True, None, None
         if used >= quota:
             if p.get("lifetime_quota"):
                 return False, ("免费体验额度已用完（%d/%d 份报告）。"
-                               "升级套餐后可继续生成报告。" % (used, quota))
+                               "升级套餐后可继续生成报告。" % (used, quota)), "quota"
             return False, ("本月报告额度已用完（%d/%d · %s）。"
-                           "升级套餐可提高额度。" % (used, quota, p["label"]))
-    return True, None
+                           "升级套餐可提高额度。" % (used, quota, p["label"])), "quota"
+    return True, None, None
 
 
 @app.route("/api/run", methods=["POST"])
@@ -688,14 +696,10 @@ def run():
     # .env value always wins over any stale ANTHROPIC_API_KEY left in your shell.
     load_dotenv(override=True)
 
-    # The agent team is billed to the logged-in account (like Fusion + the gateway),
-    # so a run requires a signed-in customer with credit left.
+    # Runs require a signed-in customer; what gates them is the PLAN (B8).
     customer = _current_customer()
     if not customer:
-        return jsonify({"error": "Please log in first — agent-team runs are billed to "
-                                 "your account balance."}), 401
-    if not CUSTOMERS.has_balance(customer):
-        return jsonify({"error": "Your account balance is spent. Top up to run the team."}), 402
+        return jsonify({"error": "请先登录后再生成报告。"}), 401
 
     # Phase 8 — platform spend circuit breaker (+ this account's daily ¥ cap). When
     # the platform is over its rolling upstream-spend cap, refuse new runs with the
@@ -704,9 +708,10 @@ def run():
     if not allowed:
         return jsonify({"error": reason}), 503
 
-    # Phase 9 — plan gate: a past-due subscription locks new runs (data export
-    # stays open), and the plan's monthly report quota caps run starts.
-    plan_ok, plan_msg = _plan_gate(customer)
+    # B8 — the plan-aware gate replaces the old blanket balance check:
+    # past_due → locked; free → invisible cost cap + lifetime quota;
+    # subscribers → plan quota only (never the ¥ balance).
+    plan_ok, plan_msg, _gate_code = _plan_gate(customer)
     if not plan_ok:
         return jsonify({"error": plan_msg}), 402
 
@@ -810,16 +815,30 @@ def run():
 
 
 def _make_biller(customer_id):
-    """A cost_listener that charges each model call to the account, and cuts the
-    run off (BudgetExceededError) once the balance is spent — so a run can never
-    push an account below zero. Returns None if there's no account to bill."""
+    """A cost_listener that meters each model call to the account. Returns None
+    if there's no account to bill.
+
+    B8: the plan is resolved ONCE per run. FREE accounts keep today's behavior —
+    the balance is decremented and the run is cut off (BudgetExceededError) the
+    moment it's spent, so the invisible trial cost cap can never go negative.
+    SUBSCRIBERS (basic/pro) are flat-plan: their balance is never decremented
+    and never cuts a run off, while cost still lands in spent_yuan /
+    platform_spend / the usage log for COGS tracking. On a DB hiccup we default
+    to charging — the conservative choice (cost protection must not silently
+    un-gate)."""
     if not customer_id:
         return None
+    try:
+        plan_code, _sub, _locked = metrics_store.effective_plan(customer_id)
+    except Exception:
+        plan_code = "free"
+    charge_balance = (plan_code == "free")
 
     def bill(model, input_tokens, output_tokens):
-        billed = CUSTOMERS.record_usage(customer_id, model, input_tokens, output_tokens)
+        billed = CUSTOMERS.record_usage(customer_id, model, input_tokens, output_tokens,
+                                        should_charge_balance=charge_balance)
         bal = billed.get("balance")
-        if bal is not None and bal <= 0:
+        if charge_balance and bal is not None and bal <= 0:
             raise BudgetExceededError(
                 "account", f"Account balance is spent (¥{bal:.2f}).")
 
@@ -856,8 +875,9 @@ def _run_team(memory, customer_id=None, company_id=None, run_id=None, industry_k
 
 # ---------------------------------------------------------------------------
 # Scheduled runs ("定时任务") — the product shows up on its own cadence.
-# A fire reuses the EXACT interactive billing/run path, so it is metered against
-# the account's ¥ balance like any run; if the balance is spent it never runs.
+# A fire reuses the EXACT interactive billing/run path: the same plan gate
+# (B8: subscribers quota-gated, free accounts balance-capped) and the same
+# per-call cost metering as an interactive run.
 # ---------------------------------------------------------------------------
 def _budget_capped_biller(customer_id, budget_cny):
     """Bill each model call to the account (the normal path) AND, if the job set a
@@ -911,10 +931,12 @@ def _execute_scheduled_job(job, llm=None):
     in production, or directly by a test with an injected `llm` (so no real API
     call is made). `job` is a dict from metrics_store.
 
-    Flow: resolve the account → BALANCE GATE (skip + "余额不足" notice if spent) →
-    gather source files → open a run + build shared memory → run the team headlessly
-    (the branded PDF is rendered inside the orchestrator's _finish_run) → deliver
-    over the job's channels → stamp last_status. Returns a small dict for tests."""
+    Flow: resolve the account → PLAN GATE (B8: locked/quota skip recorded as
+    skipped_plan_limit; a free account's spent cost cap keeps the skip +
+    "余额不足" notice) → gather source files → open a run + build shared memory →
+    run the team headlessly (the branded PDF is rendered inside the
+    orchestrator's _finish_run) → deliver over the job's channels → stamp
+    last_status. Returns a small dict for tests."""
     job_id = job.get("id")
     company_id = job.get("company_id")
     email = (job.get("account_email") or "").strip()
@@ -942,23 +964,23 @@ def _execute_scheduled_job(job, llm=None):
         result["status"] = "skipped_plan_feature"
         return result
 
-    # BALANCE GATE — a scheduled fire must NEVER push an account below zero. If the
-    # balance is already spent, do NOT open a run: deliver the "余额不足" notice
-    # (best-effort) and record one skipped delivery row per channel for the audit.
-    if not CUSTOMERS.has_balance(customer):
-        delivery.notify_insufficient_balance(
-            company_id=company_id, job_id=job_id, channels=channels,
-            recipient_email=recipient_email)
-        metrics_store.mark_job_run(job_id, "skipped_no_balance")
-        result["status"] = "skipped_no_balance"
-        return result
-
-    # Phase 9 — the plan gate applies to scheduled fires too: a past-due lock or
-    # an exhausted monthly report quota skips the fire (recorded, never silent).
-    plan_ok, _plan_msg = _plan_gate(customer)
+    # B8 BILLING GATE — one decision: locked / free-balance / quota. A
+    # subscriber with a spent demo balance RUNS (flat plan — the old blanket
+    # balance gate skipped exactly those customers' Monday reports); the
+    # skip+notify pattern is kept for the free trial's invisible cost cap, and
+    # a locked or quota-exhausted plan skips with its own last_status
+    # (recorded, never silent).
+    plan_ok, _plan_msg, gate_code = _plan_gate(customer)
     if not plan_ok:
-        metrics_store.mark_job_run(job_id, "skipped_plan_limit")
-        result["status"] = "skipped_plan_limit"
+        if gate_code == "no_balance":
+            delivery.notify_insufficient_balance(
+                company_id=company_id, job_id=job_id, channels=channels,
+                recipient_email=recipient_email)
+            metrics_store.mark_job_run(job_id, "skipped_no_balance")
+            result["status"] = "skipped_no_balance"
+        else:
+            metrics_store.mark_job_run(job_id, "skipped_plan_limit")
+            result["status"] = "skipped_plan_limit"
         return result
 
     # Gather this fire's input files (latest upload batch, or the pinned list).
@@ -3353,13 +3375,14 @@ def onboarding_generate():
         return jsonify({"error": "请先登录。"}), 401
     if not company_id:
         return jsonify({"error": "公司档案暂不可用。"}), 503
-    if not CUSTOMERS.has_balance(customer):
-        return jsonify({"error": "账户余额不足，请先充值。"}), 402
     allowed, reason = platform_guard.check(customer["id"],
                                            customer.get("daily_cap_yuan"))
     if not allowed:
         return jsonify({"error": reason}), 503
-    plan_ok, plan_msg = _plan_gate(customer)
+    # B8 — the plan-aware gate (locked / free cost-cap / quota) replaces the
+    # old "余额不足，请先充值" check: a subscriber's first report must never be
+    # blocked by the invisible demo credit, and customers are never told to 充值.
+    plan_ok, plan_msg, _gate_code = _plan_gate(customer)
     if not plan_ok:
         return jsonify({"error": plan_msg}), 402
 
@@ -3909,8 +3932,12 @@ def brain_import_start():
         return jsonify({"error": "请先登录。"}), 401
     if not company_id:
         return jsonify({"error": "公司大脑暂不可用。"}), 503
-    if not CUSTOMERS.has_balance(customer):
-        return jsonify({"error": "账户余额不足，请先充值。"}), 402
+    # B8 — plan-aware gate: a subscriber's history import is never blocked by
+    # the invisible balance (cost still metered; the free trial keeps its
+    # balance cost cap, which is what actually bounds an import's spend).
+    plan_ok, plan_msg, _gate_code = _plan_gate(customer)
+    if not plan_ok:
+        return jsonify({"error": plan_msg}), 402
     try:
         parsed = _parse_import_files(request.files.getlist("files"))
     except _ImportUploadRejected as e:
@@ -4133,13 +4160,17 @@ def fusion():
     whole request, so a Claude-only setup still works out of the box."""
     load_dotenv(override=True)  # pick up any provider keys added since startup
 
-    # Like the agent team + the gateway, Fusion is billed to the logged-in account.
+    # Like the agent team, Fusion is metered to the logged-in account. B8: the
+    # plan-aware gate replaces the blanket balance check here too (free →
+    # invisible cost cap; subscribers → quota; past_due → locked). The /v1
+    # gateway below is deliberately NOT changed — it is the founder/API
+    # storefront, accessed by key, and stays balance-gated.
     customer = _current_customer()
     if not customer:
-        return jsonify({"error": "Please log in first — Fusion runs are billed to "
-                                 "your account balance."}), 401
-    if not CUSTOMERS.has_balance(customer):
-        return jsonify({"error": "Your account balance is spent. Top up to use Fusion."}), 402
+        return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    plan_ok, plan_msg, _gate_code = _plan_gate(customer)
+    if not plan_ok:
+        return jsonify({"error": plan_msg}), 402
 
     # Phase 8 — platform spend circuit breaker (+ this account's daily ¥ cap).
     allowed, reason = platform_guard.check(customer["id"], customer.get("daily_cap_yuan"))

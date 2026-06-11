@@ -218,6 +218,105 @@ def test_wechat_send_revalidates_host_for_preexisting_rows(env, monkeypatch):
     assert "evil.example.com" not in resp.get_data(as_text=True)
 
 
+# ===========================================================================
+# Part B — B8 billing realignment: subscribers quota-gated, never balance-gated
+# ===========================================================================
+def test_subscriber_with_zero_balance_can_still_start_a_run(env):
+    # THE B8 acceptance: a paying customer must never hit a 402 because the
+    # invisible demo credit ran out. The empty-goal 400 proves every billing
+    # gate let the request through (same trick as the Phase 9 suite).
+    acc_id = env["store"].find_by_email(OWNER)["id"]
+    _subscribe(acc_id, "basic")
+    _set_balance(env["store"], OWNER, 0)
+    client = _client_for(env["store"], OWNER)
+    resp = client.post("/api/run", data={"goal": ""})
+    assert resp.status_code == 400  # past the gates; refused only for no goal
+
+
+def test_free_account_with_spent_balance_is_blocked_without_topup_talk(env):
+    # FREE accounts keep the balance gate — it is the trial's invisible cost
+    # cap — but the refusal sells the upgrade and never mentions ¥/充值.
+    _set_balance(env["store"], OWNER, 0)
+    client = _client_for(env["store"], OWNER)
+    resp = client.post("/api/run", data={"goal": "做个经营周报"})
+    assert resp.status_code == 402
+    msg = resp.get_json()["error"]
+    assert "升级套餐" in msg
+    for machinery in ("余额", "充值", "Top up", "¥"):
+        assert machinery not in msg
+
+
+def test_subscriber_run_cost_is_recorded_but_balance_untouched(env):
+    acc_id = env["store"].find_by_email(OWNER)["id"]
+    _subscribe(acc_id, "pro")
+    _set_balance(env["store"], OWNER, 0)
+
+    bill = app._make_biller(acc_id)
+    bill(config.HAIKU, 100_000, 20_000)   # must NOT raise despite ¥0 balance
+
+    acct = env["store"].get_by_id(acc_id)
+    assert acct["balance"] == 0.0         # flat plan: balance never decremented
+    assert acct["spent"] > 0              # ...but COGS is still fully metered
+    assert acct["requests"] == 1
+    assert acct["usage"], "the usage log keeps recording subscriber calls"
+
+
+def test_free_account_biller_still_cuts_off_at_zero(env):
+    from agent_team.token_manager import BudgetExceededError
+    acc_id = env["store"].find_by_email(OWNER)["id"]  # no subscription → free
+    _set_balance(env["store"], OWNER, 0.01)
+
+    bill = app._make_biller(acc_id)
+    with pytest.raises(BudgetExceededError):
+        bill(config.HAIKU, 1_000_000, 200_000)  # drains the ¥0.01 cap
+    assert env["store"].get_by_id(acc_id)["balance"] == 0.0  # clamped, never negative
+
+
+def test_past_due_subscriber_with_leftover_balance_stays_locked(env):
+    # past_due → locked is PRESERVED by B8 (the Phase 9 suite pins the same
+    # behavior end-to-end through the daily tick; this is the direct gate check).
+    acc_id = env["store"].find_by_email(OWNER)["id"]
+    _subscribe(acc_id, "basic",
+               period_end=datetime.utcnow() - timedelta(days=10))  # past grace
+    _set_balance(env["store"], OWNER, 100.0)  # leftover ¥ must not unlock
+    client = _client_for(env["store"], OWNER)
+    resp = client.post("/api/run", data={"goal": "做个经营周报"})
+    assert resp.status_code == 402
+    assert "订阅已逾期" in resp.get_json()["error"]
+
+
+def test_import_start_no_longer_blocked_by_subscriber_zero_balance(env, monkeypatch):
+    acc_id = env["store"].find_by_email(OWNER)["id"]
+    _subscribe(acc_id, "basic")
+    _set_balance(env["store"], OWNER, 0)
+    monkeypatch.setattr(app, "ModelRouter",
+                        lambda **kw: _StaticLLM("[]"))  # no real provider call
+    client = _client_for(env["store"], OWNER)
+    resp = client.post(
+        "/api/company-brain/import",
+        data={"files": [(io.BytesIO(b"date,sales\n2026-01-01,5\n"), "q1.csv")]},
+        content_type="multipart/form-data")
+    assert resp.status_code == 200   # used to be 402 "余额不足，请先充值"
+    assert resp.get_json()["job_id"]
+
+
+def test_v1_gateway_stays_balance_gated(env):
+    # The founder/API storefront path is deliberately UNCHANGED by B8: accessed
+    # by key (not subscription), it still refuses a spent balance with 402 —
+    # even when the same account holds an active subscription.
+    out = env["store"].create_customer([config.HAIKU], name="Api",
+                                       starting_balance=0.0,
+                                       email="api@corp.com", password="password1")
+    _subscribe(env["store"].find_by_email("api@corp.com")["id"], "pro")
+    client = app.app.test_client()
+    resp = client.post("/v1/chat/completions",
+                       headers={"Authorization": "Bearer %s" % out["api_key"]},
+                       json={"model": config.HAIKU,
+                             "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 402
+    assert resp.get_json()["error"]["code"] == "insufficient_balance"
+
+
 def test_budget_cny_write_is_founder_only(env, monkeypatch):
     acc_id = env["store"].find_by_email(OWNER)["id"]
     _subscribe(acc_id, "pro")  # scheduling is 企业版-only (D3)

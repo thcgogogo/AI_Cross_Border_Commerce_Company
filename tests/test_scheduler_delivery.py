@@ -9,13 +9,15 @@ Run from the project root:
 
 These mirror the four acceptance tests from the Phase 5 spec, verbatim:
 
-  (a) a scheduled job (cron "*/2 * * * *") with an uploaded file and a funded
-      account RUNS through the same billing path as an interactive run — a PDF is
-      produced, the balance drops, and an email delivery row is recorded (the
-      email is actually received by a local aiosmtpd debug server);
+  (a) a scheduled job (cron "*/2 * * * *") with an uploaded file RUNS through
+      the same billing path as an interactive run — a PDF is produced, the cost
+      is metered (B8: a subscriber's balance stays untouched), and an email
+      delivery row is recorded (the email is actually received by a local
+      aiosmtpd debug server);
   (b) the rendered PDF embeds the bundled CJK font (so Chinese renders, not tofu);
-  (c) a ¥0 account does NOT run — no run row is created and a "余额不足" notice is
-      logged as a skipped delivery for the audit;
+  (c) B8 (Phase 7, deliberate inversion): a ¥0 SUBSCRIBER still runs — the flat
+      plan is quota-gated, never balance-gated; (c2) an exhausted plan quota
+      skips the fire with last_status "skipped_plan_limit";
   (d) a logged-in account fetching ANOTHER account's report URL gets 403.
 
 Every DB-touching test runs against its OWN throwaway SQLite file and redirects
@@ -40,7 +42,6 @@ import app  # noqa: E402 — module-level boot (db.init_db + migrate) is one-tim
 from agent_team import (  # noqa: E402
     config,
     db,
-    delivery,
     metrics_store,
     orchestrator,
     pdf_report,
@@ -48,7 +49,6 @@ from agent_team import (  # noqa: E402
 from agent_team.customers import CustomerStore  # noqa: E402
 from agent_team.models import (  # noqa: E402
     DELIVERY_SENT,
-    DELIVERY_SKIPPED,
     RUN_SUCCEEDED,
     SOURCE_LATEST_UPLOAD,
 )
@@ -228,10 +228,12 @@ def test_scheduled_job_runs_produces_pdf_bills_and_delivers(
         assert os.path.isfile(pdf_path)
         assert os.path.getsize(pdf_path) > 0
 
-        # The account was billed through the real path: balance dropped, stayed +.
-        new_balance = store.get_by_id(cust_id)["balance"]
-        assert new_balance < start_balance
-        assert new_balance > 0
+        # B8 (redesign Phase 7) — deliberately updated: this account is a PRO
+        # SUBSCRIBER, so the flat plan means its invisible ¥ balance is never
+        # decremented; cost is still fully metered (spent_yuan) for COGS.
+        acct = store.get_by_id(cust_id)
+        assert acct["balance"] == start_balance
+        assert acct["spent"] > 0
 
         # An email delivery row was recorded with SENT status...
         deliveries = metrics_store.list_deliveries(company_id=cid)
@@ -275,17 +277,20 @@ def test_pdf_embeds_cjk_font(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# (c) A ¥0 account does NOT run — no run row, and a "余额不足" skip is logged.
+# (c) DELIBERATELY INVERTED by B8 (redesign Phase 7): a ¥0 SUBSCRIBER now RUNS.
+#     This test used to assert the opposite ("a ¥0 account does NOT run") —
+#     which is precisely the bug B8 fixes: a ¥599/月 customer's Monday report
+#     was skipped because an invisible demo credit ran out. Subscribers are
+#     quota-gated; the skip path now belongs to an exhausted plan quota.
 # ---------------------------------------------------------------------------
-def test_zero_balance_skips_run_and_logs_notice(
+def test_zero_balance_subscriber_still_runs(
         fresh_db, tmp_storage, tmp_path, monkeypatch):
     cid = metrics_store.get_or_create_company("broke@corp.com", company_name="BrokeCo")
 
     store = _fund_account(tmp_path / "customers.json", "broke@corp.com", 0.0)
-    _subscribe_pro(store.find_by_email("broke@corp.com")["id"])  # D3 gate first
+    _subscribe_pro(store.find_by_email("broke@corp.com")["id"])
     monkeypatch.setattr(app, "CUSTOMERS", store)
-    # No SMTP configured → the best-effort notice send is a no-op; the audit row
-    # (a skipped delivery carrying the 余额不足 reason) is what we assert.
+    monkeypatch.setattr(orchestrator, "ModelRouter", _BillingChineseRouter)
     monkeypatch.delenv("SMTP_HOST", raising=False)
 
     job_id = metrics_store.create_scheduled_job(
@@ -295,18 +300,47 @@ def test_zero_balance_skips_run_and_logs_notice(
     job = metrics_store.get_scheduled_job(job_id)
     result = app._execute_scheduled_job(job)
 
+    # The fire RAN despite the ¥0 balance (flat plan), and cost was recorded.
+    assert result["ran"] is True
+    assert result["status"] == RUN_SUCCEEDED
+    assert result["run_id"]
+    acct = store.find_by_email("broke@corp.com")
+    assert acct["balance"] == 0.0   # untouched, still never negative
+    assert acct["spent"] > 0        # COGS metering intact
+
+
+# ---------------------------------------------------------------------------
+# (c2) The skip+notify pattern now guards the QUOTA: an exhausted plan quota
+#      skips the fire with its own last_status — recorded, never silent.
+# ---------------------------------------------------------------------------
+def test_quota_exhausted_subscriber_skips_run(
+        fresh_db, tmp_storage, tmp_path, monkeypatch):
+    cid = metrics_store.get_or_create_company("maxed@corp.com", company_name="MaxedCo")
+
+    store = _fund_account(tmp_path / "customers.json", "maxed@corp.com", 0.0)
+    _subscribe_pro(store.find_by_email("maxed@corp.com")["id"])
+    monkeypatch.setattr(app, "CUSTOMERS", store)
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+
+    # Exhaust the pro plan's monthly quota with already-finished report runs.
+    quota = config.plan("pro")["monthly_report_quota"]
+    for _ in range(quota):
+        rid = metrics_store.create_run(cid, "生成上周经营周报")
+        metrics_store.finish_run(rid, RUN_SUCCEEDED)
+    runs_before = quota
+
+    job_id = metrics_store.create_scheduled_job(
+        cid, "每周经营周报", "0 8 * * mon",
+        goal_template="生成上周经营周报",
+        delivery_channels=["email"])
+    job = metrics_store.get_scheduled_job(job_id)
+    result = app._execute_scheduled_job(job)
+
     assert result["ran"] is False
-    assert result["status"] == "skipped_no_balance"
+    assert result["status"] == "skipped_plan_limit"
     assert result["run_id"] is None
-
-    # The balance gate fires BEFORE a run row is opened — nothing was created.
-    assert metrics_store.list_runs(cid) == []
-
-    # A skipped delivery carrying the exact "余额不足" notice was logged.
-    deliveries = metrics_store.list_deliveries(company_id=cid)
-    assert any(d["status"] == DELIVERY_SKIPPED
-               and d["error"] == delivery.INSUFFICIENT_BALANCE_MSG
-               for d in deliveries)
+    # The gate fires BEFORE a run row is opened — nothing new was created.
+    assert metrics_store.count_runs_this_month(cid) == runs_before
 
 
 # ---------------------------------------------------------------------------
