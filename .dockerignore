@@ -1,0 +1,30 @@
+# Keep the build context (and image) lean and free of local state / secrets.
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+
+# Local secrets & developer state — provided at runtime via env / volumes instead.
+.env
+.flask_secret
+memory_store/
+data/
+outputs/
+uploads/
+backups/
+
+# Local SQLite databases must never bake into the image.
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor / OS cruft
+.DS_Store
+.idea
+.vscode
+*.swp

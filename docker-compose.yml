@@ -1,0 +1,96 @@
+# Production stack (Phase 7): nginx → app (gunicorn) + scheduler worker + Postgres.
+#
+# All configuration comes from .env (copy .env.example → .env, fill it in). Compose
+# reads ./.env for ${VAR} substitution here, and `env_file: .env` injects the same
+# values into the app/scheduler containers. Bring it all up with:
+#
+#     docker compose up -d --build
+#
+# Then open http://<server-ip>/  (nginx publishes port ${HTTP_PORT:-80}).
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-company}
+      POSTGRES_USER: ${POSTGRES_USER:-company}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-company} -d ${POSTGRES_DB:-company}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # DATABASE_URL is composed from the POSTGRES_* vars (single source of truth,
+      # so changing POSTGRES_PASSWORD can't drift from the app's connection string)
+      # and points at the `postgres` service. To target an external/managed Postgres
+      # instead, set DATABASE_URL in this service's environment.
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-company}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-company}
+      # The app container is the SINGLE migrator; the scheduler must not race it.
+      RUN_MIGRATIONS: "1"
+      # gunicorn never hits app.py's __main__, so the in-process scheduler is off
+      # structurally — this is belt-and-suspenders for the `python app.py` path.
+      RUN_SCHEDULER: "0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - appdata:/app/data           # Postgres in prod, but logos/PDFs live here
+      - outputs:/app/outputs        # generated report files
+      - memory:/app/memory_store    # tokens.json, model overrides, flask secret
+      - backups:/app/backups        # pg_dump archives (shared with backup.sh)
+    expose:
+      - "8000"
+    healthcheck:
+      # Healthy ONLY when /healthz returns 200 (DB reachable). urlopen raises on a
+      # 503, which exits non-zero — exactly the semantics we want.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  scheduler:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-company}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-company}
+      RUN_MIGRATIONS: "0"           # never race the app's `alembic upgrade head`
+    command: ["python", "scheduler.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      app:
+        condition: service_started
+    volumes:
+      - appdata:/app/data
+      - outputs:/app/outputs
+      - memory:/app/memory_store
+      - backups:/app/backups
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  pgdata:
+  appdata:
+  outputs:
+  memory:
+  backups:

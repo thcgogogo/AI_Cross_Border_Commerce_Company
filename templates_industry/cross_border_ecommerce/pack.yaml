@@ -1,0 +1,51 @@
+# 跨境电商 — vertical template pack (Moat 2).
+# This file is CONTENT, not code: edit it freely and the next run picks it up
+# (packs are re-read from disk on every run — no app restart needed).
+display_name_cn: "跨境电商"
+
+# The KPIs a weekly cross-border e-commerce report should cover. These are merged
+# into the Data Analyst's KPI-mapping instructions (alongside the company's own
+# column aliases from the 企业大脑 page).
+required_kpis:
+  - {name: "total_sales",            name_cn: "总销售额",          unit: "CNY"}
+  - {name: "order_count",            name_cn: "订单量",            unit: "单"}
+  - {name: "average_order_value",    name_cn: "客单价",            unit: "CNY"}
+  - {name: "refund_rate",            name_cn: "退款率",            unit: "%"}
+  - {name: "platform_fee_ratio",     name_cn: "平台费用占比",      unit: "%"}
+  - {name: "ad_cost_ratio",          name_cn: "广告费占比(ACOS/TACOS)", unit: "%"}
+  - {name: "gross_margin",           name_cn: "毛利率",            unit: "%"}
+  - {name: "inventory_turnover_days", name_cn: "库存周转天数",     unit: "天"}
+  - {name: "fx_impact",              name_cn: "汇率影响",          unit: "CNY"}
+
+# Conservative industry reference ranges. ALWAYS labelled 行业经验值，仅供参考 —
+# never presented as the company's own data (the injector enforces this wording).
+benchmarks:
+  - {metric: "退款率",            range_text_cn: "多数品类3%-8%区间",                source_note: "行业经验值，仅供参考"}
+  - {metric: "广告费占比(ACOS)",  range_text_cn: "多数品类10%-25%区间",              source_note: "行业经验值，仅供参考"}
+  - {metric: "毛利率",            range_text_cn: "铺货模式15%-35%，精品模式可达40%以上", source_note: "行业经验值，仅供参考"}
+  - {metric: "平台费用占比",      range_text_cn: "主流平台8%-15%区间(不含广告)",      source_note: "行业经验值，仅供参考"}
+  - {metric: "库存周转天数",      range_text_cn: "健康水平多在45-90天，>120天需警惕滞销", source_note: "行业经验值，仅供参考"}
+
+# The mandatory section order handed to the Report Writer (exact titles, in order).
+report_skeleton_cn:
+  - "本周核心结论"
+  - "销售与订单"
+  - "费用与利润"
+  - "退款与售后"
+  - "与历史对比"
+  - "风险与异常"
+  - "下周建议行动"
+
+# Appended to the Data Analyst's system prompt.
+analyst_extra_prompt: >-
+  分析跨境电商数据时：(1) 当数据列允许时，按销售平台（Amazon / Temu / Shein / 独立站）分别拆分各项指标，
+  并指出各平台的销售占比与差异；(2) 主动计算并核对关键费用比率：平台费用占比 = 平台费用 / 总销售额，
+  ACOS = 广告花费 / 广告带来的销售额，TACOS = 广告花费 / 总销售额，毛利率 = 毛利 / 总销售额；
+  (3) 重点关注退款率、客单价、库存周转天数的环比变化与异常。所有比率请同时给出分子、分母与百分比，便于人工复核。
+
+# Appended to the Report Writer's system prompt.
+writer_extra_prompt: >-
+  撰写报告时使用简洁、专业的商务汇报体：(1) 数字优先 —— 先给结论与关键数字，再给简要说明；
+  (2) 不写空洞的赞美或套话，每一个判断都必须对应一个具体数字或数据来源；
+  (3) 涉及行业基准时，必须标注「行业经验值，仅供参考」，不得当作公司自身数据；
+  (4) 全文结尾给出恰好 3 条可执行的「下周建议行动」，每条都须指向具体指标或动作。

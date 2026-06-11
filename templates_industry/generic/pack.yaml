@@ -1,0 +1,25 @@
+# 通用 — the neutral fallback pack (current behavior).
+# Used when a company has no industry set, or picks "自动 / 通用". It carries a
+# neutral report skeleton and NO industry-specific KPIs, benchmarks, or extra
+# prompts — so a run behaves exactly as it did before the vertical packs existed.
+display_name_cn: "通用 / 综合"
+
+# Neutral: no industry-mandated KPIs (the company's own KPI mappings from the
+# 企业大脑 page still apply).
+required_kpis: []
+
+# Neutral: no industry benchmarks to compare against.
+benchmarks: []
+
+# A neutral, general-purpose report structure.
+report_skeleton_cn:
+  - "核心结论"
+  - "关键指标"
+  - "分析与发现"
+  - "与历史对比"
+  - "风险与异常"
+  - "建议行动"
+
+# Neutral: nothing extra appended to the agents' prompts.
+analyst_extra_prompt: ""
+writer_extra_prompt: ""

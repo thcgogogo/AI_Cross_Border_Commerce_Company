@@ -1,0 +1,22 @@
+# Secrets — NEVER commit your real key
+.env
+
+# Uploaded files and per-job memory
+uploads/
+memory_store/
+
+# Persistent company-brain SQLite database
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

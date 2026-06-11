@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>统一智能体中转站 · Unified Agent Gateway</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ===================================================================
+       TOP BAR — menu button (upper-LEFT) + account widget (upper-RIGHT).
+       The account widget is filled by app.js: logged-out shows Log in +
+       Sign up; logged-in shows the name, Dashboard, and Log out.
+       =================================================================== -->
+  <header class="topbar">
+    <button class="menu-btn" id="menuBtn" aria-label="Open menu" aria-expanded="false">
+      <span class="menu-icon"></span><span>Menu</span><span id="menuBtnDot" class="menu-dot" hidden></span>
+    </button>
+    <div class="account" id="account"></div>
+  </header>
+
+  <!-- ===================================================================
+       HOME — the hero. Big bold title + two actions. No chat / document
+       box here anymore; the task form moved into the "Chat bot" menu tab.
+       =================================================================== -->
+  <main class="layout">
+    <section class="hero" id="hero">
+      <div class="hero-glow" aria-hidden="true"></div>
+      <h1 class="hero-title">统一智能体中转站</h1>
+      <p class="hero-sub">One API key for every model. Pick the models you need and call them all
+        through a single OpenAI-compatible endpoint — your own unified model gateway.</p>
+      <div class="hero-actions">
+        <button class="hero-btn primary" id="heroGetKey" type="button">Get API Key</button>
+        <button class="hero-btn" id="heroExplore" type="button">Explore Models and Pricing</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">Built with the Anthropic Claude API · Runs locally on your machine</footer>
+
+  <!-- ===================================================================
+       SLIDE-OUT SIDE MENU — workspaces. "Chat bot" (the task form) now
+       lives here as the first tab. To add a future workspace, copy a
+       <button class="menu-rect"> block and add a matching render fn in app.js.
+       =================================================================== -->
+  <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
+  <aside id="sideDrawer" class="drawer" aria-hidden="true">
+    <div class="drawer-header">
+      <h2>Menu</h2>
+      <button id="drawerClose" class="drawer-close" aria-label="Close menu">&times;</button>
+    </div>
+    <div class="drawer-body">
+      <p class="menu-lead">Open a workspace</p>
+      <div class="menu-rects">
+        <button class="menu-rect" data-view="chatbot" type="button">
+          <span class="menu-rect-main">
+            <span class="menu-rect-num">1</span>
+            <span class="menu-rect-text">
+              <span class="menu-rect-title">Chat bot</span>
+              <span class="menu-rect-sub">Give the agent team a job &amp; attach your files</span>
+            </span>
+          </span>
+          <span class="menu-rect-arrow" aria-hidden="true">&rarr;</span>
+        </button>
+        <button class="menu-rect" data-view="fusion" type="button">
+          <span class="menu-rect-main">
+            <span class="menu-rect-num">2</span>
+            <span class="menu-rect-text">
+              <span class="menu-rect-title">Fusion</span>
+              <span class="menu-rect-sub">Run one prompt across many models &amp; fuse the single best, fact-checked answer</span>
+            </span>
+          </span>
+          <span class="menu-rect-arrow" aria-hidden="true">&rarr;</span>
+        </button>
+        <button class="menu-rect" data-view="team" type="button">
+          <span class="menu-rect-main">
+            <span class="menu-rect-num">3</span>
+            <span class="menu-rect-text">
+              <span class="menu-rect-title">Your Team</span>
+              <span class="menu-rect-sub">The specialists, their models &amp; the CFO budget</span>
+            </span>
+          </span>
+          <span class="menu-rect-arrow" aria-hidden="true">&rarr;</span>
+        </button>
+        <button class="menu-rect" data-view="models" type="button">
+          <span class="menu-rect-main">
+            <span class="menu-rect-num">4</span>
+            <span class="menu-rect-text">
+              <span class="menu-rect-title">Models &amp; Pricing</span>
+              <span class="menu-rect-sub">Every model the team can run on, across 11 providers &amp; what they cost</span>
+            </span>
+          </span>
+          <span class="menu-rect-arrow" aria-hidden="true">&rarr;</span>
+        </button>
+        <button class="menu-rect" data-view="unified" type="button">
+          <span class="menu-rect-main">
+            <span class="menu-rect-num">5</span>
+            <span class="menu-rect-text">
+              <span class="menu-rect-title">Get Unified API</span>
+              <span class="menu-rect-sub">Bundle any models into one API key &amp; track usage in your dashboard</span>
+            </span>
+          </span>
+          <span class="menu-rect-arrow" aria-hidden="true">&rarr;</span>
+        </button>
+        <button class="menu-rect" data-view="brain" id="menuRectBrain" type="button" hidden>
+          <span class="menu-rect-main">
+            <span class="menu-rect-num">6</span>
+            <span class="menu-rect-text">
+              <span class="menu-rect-title">企业大脑</span>
+              <span class="menu-rect-sub">公司档案、指标定义、术语表与报告偏好 — 团队的长期记忆</span>
+            </span>
+          </span>
+          <span class="menu-rect-arrow" aria-hidden="true">&rarr;</span>
+        </button>
+        <button class="menu-rect" data-action="onboarding" id="menuRectOnboard" type="button" hidden>
+          <span class="menu-rect-main">
+            <span class="menu-rect-num">★</span>
+            <span class="menu-rect-text">
+              <span class="menu-rect-title">新手引导</span>
+              <span class="menu-rect-sub">5 步生成第一份经营周报 — 可跳过、可随时回来继续</span>
+            </span>
+          </span>
+          <span class="menu-rect-arrow" aria-hidden="true">&rarr;</span>
+        </button>
+      </div>
+      <!-- Server-rendered pages (help docs + changelog). The 新功能 badge shows
+           while the newest CHANGELOG entry is unseen by this account. -->
+      <div class="menu-links">
+        <a href="/help">帮助中心</a>
+        <a href="/changelog" id="menuChangelogLink">更新日志
+          <span id="menuChangelogBadge" class="menu-badge" hidden>新功能</span></a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===================================================================
+       DETAIL WINDOW — full-screen view with Back/Forward + a tab switcher.
+       =================================================================== -->
+  <div id="detailView" class="detail-view" aria-hidden="true">
+    <div class="detail-bar">
+      <div class="detail-nav">
+        <button id="detailBack" class="detail-nav-btn" title="Back" aria-label="Back" disabled>&lsaquo;</button>
+        <button id="detailForward" class="detail-nav-btn" title="Forward" aria-label="Forward" disabled>&rsaquo;</button>
+      </div>
+      <div class="detail-tabs">
+        <button class="detail-tab" data-view="chatbot">Chat bot</button>
+        <button class="detail-tab" data-view="fusion">Fusion</button>
+        <button class="detail-tab" data-view="team">Your Team</button>
+        <button class="detail-tab" data-view="models">Models &amp; Pricing</button>
+        <button class="detail-tab" data-view="unified">Get Unified API</button>
+        <button class="detail-tab" data-view="brain" id="detailTabBrain" hidden>企业大脑</button>
+      </div>
+      <button id="detailClose" class="detail-close" title="Close (Esc)" aria-label="Close">&times;</button>
+    </div>
+    <div id="detailBody" class="detail-body"></div>
+  </div>
+
+  <!-- ===================================================================
+       SIGN-UP — a brand-new full-screen page to create your own account.
+       Body (fields + model picker) is rendered by app.js.
+       =================================================================== -->
+  <div id="signupView" class="signup-view" aria-hidden="true">
+    <div class="signup-bar">
+      <span class="signup-brand">统一智能体中转站</span>
+      <button id="signupClose" class="detail-close" title="Close (Esc)" aria-label="Close">&times;</button>
+    </div>
+    <div id="signupBody" class="signup-body"></div>
+  </div>
+
+  <!-- ===================================================================
+       ONBOARDING WIZARD — full-screen, 5 steps, skippable & resumable.
+       Body + step pills are rendered by app.js (renderOnboard).
+       =================================================================== -->
+  <div id="onboardView" class="onboard-view" aria-hidden="true">
+    <div class="onboard-bar">
+      <span class="onboard-brand">新手引导</span>
+      <div class="ob-steps" id="obSteps"></div>
+      <button id="onboardClose" class="detail-close" title="稍后再说" aria-label="Close">&times;</button>
+    </div>
+    <div id="onboardBody" class="onboard-body"></div>
+  </div>
+
+  <!-- ===================================================================
+       FLOATING SUPPORT — 联系支持: 企业微信 QR + mailto + a message form
+       that logs to /api/support. Content is filled by app.js (needs META).
+       =================================================================== -->
+  <button class="support-fab" id="supportFab" type="button" hidden>💬 联系支持</button>
+  <div class="support-pop" id="supportPop"></div>
+
+  <!-- ===================================================================
+       LOG IN — a small modal opened from the top-right account widget.
+       =================================================================== -->
+  <div id="loginModal" class="modal" aria-hidden="true" hidden>
+    <div class="modal-backdrop" id="loginBackdrop"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Log in">
+      <div class="modal-head">
+        <h2>Log in</h2>
+        <button id="loginClose" class="drawer-close" aria-label="Close">&times;</button>
+      </div>
+      <form id="loginForm" autocomplete="on">
+        <label class="field-label" for="loginEmail">Email</label>
+        <input class="modal-input" type="email" id="loginEmail" placeholder="you@company.com" autocomplete="email" />
+        <label class="field-label" for="loginPassword">Password</label>
+        <input class="modal-input" type="password" id="loginPassword" placeholder="Your password" autocomplete="current-password" />
+        <p id="loginError" class="form-error" hidden></p>
+        <button type="submit" class="run-btn" id="loginSubmit">Log in</button>
+      </form>
+      <p class="modal-foot"><button type="button" class="link-btn" id="loginToReset">Forgot your password?</button></p>
+      <p class="modal-foot">New here? <button type="button" class="link-btn" id="loginToSignup">Create an account</button></p>
+    </div>
+  </div>
+
+  <!-- ===================================================================
+       RESET PASSWORD — a small modal opened from the login modal. Resets
+       the password using an SMS code (phone or the email on the account).
+       =================================================================== -->
+  <div id="resetModal" class="modal" aria-hidden="true" hidden>
+    <div class="modal-backdrop" id="resetBackdrop"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Reset password">
+      <div class="modal-head">
+        <h2>Reset password</h2>
+        <button id="resetClose" class="drawer-close" aria-label="Close">&times;</button>
+      </div>
+      <form id="resetForm" autocomplete="off">
+        <label class="field-label" for="resetPhone">手机号 Phone</label>
+        <input class="modal-input" type="tel" id="resetPhone" placeholder="13800000000" autocomplete="tel" />
+        <p class="modal-hint">填手机号，或下方填账户邮箱 — 验证码将发送至账户绑定的手机。</p>
+        <label class="field-label" for="resetEmail">邮箱 Email <span class="field-optional">(可选)</span></label>
+        <input class="modal-input" type="email" id="resetEmail" placeholder="you@company.com" autocomplete="email" />
+        <label class="field-label" for="resetCode">验证码 SMS code</label>
+        <div class="code-row">
+          <input class="modal-input code-input" type="text" id="resetCode" inputmode="numeric" maxlength="6" placeholder="6-digit code" autocomplete="one-time-code" />
+          <button type="button" class="code-btn" id="resetSendCode">发送验证码</button>
+        </div>
+        <label class="field-label" for="resetPassword">新密码 New password</label>
+        <input class="modal-input" type="password" id="resetPassword" placeholder="At least 8 characters" autocomplete="new-password" />
+        <p id="resetMsg" class="form-ok" hidden></p>
+        <p id="resetError" class="form-error" hidden></p>
+        <button type="submit" class="run-btn" id="resetSubmit">Reset password</button>
+      </form>
+      <p class="modal-foot">Remembered it? <button type="button" class="link-btn" id="resetToLogin">Back to log in</button></p>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

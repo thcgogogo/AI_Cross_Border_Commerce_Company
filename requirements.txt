@@ -1,0 +1,47 @@
+# Core: Claude API
+anthropic>=0.40.0
+
+# Web server
+flask>=2.2.0
+werkzeug>=2.2.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Persistent per-account "company brain" memory (SQLite via SQLAlchemy ORM).
+# Pinned <3 so the version-agnostic classic-declarative models run on 1.4 too.
+SQLAlchemy>=1.4,<3
+
+# Vertical template packs (industry prompt packs read from templates_industry/*.yaml)
+PyYAML>=6.0
+
+# File parsing
+pypdf>=4.0.0          # PDF files
+python-docx>=1.1.0    # Word .docx files (also used to WRITE .docx deliverables)
+openpyxl>=3.1.0       # Excel .xlsx files
+pandas>=2.0.0         # Spreadsheets / CSV analysis
+
+# File generation (the Creative & Media Producer's real deliverables)
+python-pptx>=0.6.23   # writes real PowerPoint .pptx decks
+reportlab>=4.0.0      # writes real .pdf documents (branded weekly reports, CJK font embedded)
+
+# Scheduled runs ("定时任务") — the product shows up on its own cadence
+APScheduler>=3.10.0   # BackgroundScheduler drives cron-style weekly/monthly runs
+
+# Email delivery test harness (a local debug SMTP server; not used in production send)
+aiosmtpd>=1.4.0       # only the acceptance test binds it; real send uses stdlib smtplib
+
+# ---------------------------------------------------------------------------
+# Production deployment (Phase 7) — see docs/ops.md
+# ---------------------------------------------------------------------------
+alembic>=1.13.0          # database migrations (`alembic upgrade head` owns the Postgres schema)
+psycopg2-binary>=2.9.0   # PostgreSQL driver (the prod DATABASE_URL; SQLite needs nothing)
+gunicorn>=21.2.0         # production WSGI server (the app container's entrypoint)
+sentry-sdk[flask]>=1.40.0  # optional error tracking; stays dormant unless SENTRY_DSN is set
+
+# ---------------------------------------------------------------------------
+# Security & abuse hardening (Phase 8) — see docs/ops.md §7
+# ---------------------------------------------------------------------------
+cryptography>=42.0.0     # Fernet encryption of uploaded files + report PDFs at rest
+flask-limiter>=3.5.0     # rate limiting (auth per-IP, run-start per-account); memory or redis storage
+bcrypt>=4.1.0            # password hashing (replaces the legacy werkzeug hash; migrates on next login)

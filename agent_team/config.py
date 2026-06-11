@@ -1,0 +1,947 @@
+"""
+config.py — The "org chart" for your AI company.
+
+This is the ONE file you edit to add, remove, or re-tune agents.
+Each agent is just a dictionary. To add a new employee to the team,
+copy an existing entry, give it a new `id`, write its `system_prompt`,
+and say who it `reports_to`. That's it — the rest of the framework
+picks it up automatically.
+"""
+
+import os
+
+# ---------------------------------------------------------------------------
+# MODELS
+# ---------------------------------------------------------------------------
+# Exact model IDs (do NOT add date suffixes).
+#   - OPUS   = smartest, best for planning & final writing (most expensive)
+#   - SONNET = great balance of speed, cost, and quality
+#   - HAIKU  = cheapest & fastest, good for simple high-volume work
+OPUS = "claude-opus-4-7"
+SONNET = "claude-sonnet-4-6"
+HAIKU = "claude-haiku-4-5"
+
+# Which models support "adaptive thinking" + the "effort" dial.
+# The LLM wrapper uses this so switching a worker to HAIKU never crashes. These are
+# Anthropic-only features, so the set lists only Claude model ids — other providers
+# go through the OpenAI-compatible adapter, which never sends these parameters.
+MODELS_WITH_ADAPTIVE_THINKING = {OPUS, SONNET, "claude-opus-4-6"}
+MODELS_WITH_EFFORT = {OPUS, SONNET, "claude-opus-4-6", "claude-opus-4-5"}
+
+# ---------------------------------------------------------------------------
+# PROVIDERS — where each model actually runs
+# ---------------------------------------------------------------------------
+# The team is multi-provider. Claude models run on the OFFICIAL Anthropic SDK (the
+# app's native, fully-working path). Every other provider below speaks the
+# OpenAI-compatible Chat Completions API, so ONE adapter (agent_team/providers.py)
+# reaches all of them — you just point it at the right base_url with the right key.
+#
+# Each provider reads its key from an environment variable (put them in .env). Until
+# a provider's key is present the models still appear in the catalog/store, but a run
+# or gateway call that needs them returns a clear "add PROVIDER_API_KEY" message —
+# nothing is faked. Base URLs/keys are best-effort public values; confirm each against
+# the provider's docs when you add its key.
+PROVIDERS = {
+    "anthropic": {"label": "Anthropic", "sdk": "anthropic",
+                  "env_key": "ANTHROPIC_API_KEY", "base_url": None},
+    "openai":    {"label": "OpenAI", "sdk": "openai_compatible",
+                  "env_key": "OPENAI_API_KEY", "base_url": "https://api.openai.com/v1"},
+    "google":    {"label": "Google", "sdk": "openai_compatible",
+                  "env_key": "GEMINI_API_KEY",
+                  "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
+    "xai":       {"label": "xAI", "sdk": "openai_compatible",
+                  "env_key": "XAI_API_KEY", "base_url": "https://api.x.ai/v1"},
+    "deepseek":  {"label": "DeepSeek", "sdk": "openai_compatible",
+                  "env_key": "DEEPSEEK_API_KEY", "base_url": "https://api.deepseek.com"},
+    "qwen":      {"label": "Alibaba Qwen", "sdk": "openai_compatible",
+                  "env_key": "DASHSCOPE_API_KEY",
+                  "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"},
+    "minimax":   {"label": "MiniMax", "sdk": "openai_compatible",
+                  "env_key": "MINIMAX_API_KEY", "base_url": "https://api.minimax.chat/v1"},
+    "moonshot":  {"label": "Moonshot · Kimi", "sdk": "openai_compatible",
+                  "env_key": "MOONSHOT_API_KEY", "base_url": "https://api.moonshot.ai/v1"},
+    "tencent":   {"label": "Tencent · Hunyuan", "sdk": "openai_compatible",
+                  "env_key": "HUNYUAN_API_KEY",
+                  "base_url": "https://api.hunyuan.cloud.tencent.com/v1"},
+    "xiaomi":    {"label": "Xiaomi · MiMo", "sdk": "openai_compatible",
+                  "env_key": "XIAOMI_API_KEY", "base_url": "https://api-mimo.xiaomi.com/v1"},
+    "bytedance": {"label": "ByteDance · Seedream", "sdk": "openai_compatible",
+                  "env_key": "ARK_API_KEY",
+                  "base_url": "https://ark.cn-beijing.volces.com/api/v3"},
+}
+
+# ---------------------------------------------------------------------------
+# MONEY — catalog prices are in US$ (how providers publish them), but the WHOLE
+# app shows money to customers in Chinese Yuan (¥). We convert at one rate.
+# ---------------------------------------------------------------------------
+# US$ -> ¥ conversion. One knob: change it and every ¥ figure in the app follows
+# (budgets, balances, per-call charges, the Token Manager, the Models page).
+USD_TO_CNY = 7.2
+CURRENCY = "CNY"
+CURRENCY_SYMBOL = "¥"
+
+# A new account's starting demo credit, in ¥. Generous on purpose so a customer
+# can run the team / Fusion a few times and watch their balance draw down.
+START_BALANCE_CNY = 200.0
+
+
+def usd_to_cny(usd):
+    """Convert a US$ amount to ¥ at the app's single configured rate."""
+    return float(usd or 0.0) * USD_TO_CNY
+
+
+def cost_usd(model_id, input_tokens, output_tokens):
+    """US$ cost of a text call from the catalog's per-million-token pricing."""
+    row = get_model(model_id) or {}
+    in_rate = float(row.get("input_per_mtok", 0.0) or 0.0)
+    out_rate = float(row.get("output_per_mtok", 0.0) or 0.0)
+    return (int(input_tokens or 0) / 1_000_000.0) * in_rate \
+        + (int(output_tokens or 0) / 1_000_000.0) * out_rate
+
+
+def cost_cny(model_id, input_tokens, output_tokens):
+    """¥ cost of a text call — what the app actually bills to budgets/balances."""
+    return usd_to_cny(cost_usd(model_id, input_tokens, output_tokens))
+
+
+# ---------------------------------------------------------------------------
+# DEPLOYMENT / RUNTIME (Phase 7) — the single place env-driven infra knobs live
+# ---------------------------------------------------------------------------
+# These read the process environment (populated from .env via app.py's load_dotenv,
+# or injected by docker-compose / the host). They stay DORMANT in local dev: with
+# nothing set the app keeps its zero-config SQLite + dev-secret behaviour. Set them
+# in staging/prod (see .env.example's DEPLOYMENT block + docs/ops.md).
+#
+# Nothing here is a secret value — these are accessors. Secrets themselves are only
+# ever read from the environment, never written to disk or logs.
+
+# Treat these strings as "yes" for boolean-style env flags.
+_TRUE = ("1", "true", "yes", "on")
+
+
+def _env(name):
+    """A stripped env var, or "" if unset/blank."""
+    return (os.environ.get(name) or "").strip()
+
+
+def database_url():
+    """The SQLAlchemy URL for the company-brain DB, or None to use the local
+    SQLite default (db.py falls back when this is None). Set DATABASE_URL to a
+    postgresql://… URL in staging/prod. Example:
+        postgresql+psycopg2://user:pass@postgres:5432/company_brain"""
+    return _env("DATABASE_URL") or None
+
+
+def app_env():
+    """The deployment environment name: "development" (default), "staging", or
+    "production". Read from APP_ENV (falling back to FLASK_ENV)."""
+    return (_env("APP_ENV") or _env("FLASK_ENV") or "development").lower()
+
+
+def is_production():
+    """True only when APP_ENV/FLASK_ENV is exactly "production". Gates the
+    mandatory-SECRET_KEY check so a misconfigured prod box refuses to boot."""
+    return app_env() == "production"
+
+
+def secret_key():
+    """The Flask session secret from the environment (SECRET_KEY, then
+    FLASK_SECRET_KEY), or None. In production app.py REQUIRES one; in dev it
+    falls back to a persisted random key so logins survive a restart."""
+    return _env("SECRET_KEY") or _env("FLASK_SECRET_KEY") or None
+
+
+def sentry_dsn():
+    """The Sentry DSN, or None. When None, error reporting stays fully disabled
+    (sentry_sdk is never initialised) — nothing is sent anywhere."""
+    return _env("SENTRY_DSN") or None
+
+
+def run_scheduler_in_process():
+    """True if the 定时任务 scheduler should run INSIDE the web process. Default
+    True so `python app.py` keeps firing jobs in local dev exactly as before. In
+    the Docker stack set RUN_SCHEDULER=0 on the web service — a dedicated
+    `scheduler.py` container owns scheduling so multiple gunicorn workers can't
+    double-fire jobs."""
+    val = _env("RUN_SCHEDULER")
+    if not val:
+        return True
+    return val.lower() in _TRUE
+
+
+def backup_remote():
+    """An rclone remote path (e.g. "oss:my-bucket/db") for off-box backup upload,
+    or None. When None, scripts/backup.sh keeps backups on local disk only."""
+    return _env("BACKUP_REMOTE") or None
+
+
+# How long since the scheduler's last heartbeat before /healthz calls it stale.
+# A heartbeat is written every ~60s, so 120s tolerates one missed beat.
+HEARTBEAT_STALE_SECS = 120
+
+
+# ===========================================================================
+# SECURITY & ABUSE HARDENING (Phase 8)
+# ===========================================================================
+# China launch makes phone verification the norm and abuse of OUR upstream API
+# keys the top financial risk. Everything below is read from the environment; the
+# helpers return safe, dev-friendly defaults so local `python app.py` keeps
+# working with zero extra config (SMS prints to the console, encryption is off,
+# rate limits use in-process memory).
+
+def _env_float(name, default):
+    """A float env var, falling back to `default` when unset or unparseable."""
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name, default):
+    """An int env var, falling back to `default` when unset or unparseable."""
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# ---- Platform spend circuit breaker --------------------------------------
+# Rolling ¥ we spend on UPSTREAM provider keys. 0 (the default) disables a cap so
+# dev/tests never trip it; set a real ceiling in production to bound a runaway bill.
+def platform_hourly_cap_yuan():
+    """¥ ceiling on platform-wide upstream spend per hour (0 = no cap)."""
+    return _env_float("PLATFORM_HOURLY_CAP_YUAN", 0.0)
+
+
+def platform_daily_cap_yuan():
+    """¥ ceiling on platform-wide upstream spend per day (0 = no cap)."""
+    return _env_float("PLATFORM_DAILY_CAP_YUAN", 0.0)
+
+
+# A single account can spend at most this much ¥/day on upstream calls before its
+# new runs are refused (its own balance still applies independently). Overridable
+# per account via accounts.daily_cap_yuan. 0 disables the per-account day cap.
+ACCOUNT_DAILY_CAP_YUAN_DEFAULT = 200.0
+
+
+def account_daily_cap_yuan():
+    """Default per-account daily ¥ cap (accounts.daily_cap_yuan overrides per row)."""
+    return _env_float("ACCOUNT_DAILY_CAP_YUAN", ACCOUNT_DAILY_CAP_YUAN_DEFAULT)
+
+
+def admin_alert_webhook():
+    """A webhook URL the circuit breaker POSTs to when it trips (e.g. a 企业微信
+    群机器人), or None. The admin email list reuses ADMIN_EMAILS."""
+    return _env("ADMIN_ALERT_WEBHOOK") or None
+
+
+def admin_emails():
+    """The founder allow-list from ADMIN_EMAILS (comma/semicolon/whitespace
+    separated), lower-cased, or [] when unset. Used both to gate the admin pages
+    and to address circuit-breaker alert emails. Read fresh so .env edits apply."""
+    raw = _env("ADMIN_EMAILS")
+    if not raw:
+        return []
+    parts = raw.replace(";", ",").replace("\n", ",").split(",")
+    seen, out = set(), []
+    for p in parts:
+        e = p.strip().lower()
+        if e and e not in seen:
+            seen.add(e)
+            out.append(e)
+    return out
+
+
+# ---- Phone (SMS) verification ---------------------------------------------
+SMS_CODE_TTL_SECS = 5 * 60       # a verification code is valid for 5 minutes
+SMS_MAX_SENDS_PER_HOUR = 3       # max codes sent to one phone per rolling hour
+SMS_MAX_VERIFY_ATTEMPTS = 5      # wrong tries before a code is burned (6th fails)
+
+
+def sms_provider_name():
+    """Which SmsProvider to use: explicit SMS_PROVIDER, else "aliyun" when Aliyun
+    keys are present, else "console" (prints the code — the dev/test default)."""
+    explicit = _env("SMS_PROVIDER").lower()
+    if explicit:
+        return explicit
+    if _env("ALIYUN_SMS_ACCESS_KEY_ID") and _env("ALIYUN_SMS_ACCESS_KEY_SECRET"):
+        return "aliyun"
+    return "console"
+
+
+def aliyun_sms_settings():
+    """Aliyun SMS credentials/template from env (used by AliyunSmsProvider)."""
+    return {
+        "access_key_id": _env("ALIYUN_SMS_ACCESS_KEY_ID"),
+        "access_key_secret": _env("ALIYUN_SMS_ACCESS_KEY_SECRET"),
+        "sign_name": _env("ALIYUN_SMS_SIGN_NAME"),
+        "template_code": _env("ALIYUN_SMS_TEMPLATE_CODE"),
+        "region": _env("ALIYUN_SMS_REGION") or "cn-hangzhou",
+    }
+
+
+# ---- Encryption at rest (Fernet) ------------------------------------------
+def fernet_keys():
+    """The list of Fernet keys from FERNET_KEYS (comma-separated, newest first for
+    rotation), or [] when unset. With none set, files are stored in plaintext —
+    the zero-config local-dev default; set a key in production to encrypt at rest.
+    Generate one: python -c \"from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())\""""
+    raw = _env("FERNET_KEYS") or _env("FERNET_KEY")
+    return [k.strip() for k in raw.split(",") if k.strip()] if raw else []
+
+
+# ---- Rate limiting ---------------------------------------------------------
+def ratelimit_storage_uri():
+    """flask-limiter storage backend URI. Default in-process memory (fine for a
+    single process / local dev / tests). For multi-worker gunicorn set a shared
+    backend, e.g. redis://redis:6379. (The `limits` lib backs flask-limiter.)"""
+    return _env("RATELIMIT_STORAGE_URI") or "memory://"
+
+
+def auth_rate_limit():
+    """Per-IP limit on auth endpoints (login/signup/send-code/reset)."""
+    return _env("AUTH_RATE_LIMIT") or "5 per minute"
+
+
+def run_rate_limit():
+    """Per-account limit on starting agent-team runs."""
+    return _env("RUN_RATE_LIMIT") or "10 per hour"
+
+
+def ratelimit_enabled():
+    """Rate limiting is on by default; set RATELIMIT_ENABLED=0 to disable (e.g. in
+    a test that isn't exercising it)."""
+    val = _env("RATELIMIT_ENABLED")
+    if not val:
+        return True
+    return val.lower() in _TRUE
+
+
+# Default gateway requests-per-minute for a key with no explicit accounts.rpm_limit.
+DEFAULT_KEY_RPM = 60
+
+
+# ---- Upload caps -----------------------------------------------------------
+MAX_UPLOAD_BYTES_PER_FILE = 25 * 1024 * 1024   # 25 MB per uploaded file
+MAX_UPLOAD_FILES_PER_RUN = 8                   # at most 8 files attached to one run
+
+
+def phone_verification_required():
+    """Whether signup/reset require an SMS code. On by default (China norm); the
+    code is delivered by the Console provider in dev so this stays usable locally.
+    Set PHONE_VERIFICATION=0 only for environments that truly need it off."""
+    val = _env("PHONE_VERIFICATION")
+    if not val:
+        return True
+    return val.lower() in _TRUE
+
+
+# ===========================================================================
+# PAYMENTS, SUBSCRIPTIONS & FAPIAO (Phase 9)
+# ===========================================================================
+# Real Alipay / WeChat Pay replace the demo top-up. Everything below is read from
+# the environment with dev-safe defaults: with NO provider configured, the Mock
+# provider takes over (signed local notifies, a fake cashier page), so the whole
+# money path — orders, idempotent paid-notify, subscriptions, refunds, fapiao —
+# is exercisable locally and in CI with zero config and zero real money.
+
+def app_base_url():
+    """The public base URL of this deployment (no trailing slash). Used to build
+    payment notify_url callbacks and the pay links in renewal notices."""
+    return (_env("APP_BASE_URL") or "http://127.0.0.1:8000").rstrip("/")
+
+
+# ---- Subscription plans ----------------------------------------------------
+# The plan contract the gating middleware reads. monthly_report_quota caps how
+# many agent-team reports (runs) an account may start per calendar month; seats
+# is the number of team members the plan contracts for (surfaced on the plans
+# page now; enforced when multi-user login lands). The free tier is what every
+# account has with no (or a canceled) subscription — its quota matches the
+# pre-Phase-9 demo experience so existing accounts aren't suddenly locked out.
+PLANS = {
+    "free":  {"code": "free",  "label": "免费版", "monthly_price_yuan": 0.0,
+              "monthly_report_quota": 10,  "seats": 1},
+    "basic": {"code": "basic", "label": "基础版", "monthly_price_yuan": 199.0,
+              "monthly_report_quota": 100, "seats": 3},
+    "pro":   {"code": "pro",   "label": "专业版", "monthly_price_yuan": 599.0,
+              "monthly_report_quota": 500, "seats": 10},
+}
+PURCHASABLE_PLANS = ("basic", "pro")   # what /api/pay/create accepts as plan_code
+SUBSCRIPTION_PERIOD_DAYS = 30          # one paid period = 30 days ("a month")
+
+
+def plan(code):
+    """The PLANS row for `code`, falling back to the free plan."""
+    return PLANS.get((code or "").strip().lower()) or PLANS["free"]
+
+
+def subscription_renewal_lead_days():
+    """Days BEFORE period end when the renewal order + pay-link notice go out
+    (the spec's T-3d; China flows favor user-confirmed renewal over auto-charge)."""
+    return _env_int("SUB_RENEWAL_LEAD_DAYS", 3)
+
+
+def subscription_grace_days():
+    """Days of grace AFTER period end during which features keep working."""
+    return _env_int("SUB_GRACE_DAYS", 3)
+
+
+def subscription_past_due_cancel_days():
+    """How long a subscription may sit past_due (locked) before it is canceled."""
+    return _env_int("SUB_PAST_DUE_CANCEL_DAYS", 30)
+
+
+# ---- Top-up bounds (an order's ¥ amount must fall inside these) ------------
+TOPUP_MIN_YUAN = 1.0
+TOPUP_MAX_YUAN = 50000.0
+
+
+# ---- Payment providers ------------------------------------------------------
+def alipay_settings():
+    """Alipay open-platform credentials from env, or None when not configured.
+    The two keys accept a full PEM (with literal \\n escapes) or the bare base64
+    body exactly as the Alipay console hands it out."""
+    app_id = _env("ALIPAY_APP_ID")
+    if not app_id:
+        return None
+    return {
+        "app_id": app_id,
+        "app_private_key": os.environ.get("ALIPAY_APP_PRIVATE_KEY") or "",
+        "alipay_public_key": os.environ.get("ALIPAY_PUBLIC_KEY") or "",
+        "gateway": _env("ALIPAY_GATEWAY") or "https://openapi.alipay.com/gateway.do",
+    }
+
+
+def wechatpay_settings():
+    """WeChat Pay APIv3 merchant credentials from env, or None when not configured."""
+    mchid = _env("WECHATPAY_MCHID")
+    if not mchid:
+        return None
+    return {
+        "mchid": mchid,
+        "appid": _env("WECHATPAY_APPID"),
+        "api_v3_key": os.environ.get("WECHATPAY_API_V3_KEY") or "",
+        "serial_no": _env("WECHATPAY_SERIAL_NO"),
+        "private_key": os.environ.get("WECHATPAY_PRIVATE_KEY") or "",
+        "platform_cert": os.environ.get("WECHATPAY_PLATFORM_CERT") or "",
+        "api_base": _env("WECHATPAY_API_BASE") or "https://api.mch.weixin.qq.com",
+    }
+
+
+def payment_providers_available():
+    """Names of the configured payment providers, in display order. With NONE
+    configured this returns ["mock"] — the zero-config dev/test fallback. As soon
+    as a real provider is configured, mock is NOT in the list (and its notify
+    endpoint + cashier go dead), so a known dev secret can never pay a real order."""
+    out = []
+    if alipay_settings():
+        out.append("alipay")
+    if wechatpay_settings():
+        out.append("wechat")
+    return out or ["mock"]
+
+
+def payment_mock_secret():
+    """HMAC secret signing the Mock provider's notifies (dev/test only — see
+    payment_providers_available for why the default can't reach production money)."""
+    return _env("PAYMENT_MOCK_SECRET") or "mock-pay-secret-dev"
+
+
+# ===========================================================================
+# ONBOARDING, SUPPORT & OPS DASHBOARD (Phase 10)
+# ===========================================================================
+def support_email():
+    """The mailto target of the 联系支持 button. SUPPORT_EMAIL, else the first
+    admin email, else "" (the UI then shows only the QR + message form)."""
+    explicit = _env("SUPPORT_EMAIL")
+    if explicit:
+        return explicit
+    admins = admin_emails()
+    return admins[0] if admins else ""
+
+
+def support_wechat_qr_url():
+    """An image URL for the 企业微信 support-group QR shown in the 联系支持
+    popup, or "" (the UI then shows a placeholder telling the operator to set
+    SUPPORT_WECHAT_QR_URL)."""
+    return _env("SUPPORT_WECHAT_QR_URL")
+
+
+# ---------------------------------------------------------------------------
+# MODEL FUNCTIONS — each model has a `kind` that says what it DOES.
+# ---------------------------------------------------------------------------
+# `kind` groups a model by function, which drives the tabs on the Models page and
+# the "modalities" line on each model's detail page. Only "text" models are
+# callable through the chat gateway + Fusion; the rest are catalog/storefront
+# entries priced per their own unit (`price` + `price_unit`).
+KINDS = {
+    "text":          {"label": "Text",          "input": "Text",        "output": "Text",    "unit": None,                "callable": True},
+    "image":         {"label": "Image",         "input": "Text",        "output": "Image",   "unit": "per image",         "callable": False},
+    "embedding":     {"label": "Embeddings",    "input": "Text",        "output": "Vector",  "unit": "per 1M tokens",     "callable": False},
+    "speech":        {"label": "Speech",        "input": "Text",        "output": "Audio",   "unit": "per 1M characters", "callable": False},
+    "transcription": {"label": "Transcription", "input": "Audio",       "output": "Text",    "unit": "per minute",        "callable": False},
+    "video":         {"label": "Video",         "input": "Text",        "output": "Video",   "unit": "per second",        "callable": False},
+    "rerank":        {"label": "Rerank",        "input": "Text + Docs", "output": "Ranking", "unit": "per 1M tokens",     "callable": False},
+}
+# The order the function tabs appear in on the Models page.
+KIND_ORDER = ["text", "image", "embedding", "speech", "transcription", "video", "rerank"]
+
+# The models a user may assign to any agent, OR sell through the unified-API store.
+# Add a row here and it shows up everywhere automatically (config-driven, one file).
+#
+# Fields: id (the provider's model string), label, provider (key in PROVIDERS above),
+# tier, context window, and a blurb. `approx: True` marks pricing/ids that are
+# best-effort public values — only the Anthropic rows are guaranteed exact.
+#
+# PRICING depends on the model's `kind` (see KINDS above):
+#   - "text"  chat/LLMs: priced per token, with `input_per_mtok` + `output_per_mtok`
+#             (US$ per 1,000,000 tokens). These are the ONLY models the chat gateway
+#             and Fusion can call.
+#   - every other kind (image / embedding / speech / transcription / video / rerank):
+#             priced with a single `price` (US$) + `price_unit` string (e.g.
+#             "per image", "per minute"). They appear in the catalog/store but are
+#             NOT callable through the text chat gateway.
+# Every US$ figure is shown to customers in ¥ (converted at USD_TO_CNY).
+MODEL_CHOICES = [
+    # ---- Anthropic (native path — exact pricing) ----
+    {"id": OPUS, "label": "Opus 4.7", "provider": "anthropic", "tier": "Most capable",
+     "input_per_mtok": 5.0, "output_per_mtok": 25.0, "context": "1M tokens",
+     "blurb": "Anthropic's smartest model — best for planning, hard reasoning, "
+              "and polished final writing. The default for every agent."},
+    {"id": SONNET, "label": "Sonnet 4.6", "provider": "anthropic", "tier": "Balanced",
+     "input_per_mtok": 3.0, "output_per_mtok": 15.0, "context": "1M tokens",
+     "blurb": "A strong balance of quality, speed, and cost. A great choice for "
+              "the analysts on high-volume runs."},
+    {"id": HAIKU, "label": "Haiku 4.5", "provider": "anthropic", "tier": "Fastest & cheapest",
+     "input_per_mtok": 1.0, "output_per_mtok": 5.0, "context": "200K tokens",
+     "blurb": "The quickest, most economical model — ideal for simple, "
+              "high-volume work where speed and cost matter most."},
+
+    # ---- OpenAI ----
+    {"id": "gpt-5.1", "label": "GPT-5.1", "provider": "openai", "tier": "Flagship",
+     "input_per_mtok": 1.25, "output_per_mtok": 10.0, "context": "400K tokens", "approx": True,
+     "blurb": "OpenAI's flagship — strong general reasoning, coding, and tool use."},
+    {"id": "gpt-5-mini", "label": "GPT-5 mini", "provider": "openai", "tier": "Efficient",
+     "input_per_mtok": 0.25, "output_per_mtok": 2.0, "context": "400K tokens", "approx": True,
+     "blurb": "A cheaper, faster GPT-5 for high-volume and everyday tasks."},
+    {"id": "o3", "label": "o3", "provider": "openai", "tier": "Reasoning",
+     "input_per_mtok": 2.0, "output_per_mtok": 8.0, "context": "200K tokens", "approx": True,
+     "blurb": "A deep-reasoning model for hard math, science, and logic problems."},
+
+    # ---- Google ----
+    {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro", "provider": "google", "tier": "Flagship",
+     "input_per_mtok": 1.25, "output_per_mtok": 10.0, "context": "1M tokens", "approx": True,
+     "blurb": "Google's most capable Gemini — long context and strong multimodal reasoning."},
+    {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash", "provider": "google", "tier": "Fast",
+     "input_per_mtok": 0.30, "output_per_mtok": 2.50, "context": "1M tokens", "approx": True,
+     "blurb": "A fast, low-cost Gemini for high-throughput work with a huge context window."},
+
+    # ---- xAI ----
+    {"id": "grok-4", "label": "Grok 4", "provider": "xai", "tier": "Flagship",
+     "input_per_mtok": 3.0, "output_per_mtok": 15.0, "context": "256K tokens", "approx": True,
+     "blurb": "xAI's flagship Grok — strong reasoning with real-time knowledge."},
+    {"id": "grok-3-mini", "label": "Grok 3 mini", "provider": "xai", "tier": "Efficient",
+     "input_per_mtok": 0.30, "output_per_mtok": 0.50, "context": "131K tokens", "approx": True,
+     "blurb": "A lightweight, economical Grok for everyday tasks."},
+
+    # ---- DeepSeek ----
+    {"id": "deepseek-chat", "label": "DeepSeek V3", "provider": "deepseek", "tier": "General",
+     "input_per_mtok": 0.27, "output_per_mtok": 1.10, "context": "128K tokens", "approx": True,
+     "blurb": "An open, very low-cost general model with strong coding ability."},
+    {"id": "deepseek-reasoner", "label": "DeepSeek R1", "provider": "deepseek", "tier": "Reasoning",
+     "input_per_mtok": 0.55, "output_per_mtok": 2.19, "context": "128K tokens", "approx": True,
+     "blurb": "DeepSeek's reasoning model — chain-of-thought for hard problems, cheaply."},
+
+    # ---- Alibaba Qwen ----
+    {"id": "qwen-max", "label": "Qwen Max", "provider": "qwen", "tier": "Flagship",
+     "input_per_mtok": 1.60, "output_per_mtok": 6.40, "context": "32K tokens", "approx": True,
+     "blurb": "Alibaba's most capable Qwen — strong multilingual and reasoning performance."},
+    {"id": "qwen-plus", "label": "Qwen Plus", "provider": "qwen", "tier": "Balanced",
+     "input_per_mtok": 0.40, "output_per_mtok": 1.20, "context": "131K tokens", "approx": True,
+     "blurb": "A balanced, affordable Qwen for general-purpose work."},
+
+    # ---- MiniMax ----
+    {"id": "MiniMax-Text-01", "label": "MiniMax Text-01", "provider": "minimax", "tier": "Flagship",
+     "input_per_mtok": 0.20, "output_per_mtok": 1.10, "context": "1M tokens", "approx": True,
+     "blurb": "MiniMax's flagship text model with an extremely large context window."},
+    {"id": "MiniMax-M1", "label": "MiniMax M1", "provider": "minimax", "tier": "Reasoning",
+     "input_per_mtok": 0.40, "output_per_mtok": 2.20, "context": "1M tokens", "approx": True,
+     "blurb": "MiniMax's reasoning-focused model — chain-of-thought over a very large context window."},
+
+    # ---- Moonshot · Kimi ----
+    {"id": "kimi-k2-0711-preview", "label": "Kimi K2", "provider": "moonshot", "tier": "Flagship",
+     "input_per_mtok": 0.60, "output_per_mtok": 2.50, "context": "128K tokens", "approx": True,
+     "blurb": "Moonshot's Kimi K2 — a strong long-context model popular for agentic use."},
+
+    # ---- Tencent · Hunyuan ----
+    {"id": "hunyuan-turbos-latest", "label": "Hunyuan TurboS", "provider": "tencent", "tier": "Flagship",
+     "input_per_mtok": 0.40, "output_per_mtok": 1.60, "context": "256K tokens", "approx": True,
+     "blurb": "Tencent's flagship Hunyuan TurboS — strong bilingual (Chinese/English) reasoning and chat."},
+
+    # ---- Xiaomi · MiMo ----
+    {"id": "mimo-7b-rl", "label": "Xiaomi MiMo 7B", "provider": "xiaomi", "tier": "Efficient",
+     "input_per_mtok": 0.15, "output_per_mtok": 0.60, "context": "32K tokens", "approx": True,
+     "blurb": "Xiaomi's open MiMo reasoning model — compact and fast, surprisingly strong at math & code."},
+
+    # ---- Image (text-to-image; priced per image) ----
+    # Listed in the catalog/store but run on image endpoints, so NOT callable
+    # through the text chat gateway or Fusion (kind="image").
+    {"id": "qwen-image", "label": "Qwen-Image", "provider": "qwen", "tier": "Image", "kind": "image",
+     "price": 0.02, "price_unit": "per image", "context": "—", "approx": True,
+     "blurb": "Alibaba's Qwen-Image — text-to-image generation with notably crisp in-image text rendering."},
+    {"id": "z-image-turbo", "label": "Z-Image-Turbo", "provider": "qwen", "tier": "Image", "kind": "image",
+     "price": 0.01, "price_unit": "per image", "context": "—", "approx": True,
+     "blurb": "Tongyi's Z-Image Turbo — a fast, efficient text-to-image model for quick iterations."},
+    {"id": "seedream-3-0", "label": "Seedream 3.0", "provider": "bytedance", "tier": "Image", "kind": "image",
+     "price": 0.03, "price_unit": "per image", "context": "—", "approx": True,
+     "blurb": "ByteDance's Seedream — high-resolution, bilingual text-to-image generation."},
+    {"id": "hunyuan-image", "label": "Hunyuan Image", "provider": "tencent", "tier": "Image", "kind": "image",
+     "price": 0.03, "price_unit": "per image", "context": "—", "approx": True,
+     "blurb": "Tencent's Hunyuan Image — text-to-image tuned for photoreal and design work."},
+    {"id": "janus-pro-7b", "label": "Janus Pro 7B", "provider": "deepseek", "tier": "Image", "kind": "image",
+     "price": 0.01, "price_unit": "per image", "context": "—", "approx": True,
+     "blurb": "DeepSeek's Janus-Pro — a unified multimodal model that both understands and generates images."},
+
+    # ---- Embeddings (turn text into vectors for search/RAG; per 1M input tokens) ----
+    {"id": "text-embedding-3-small", "label": "Embedding 3 Small", "provider": "openai", "tier": "Embeddings", "kind": "embedding",
+     "price": 0.02, "price_unit": "per 1M tokens", "context": "8K tokens", "approx": True,
+     "blurb": "OpenAI's compact embedding model — cheap, fast vectors for semantic search and RAG."},
+    {"id": "text-embedding-3-large", "label": "Embedding 3 Large", "provider": "openai", "tier": "Embeddings", "kind": "embedding",
+     "price": 0.13, "price_unit": "per 1M tokens", "context": "8K tokens", "approx": True,
+     "blurb": "OpenAI's highest-quality embedding model for the most accurate semantic search."},
+    {"id": "gemini-embedding-001", "label": "Gemini Embedding", "provider": "google", "tier": "Embeddings", "kind": "embedding",
+     "price": 0.15, "price_unit": "per 1M tokens", "context": "2K tokens", "approx": True,
+     "blurb": "Google's text-embedding model — strong multilingual retrieval quality."},
+    {"id": "text-embedding-v4", "label": "Qwen Embedding v4", "provider": "qwen", "tier": "Embeddings", "kind": "embedding",
+     "price": 0.07, "price_unit": "per 1M tokens", "context": "8K tokens", "approx": True,
+     "blurb": "Alibaba's Qwen text-embedding model — solid multilingual vectors at a low price."},
+
+    # ---- Speech (text-to-speech; priced per 1M characters) ----
+    {"id": "tts-1", "label": "TTS-1", "provider": "openai", "tier": "Speech", "kind": "speech",
+     "price": 15.0, "price_unit": "per 1M characters", "context": "—", "approx": True,
+     "blurb": "OpenAI's text-to-speech — natural, low-latency voices for real-time apps."},
+    {"id": "tts-1-hd", "label": "TTS-1 HD", "provider": "openai", "tier": "Speech", "kind": "speech",
+     "price": 30.0, "price_unit": "per 1M characters", "context": "—", "approx": True,
+     "blurb": "OpenAI's high-definition text-to-speech — richer, studio-quality audio."},
+    {"id": "speech-01-turbo", "label": "MiniMax Speech-01", "provider": "minimax", "tier": "Speech", "kind": "speech",
+     "price": 30.0, "price_unit": "per 1M characters", "context": "—", "approx": True,
+     "blurb": "MiniMax's text-to-speech — expressive multilingual voices with voice cloning."},
+
+    # ---- Transcription (speech-to-text; priced per minute of audio) ----
+    {"id": "whisper-1", "label": "Whisper", "provider": "openai", "tier": "Transcription", "kind": "transcription",
+     "price": 0.006, "price_unit": "per minute", "context": "—", "approx": True,
+     "blurb": "OpenAI's Whisper — robust, multilingual speech-to-text transcription."},
+    {"id": "gpt-4o-transcribe", "label": "GPT-4o Transcribe", "provider": "openai", "tier": "Transcription", "kind": "transcription",
+     "price": 0.006, "price_unit": "per minute", "context": "—", "approx": True,
+     "blurb": "OpenAI's GPT-4o speech-to-text — higher accuracy on noisy, real-world audio."},
+    {"id": "gpt-4o-mini-transcribe", "label": "GPT-4o mini Transcribe", "provider": "openai", "tier": "Transcription", "kind": "transcription",
+     "price": 0.003, "price_unit": "per minute", "context": "—", "approx": True,
+     "blurb": "A cheaper, faster GPT-4o transcription model for high-volume audio."},
+
+    # ---- Video (text/image-to-video) ----
+    {"id": "veo-3", "label": "Veo 3", "provider": "google", "tier": "Video", "kind": "video",
+     "price": 0.40, "price_unit": "per second", "context": "—", "approx": True,
+     "blurb": "Google's Veo 3 — high-fidelity text-to-video with synchronized audio."},
+    {"id": "veo-3-fast", "label": "Veo 3 Fast", "provider": "google", "tier": "Video", "kind": "video",
+     "price": 0.15, "price_unit": "per second", "context": "—", "approx": True,
+     "blurb": "A faster, cheaper Veo 3 for quick text-to-video drafts and iteration."},
+    {"id": "video-01", "label": "Hailuo Video-01", "provider": "minimax", "tier": "Video", "kind": "video",
+     "price": 0.43, "price_unit": "per video", "context": "—", "approx": True,
+     "blurb": "MiniMax's Hailuo — cinematic ~6-second text- and image-to-video clips."},
+    {"id": "seedance-1-0-pro", "label": "Seedance 1.0 Pro", "provider": "bytedance", "tier": "Video", "kind": "video",
+     "price": 0.05, "price_unit": "per second", "context": "—", "approx": True,
+     "blurb": "ByteDance's Seedance — smooth, controllable text- and image-to-video generation."},
+
+    # ---- Rerank (re-score search candidates by relevance; per 1M tokens) ----
+    {"id": "gte-rerank-v2", "label": "GTE Rerank v2", "provider": "qwen", "tier": "Rerank", "kind": "rerank",
+     "price": 0.08, "price_unit": "per 1M tokens", "context": "30K tokens", "approx": True,
+     "blurb": "Alibaba's GTE reranker — sharpens RAG results by re-scoring candidates against the query."},
+]
+_VALID_MODEL_IDS = {m["id"] for m in MODEL_CHOICES}
+
+
+def get_model(model_id):
+    """The full catalog row for a model id (or None)."""
+    for m in MODEL_CHOICES:
+        if m["id"] == model_id:
+            return m
+    return None
+
+
+def provider_for(model_id):
+    """Which PROVIDERS entry a model runs on (defaults to anthropic)."""
+    return (get_model(model_id) or {}).get("provider", "anthropic")
+
+
+def model_kind(model_id):
+    """A model's function: "text", "image", "embedding", "speech",
+    "transcription", "video", or "rerank". Defaults to "text"."""
+    return (get_model(model_id) or {}).get("kind", "text")
+
+
+def is_text_model(model_id):
+    """True for chat/LLM models — the only kind the chat gateway + Fusion serve."""
+    return model_kind(model_id) == "text"
+
+
+def is_image_model(model_id):
+    """True for text-to-image models (kept for callers that special-case images)."""
+    return model_kind(model_id) == "image"
+
+
+def kind_label(kind):
+    """The display label for a function tab (e.g. "text" -> "Text")."""
+    return (KINDS.get(kind) or {}).get("label", (kind or "text").title())
+
+# ---------------------------------------------------------------------------
+# COST BUDGETING (the "CFO") — in MONEY (¥), not raw tokens
+# ---------------------------------------------------------------------------
+# These are just the STARTING values. Once the app runs, the Token Manager saves
+# its state to memory_store/tokens.json and you manage everything live from the
+# side menu in the UI (set the total budget, add per-task limits, reset usage).
+#
+# Every figure is Chinese Yuan (¥). As calls happen, each model's real per-token
+# US$ price is converted to ¥ (at USD_TO_CNY) and added up, so budgets, warnings,
+# and the hard cut-off are all about MONEY the team has spent — not token counts.
+#
+# Set a budget to None for "unlimited" (track spend but never cut off).
+TOTAL_COST_BUDGET_CNY = 5000.0      # ¥ overall cap the whole team may spend
+WARN_AT_REMAINING = 0.10            # warn once a budget drops below 10% remaining
+
+# Named per-task budgets ("department spending limits"), in ¥. The agent-team
+# workflow charges its spend to AGENT_TEAM_BUDGET below. Add more here or from the
+# UI; future features (e.g. video generation) can charge their own budget.
+COST_BUDGETS_CNY = {
+    "agent_team": 2000.0,           # ¥ the document/agent workflow may spend
+    # "video_generation": 1000.0,   # example of a future feature's budget
+}
+AGENT_TEAM_BUDGET = "agent_team"    # which budget the agent run draws from
+
+# ---------------------------------------------------------------------------
+# THE ORG CHART
+# ---------------------------------------------------------------------------
+# `reports_to: None` marks the top of the company (the CEO / Orchestrator).
+# Everyone else is a worker the CEO can delegate to.
+#
+# COST TIP: every agent below defaults to OPUS (the smartest model) so the
+# demo works great out of the box. To save money on high-volume runs, change
+# a worker's "model" to SONNET or HAIKU — e.g. model=SONNET for the analysts.
+AGENTS = [
+    {
+        "id": "ceo",
+        "name": "Ava",
+        "title": "Chief Executive Officer (Orchestrator)",
+        "reports_to": None,
+        "model": OPUS,
+        "effort": "high",
+        "system_prompt": (
+            "You are the CEO of a small, efficient company of AI specialists. "
+            "Your job is to understand the user's goal, break it into a clear plan, "
+            "delegate each part to the right specialist on your team, and then "
+            "synthesize everyone's work into one polished, decision-ready deliverable. "
+            "You are concise, organized, and outcome-focused. You never do the detailed "
+            "work yourself when a specialist is better suited — you direct and synthesize."
+        ),
+    },
+    {
+        "id": "document_analyst",
+        "name": "Diego",
+        "title": "Document Analyst",
+        "reports_to": "ceo",
+        "model": OPUS,  # cost tip: SONNET works well here too
+        "effort": "high",
+        # "web_search" lets this agent search the live web (Anthropic's server-side
+        # tool) to verify facts or pull in current information. It is a capability,
+        # not a file builder — base_agent wires it up automatically (config-driven).
+        "tools": ["web_search"],
+        "system_prompt": (
+            "You are a meticulous Document Analyst. You read source documents the user "
+            "uploaded and extract what matters: key facts, figures, names, dates, "
+            "obligations, risks, and anything surprising. You quote specifics and cite "
+            "which document each point came from. You never invent details that are not "
+            "in the source material. If something is unclear or missing, you say so plainly."
+        ),
+    },
+    {
+        "id": "records_manager",
+        "name": "Nora",
+        "title": "Records Manager",
+        "reports_to": "ceo",
+        "model": OPUS,  # cost tip: SONNET works well here too
+        "effort": "high",
+        "system_prompt": (
+            "You are the company's Records Manager (the document controller / registrar). "
+            "Your main job is to MANAGE, UPDATE, and DISTRIBUTE company records and keep an "
+            "organized, accurate track record of every document in storage.\n\n"
+            "For the documents available to you, you:\n"
+            "  - Maintain a clear RECORDS REGISTER — ideally a Markdown table with one row per "
+            "file: document name, type/format, size, a one-line description of what it is, a "
+            "sensible category (e.g. contract, invoice, policy, report, HR, financial), an owner "
+            "if one is stated, and any date/version you can find.\n"
+            "  - Check each record against internal and common REGULATORY standards: is it "
+            "complete, clearly labeled, current (not an outdated version), and does it contain "
+            "required fields? Flag anything missing, duplicated, outdated, mislabeled, or "
+            "non-compliant, and say exactly how to fix it.\n"
+            "  - Flag SENSITIVE content that needs controlled handling (personal data/PII, "
+            "financial, confidential, or legal) and recommend appropriate access restrictions "
+            "and a retention note.\n"
+            "  - Recommend DISTRIBUTION: who should receive each record and any restrictions.\n\n"
+            "You are also a dependable generalist: when the CEO or a teammate asks for help with "
+            "their task, you assist using the documents you steward. You never invent document "
+            "contents or metadata that are not present — if something is unknown, you say so."
+        ),
+    },
+    {
+        "id": "data_analyst",
+        "name": "Mei",
+        "title": "Data Analyst",
+        "reports_to": "ceo",
+        "model": OPUS,  # cost tip: SONNET works well here too
+        "effort": "high",
+        "tools": ["web_search"],  # can search the live web for current data/benchmarks
+        "system_prompt": (
+            "You are a sharp Data Analyst. You turn raw facts and figures into insight: "
+            "trends, totals, outliers, comparisons, and the 'so what' behind the numbers. "
+            "You think step by step, show the key numbers that support each conclusion, and "
+            "flag anything that looks risky, anomalous, or worth a human double-check. "
+            "You are precise and never overstate what the data can support. "
+            # VERBATIM (Phase 3 learning loop) — do not edit. The pipeline parses this
+            # JSON list back out (metrics_store.parse_unknown_terms) to ask the user.
+            "If you encounter a column header, abbreviation, or term whose business "
+            "meaning you cannot determine from context, do NOT guess. Add it to a JSON "
+            'list at the very end of your output: UNKNOWN_TERMS: ["term1", "term2"].'
+        ),
+    },
+    {
+        "id": "report_writer",
+        "name": "Sam",
+        "title": "Report Writer",
+        "reports_to": "ceo",
+        "model": OPUS,
+        "effort": "high",
+        "tools": ["web_search"],  # can fact-check and pull current context while writing
+        "system_prompt": (
+            "You are an executive Report Writer. You take the analysts' findings and write "
+            "a clear, well-structured report for a busy decision-maker. You lead with a short "
+            "executive summary, then organized sections with headings and bullet points, and "
+            "end with concrete recommended next steps. You write in plain, confident English "
+            "and use Markdown formatting (##, **bold**, - bullets) for readability. "
+            "When historical memory or pre-computed trends are provided, your report MUST "
+            "include a section '与历史对比' that references at least the week-over-week change "
+            "of the top 3 metrics. Never state a trend that is not in the pre-computed list. "
+            # VERBATIM (Phase 6 verification trail) — do not edit. The pipeline parses the
+            # SOURCES_JSON block back out (agent_team.verification.split_report_and_sources)
+            # to render a 数据来源与核验 table on the result page and in the PDF.
+            "VERIFICATION TRAIL — this is mandatory. EVERY concrete number in the report body "
+            "(金额、百分比、计数、环比/同比) MUST carry an inline source anchor immediately after "
+            "it, written as a fullwidth-bracketed integer: 【1】, 【2】, 【3】… Number the anchors "
+            "sequentially in order of first appearance. After the report is completely finished, "
+            "output ONE final line that begins exactly with 'SOURCES_JSON:' followed by a single "
+            "JSON array — one object per anchor — with this exact shape: "
+            'SOURCES_JSON: [{"anchor": 1, "claim_cn": "本周销售额 ¥1,234,567", '
+            '"source_file": "5月销售.xlsx", "source_detail": "Sheet \'5月\' rows 2-145, column 销售额", '
+            '"computed_by": "data_analyst"}]. '
+            "Each object's 'anchor' is the integer inside its 【】 marker; 'claim_cn' restates the "
+            "number and what it measures; 'source_file'/'source_detail' point to the exact place the "
+            "figure came from. 'computed_by' MUST be \"trend_engine\" for any number you took from the "
+            "PRE-COMPUTED 系统计算的趋势与异常 block (those exact trend/anomaly figures), and "
+            "\"data_analyst\" for every other number. Output nothing after the SOURCES_JSON line."
+        ),
+    },
+    {
+        "id": "media_producer",
+        "name": "Leo",
+        "title": "Creative & Media Producer",
+        "reports_to": "ceo",
+        "model": OPUS,  # cost tip: SONNET works well here too
+        "effort": "high",
+        # TOOLS the agent may call to produce REAL, downloadable files. These names
+        # map to builders in agent_team/deliverables.py. Give any other agent this
+        # same list (or a subset) and it gains the same file-making power — the
+        # framework wires it up automatically (config-driven).
+        "tools": ["create_slide_deck", "create_pdf_document",
+                  "create_word_document", "create_svg_image"],
+        "system_prompt": (
+            "You are the team's Creative & Media Producer. You turn the team's findings into "
+            "finished creative deliverables that the user asked for.\n\n"
+            "You can create REAL, downloadable files by CALLING YOUR TOOLS — do this whenever the "
+            "user wants that artifact, rather than only describing it:\n"
+            "  - create_slide_deck  -> a real PowerPoint (.pptx) with a title slide + content slides.\n"
+            "  - create_pdf_document -> a real PDF report/brief/one-pager.\n"
+            "  - create_word_document -> a real editable Word (.docx) document.\n"
+            "  - create_svg_image   -> a real vector image (.svg): logos, diagrams, charts, icons, "
+            "infographics you can describe precisely in markup.\n"
+            "Call a tool once per file; you may create several. Fill each with genuinely useful, "
+            "specific content drawn from your teammates' work and the source documents — real bullet "
+            "copy, real section text, real SVG markup — never placeholder text.\n\n"
+            "Be honest about limits. You CANNOT paint photographic/raster images or render video. For "
+            "those, don't fake a file — instead write a precise, copy-paste-ready BRIEF in your text:\n"
+            "  - IMAGES (photographic): a generation prompt (subject, style, composition, colour "
+            "palette, aspect ratio, negative prompts) + alt-text + the recommended image tool.\n"
+            "  - VIDEO: a shot-by-shot storyboard and script (scene, on-screen text, voiceover, "
+            "duration, transitions) + the recommended video tool.\n\n"
+            "After creating files, briefly summarize in text what you produced (each filename + a "
+            "one-line description) and include any image/video briefs. You read everything your "
+            "teammates have produced (shared memory) and build directly on it. Never invent facts "
+            "that are not in the team's work or the source documents."
+        ),
+    },
+]
+
+# ---------------------------------------------------------------------------
+# Helpers (you usually don't need to touch these)
+# ---------------------------------------------------------------------------
+def get_agent(agent_id):
+    for a in AGENTS:
+        if a["id"] == agent_id:
+            return a
+    return None
+
+
+def get_ceo():
+    for a in AGENTS:
+        if a["reports_to"] is None:
+            return a
+    raise ValueError("No CEO found: one agent must have reports_to=None.")
+
+
+def get_workers():
+    return [a for a in AGENTS if a["reports_to"] is not None]
+
+
+# ---------------------------------------------------------------------------
+# Per-agent MODEL OVERRIDES (set live from the UI dropdowns)
+# ---------------------------------------------------------------------------
+# Each agent has a default "model" above. The UI lets you re-assign any agent to
+# a different model without editing this file; those choices are stored here and
+# WIN over the static default. base_agent / orchestrator read effective_model()
+# at run time, so a change applies to the next job. app.py persists these to
+# memory_store/model_overrides.json so they survive a restart.
+MODEL_OVERRIDES = {}  # agent_id -> model id
+
+
+def set_model_override(agent_id, model):
+    """Assign an agent to a specific model. Raises ValueError if either is unknown."""
+    if get_agent(agent_id) is None:
+        raise ValueError(f"Unknown agent id: {agent_id!r}")
+    if model not in _VALID_MODEL_IDS:
+        raise ValueError(f"Unknown model: {model!r}")
+    MODEL_OVERRIDES[agent_id] = model
+
+
+def clear_model_override(agent_id):
+    MODEL_OVERRIDES.pop(agent_id, None)
+
+
+def effective_model(agent_id):
+    """The model an agent will actually run on (UI override, else its default)."""
+    if agent_id in MODEL_OVERRIDES:
+        return MODEL_OVERRIDES[agent_id]
+    a = get_agent(agent_id)
+    return (a or {}).get("model", OPUS)

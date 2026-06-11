@@ -1,0 +1,41 @@
+# 贸易公司 — vertical template pack (Moat 2).
+# Content, not code: edit freely; the next run re-reads it from disk (no restart).
+display_name_cn: "贸易公司"
+
+required_kpis:
+  - {name: "sales",                 name_cn: "销售额",        unit: "CNY"}
+  - {name: "gross_margin",          name_cn: "毛利率",        unit: "%"}
+  - {name: "accounts_receivable",   name_cn: "应收账款",      unit: "CNY"}
+  - {name: "days_sales_outstanding", name_cn: "账期",         unit: "天"}
+  - {name: "inventory",             name_cn: "库存",          unit: "CNY"}
+  - {name: "customer_concentration", name_cn: "大客户集中度", unit: "%"}
+  - {name: "fx_exposure",           name_cn: "汇率敞口",      unit: "CNY"}
+
+benchmarks:
+  - {metric: "毛利率",          range_text_cn: "贸易/分销多在8%-20%区间",            source_note: "行业经验值，仅供参考"}
+  - {metric: "账期",            range_text_cn: "多数B2B在30-90天，>120天需警惕坏账", source_note: "行业经验值，仅供参考"}
+  - {metric: "大客户集中度",    range_text_cn: "单一客户占比>30%即视为集中度偏高风险", source_note: "行业经验值，仅供参考"}
+  - {metric: "应收账款周转天数", range_text_cn: "健康水平多在60-90天",               source_note: "行业经验值，仅供参考"}
+  - {metric: "库存周转天数",    range_text_cn: "随品类而定，常见60-120天",           source_note: "行业经验值，仅供参考"}
+
+report_skeleton_cn:
+  - "本周核心结论"
+  - "销售与毛利"
+  - "应收与账期"
+  - "库存与周转"
+  - "大客户与集中度"
+  - "与历史对比"
+  - "风险与异常"
+  - "下周建议行动"
+
+analyst_extra_prompt: >-
+  分析贸易公司数据时：(1) 主动计算账期(DSO) = 应收账款 / 销售额 × 天数、应收账款周转率、库存周转天数、
+  大客户集中度（前 3 / 前 5 大客户销售额占总销售额的比例）；(2) 评估汇率敞口：以外币计价的应收、应付与在手订单净额，
+  并指出汇率波动的方向性影响；(3) 当数据列允许时，按客户、币种或产品线拆分销售与毛利。
+  重点标记账期超期、坏账与客户集中度过高的风险。所有比率请同时给出分子、分母与结果，便于人工复核。
+
+writer_extra_prompt: >-
+  撰写报告时使用简洁、专业的商务汇报体：(1) 数字优先 —— 先给结论与关键数字，再给简要说明；
+  (2) 不写空洞的赞美或套话，每一个判断都必须对应一个具体数字或数据来源；
+  (3) 涉及行业基准时，必须标注「行业经验值，仅供参考」，不得当作公司自身数据；
+  (4) 全文结尾给出恰好 3 条可执行的「下周建议行动」，每条都须指向具体指标或动作。

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('agent_team/config.py'\\).read\\(\\)\\); print\\('config.py OK'\\)\")",
+      "Bash(.venv/bin/python -c \"from agent_team import config; print\\('models:', len\\(config.MODEL_CHOICES\\)\\); print\\('providers:', len\\(config.PROVIDERS\\)\\); print\\('image models:', [m['id'] for m in config.MODEL_CHOICES if m.get\\('kind'\\)=='image']\\)\")",
+      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('app.py'\\).read\\(\\)\\); print\\('app.py OK'\\)\")",
+      "Bash(cp \"/Users/brucetang/Desktop/product_description_and_moats.md\" /Users/brucetang/Company_Agent_Demo/docs/product-brief.md && ls /Users/brucetang/Company_Agent_Demo/docs/)",
+      "mcp__visualize__read_me",
+      "Bash(python3 -c ' *)",
+      "mcp__visualize__show_widget"
+    ]
+  }
+}
