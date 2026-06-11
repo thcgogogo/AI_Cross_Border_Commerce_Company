@@ -106,7 +106,11 @@
       "Bash(sed -n '318,335p' /Users/brucetang/Company_Agent_Demo/docs/ui-redesign-plan.md)",
       "Bash(sqlite3 /Users/brucetang/Company_Agent_Demo/data/company_brain.db \"SELECT id, company_id, started_at, finished_at, report_path FROM runs;\")",
       "Bash(sqlite3 /Users/brucetang/Company_Agent_Demo/data/company_brain.db \"SELECT company_id, substr\\(profile_json,1,300\\) FROM company_profile;\")",
-      "Bash(git commit -m 'Allowlist additions from Phase 5 verification + Phase 6 fact-finding \\(curl/sqlite3/sed/pytest probe patterns\\) *)"
+      "Bash(git commit -m 'Allowlist additions from Phase 5 verification + Phase 6 fact-finding \\(curl/sqlite3/sed/pytest probe patterns\\) *)",
+      "Bash(.venv/bin/python -m pytest tests/test_metric_extraction.py -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_metric_extraction.py::test_parse_pure_prose_and_junk_returns_none -q)",
+      "Bash(rm -f /tmp/extract_verify.db && grep -n \"def count_runs_this_month\\\\|def count_runs_total\\\\|def list_runs\\\\|kind\\\\b\" /Users/brucetang/Company_Agent_Demo/agent_team/metrics_store.py | head -20)",
+      "Bash(git commit -m 'Phase 6 Part A: metric-extraction hardening — the company brain finally learns from real runs *)"
     ]
   }
 }

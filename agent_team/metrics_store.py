@@ -133,6 +133,21 @@ KPI_MAPPING_INSTRUCTION = (
 MEMORY_MAX_TOKENS = 4000
 RECENT_PERIODS = 8
 
+# Output ceiling for the extraction call. A dense multi-week analysis yields
+# dozens of metric rows (a real run produced 9.7k chars and was cut mid-row at
+# 4000), so give the reply generous headroom; the truncation repair below still
+# salvages complete rows if even this is exceeded.
+METRIC_EXTRACTION_MAX_TOKENS = 8000
+
+# The line a grep can find when the brain learned nothing. Phases 1-5 shipped
+# with a quiet "skipping (0 metrics)" info line and nobody noticed the metrics
+# table stayed empty across every real run — keep this LOUD.
+METRIC_EXTRACTION_FAILURE_WARNING = (
+    "⚠️ 指标提取失败 — METRIC EXTRACTION YIELDED 0 METRICS after retry; "
+    "the company brain learned NOTHING from this run. "
+    "与历史对比 will be missing until extraction succeeds."
+)
+
 
 # ---------------------------------------------------------------------------
 # Companies & runs
@@ -228,24 +243,31 @@ def extract_metrics_to_db(analysis_output, company_id, run_id, llm=None, log=Non
             _note(f"metric extraction skipped (no LLM available: {e}).")
             return 0
 
-    try:
-        raw = llm.complete(
-            system_prompt=METRIC_EXTRACTION_SYSTEM_PROMPT,
-            user_content=f"ANALYSIS:\n{analysis_output}",
-            model=config.HAIKU,      # cheap, fast, always available
-            effort="low",            # ignored for Haiku, harmless if not
-            max_tokens=4000,
-            budget=config.AGENT_TEAM_BUDGET,
-        )
-    except BudgetExceededError:
-        raise  # let the run handler cut off cleanly
-    except Exception as e:
-        _note(f"metric extraction LLM call failed — skipping ({e}).")
-        return 0
-
-    rows = _parse_metrics_json(raw)
+    rows = None
+    for attempt in (1, 2):  # one retry on total failure
+        try:
+            raw = llm.complete(
+                system_prompt=METRIC_EXTRACTION_SYSTEM_PROMPT,
+                user_content=f"ANALYSIS:\n{analysis_output}",
+                model=config.HAIKU,      # cheap, fast, always available
+                effort="low",            # ignored for Haiku, harmless if not
+                max_tokens=METRIC_EXTRACTION_MAX_TOKENS,
+                budget=config.AGENT_TEAM_BUDGET,
+            )
+        except BudgetExceededError:
+            raise  # let the run handler cut off cleanly
+        except Exception as e:
+            _note(f"metric extraction LLM call failed on attempt {attempt} ({e}).")
+            continue
+        if getattr(llm, "last_stop_reason", None) == "max_tokens":
+            _note("metric extraction reply hit the output-token limit — "
+                  "salvaging complete rows from the truncated array.")
+        rows = _parse_metrics_json(raw)
+        if rows:
+            break
+        _note(f"metric extraction attempt {attempt} produced no parseable metric rows.")
     if not rows:
-        _note("metric extraction produced no parseable JSON — skipping (0 metrics).")
+        _note(METRIC_EXTRACTION_FAILURE_WARNING)
         return 0
 
     inserted = 0
@@ -265,23 +287,57 @@ def extract_metrics_to_db(analysis_output, company_id, run_id, llm=None, log=Non
 
 
 def _parse_metrics_json(raw):
-    """Pull a JSON array out of an LLM response, tolerating ```json fences and
-    surrounding prose. Returns a list, or None. NEVER raises."""
+    """Pull a JSON array out of an LLM response, tolerating ```json fences
+    (closed OR unclosed — an output-token cut leaves the fence open), prose
+    around the array, and an array whose tail was truncated mid-row. Returns a
+    list, or None. NEVER raises.
+
+    Mirrors the Phase-3 SOURCES_JSON salvage (verification.recover_sources):
+    strict parse first, then close the array after the last COMPLETE row —
+    a half-written row is dropped, never guessed at."""
     if not raw or not isinstance(raw, str):
         return None
+    candidates = []
     fenced = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw, re.DOTALL)
-    candidate = fenced.group(1) if fenced else None
-    if candidate is None:
-        start, end = raw.find("["), raw.rfind("]")
-        if start != -1 and end != -1 and end > start:
-            candidate = raw[start:end + 1]
-    if not candidate:
+    if fenced:
+        candidates.append(fenced.group(1))
+    # Outermost array of the fence-stripped text. Stripping fence markers (not
+    # just matching closed pairs) also covers the unclosed-fence shape.
+    bare = re.sub(r"```[a-zA-Z]*", "", raw)
+    start, end = bare.find("["), bare.rfind("]")
+    if start != -1 and end > start:
+        candidates.append(bare[start:end + 1])
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, list):
+            return data
+    return _repair_truncated_metrics_array(bare)
+
+
+def _repair_truncated_metrics_array(text):
+    """Parse a JSON array whose closing bracket (and likely its final element)
+    was cut off mid-stream: close the array right after a complete object,
+    trying from the LAST '}' backward, and return the first variant that
+    parses to a non-empty list. Returns a list, or None. (Deliberate twin of
+    verification._repair_truncated_array — the agent pipeline is frozen, so we
+    mirror rather than import its private helper.)"""
+    if not text:
         return None
-    try:
-        data = json.loads(candidate)
-    except (json.JSONDecodeError, ValueError):
+    start = text.find("[")
+    if start == -1:
         return None
-    return data if isinstance(data, list) else None
+    frag = text[start:]
+    for end in reversed([m.end() for m in re.finditer(r"\}", frag)]):
+        try:
+            val = json.loads(frag[:end] + "]")
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(val, list):
+            return val or None
+    return None
 
 
 def _metric_from_item(item, company_id, run_id):
