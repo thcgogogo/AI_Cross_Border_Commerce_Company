@@ -413,6 +413,7 @@ class CustomerStore:
             "balance": customer.get("balance"),
             "spent": round(float(customer.get("spent", 0.0)), 6),
             "requests": int(customer.get("requests", 0)),
+            "report_credits": int(customer.get("report_credits", 0) or 0),
             "created_at": customer.get("created_at"),
             "usage": list(reversed(customer.get("usage") or []))[:_USAGE_LOG_CAP],
         }
@@ -489,6 +490,9 @@ def _account_to_record(acc):
         "balance": float(bal) if bal is not None else None,
         "spent": float(acc.spent_yuan or 0),
         "requests": int(acc.requests or 0),
+        # Unconsumed 单次报告 ¥29 purchases (redesign B4) — a quota concept,
+        # customer-visible, unlike the ¥ figures above.
+        "report_credits": int(acc.report_credits or 0),
         "status": acc.status,
         "rpm_limit": int(acc.rpm_limit) if acc.rpm_limit is not None else None,
         "daily_cap_yuan": float(acc.daily_cap_yuan) if acc.daily_cap_yuan is not None else None,

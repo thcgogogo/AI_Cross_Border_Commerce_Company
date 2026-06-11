@@ -55,6 +55,7 @@ from .models import (
     ORDER_FAILED,
     ORDER_PAID,
     ORDER_REFUNDED,
+    ORDER_SINGLE_REPORT,
     ORDER_STATUSES,
     ORDER_TOPUP,
     ORDER_TYPES,
@@ -221,6 +222,14 @@ def finish_run(run_id, status, total_cost_yuan=None, report_path=None):
                 pass
         if report_path is not None:
             run.report_path = report_path
+    # B4 — one chokepoint for every run path (interactive / scheduled / wizard):
+    # a counting run that landed beyond the base plan quota consumes one 单次
+    # 报告 credit. Best-effort: credit bookkeeping must never fail a run.
+    if status != RUN_FAILED:
+        try:
+            consume_report_credit_if_over_quota(run_id)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1754,9 +1763,84 @@ def mark_order_paid(order_no, paid_amount, provider_txn_id=None):
                    .with_for_update().one_or_none())
             if acc is not None and acc.balance_yuan is not None:
                 acc.balance_yuan = (Decimal(acc.balance_yuan) + paid).quantize(_CENT2)
+        elif o.type == ORDER_SINGLE_REPORT:
+            # EXPLICIT branch (redesign B4): falling through to the
+            # subscription else would call _activate_subscription_locked with
+            # plan_code=None, which defaults to "basic" — a ¥29 order must
+            # never grant a ¥199 subscription. It grants ONE report credit.
+            acc = (s.query(Account).filter(Account.id == o.account_id)
+                   .with_for_update().one_or_none())
+            if acc is not None:
+                acc.report_credits = int(acc.report_credits or 0) + 1
         else:
             _activate_subscription_locked(s, o.account_id, o.plan_code, now)
         return {"ok": True, "replay": False, "reason": None, "order": _order_to_dict(o)}
+
+
+def deduct_report_credit(account_id):
+    """Remove ONE 单次报告 credit — the refund path (redesign B4), mirroring
+    deduct_balance's contract: raises ValueError with a clear Chinese message
+    when no unconsumed credit remains, so the caller REFUSES the refund instead
+    of going negative. Returns the remaining credit count, or None if the
+    account is unknown."""
+    with db.session_scope() as s:
+        acc = (s.query(Account).filter(Account.id == str(account_id))
+               .with_for_update().one_or_none())
+        if acc is None:
+            return None
+        credits = int(acc.report_credits or 0)
+        if credits < 1:
+            raise ValueError("该单次报告额度已被消费（剩余 0 份），无法退款。")
+        acc.report_credits = credits - 1
+        return credits - 1
+
+
+def consume_report_credit_if_over_quota(run_id):
+    """B4/C4 — make 单次报告 credits one-shot. Called when a run finishes: if
+    the run COUNTS toward the quota meter (kind='report', not failed) and the
+    company's used total now EXCEEDS the plan's base quota, this run rode on a
+    purchased credit — consume exactly one (floor 0, under a row lock).
+
+    Runs that fit inside the base quota never touch credits, so a free user
+    with the 2-lifetime trial + 1 credit gets 3 runs total, and a failed run
+    never eats the ¥29. Two runs finishing in the same instant may in theory
+    both see the post-quota count and consume one each — which is the correct
+    total whenever both ran on credits, and a bounded, fail-safe edge
+    otherwise. Returns True when a credit was consumed."""
+    if not run_id:
+        return False
+    with db.session_scope() as s:
+        run = s.get(Run, run_id)
+        if (run is None or run.kind != RUN_KIND_REPORT
+                or run.status == RUN_FAILED):
+            return False
+        company_id = run.company_id
+        comp = s.get(Company, company_id)
+        email = (comp.account_email or "").strip().lower() if comp else None
+    if not email:
+        return False
+    with db.session_scope() as s:
+        acc = s.query(Account).filter(Account.email == email).one_or_none()
+        account_id = acc.id if acc else None
+    if not account_id:
+        return False
+
+    plan_code, _sub, _locked = effective_plan(account_id)
+    p = config.plan(plan_code)
+    quota = int(p.get("monthly_report_quota") or 0)
+    if not quota:
+        return False
+    used = (count_runs_total(company_id) if p.get("lifetime_quota")
+            else count_runs_this_month(company_id))
+    if used <= quota:
+        return False  # within the base plan quota — credits untouched
+    with db.session_scope() as s:
+        acc = (s.query(Account).filter(Account.id == account_id)
+               .with_for_update().one_or_none())
+        if acc is None or int(acc.report_credits or 0) < 1:
+            return False
+        acc.report_credits = int(acc.report_credits) - 1
+        return True
 
 
 def mark_order_refunded(order_no, amount_yuan):

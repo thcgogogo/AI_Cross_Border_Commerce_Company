@@ -317,6 +317,174 @@ def test_v1_gateway_stays_balance_gated(env):
     assert resp.get_json()["error"]["code"] == "insufficient_balance"
 
 
+# ===========================================================================
+# Part C — B4 单次 ¥29: purchase → credit → run → consume; refund-safe
+# ===========================================================================
+def _pay(client, order_no, amount, times=1):
+    """Deliver a properly SIGNED mock notify, `times` times (phase-9 pattern)."""
+    from agent_team import payments
+    fields = payments.MockProvider().notify_fields(order_no, amount)
+    return [client.post("/pay/notify/mock", data=fields) for _ in range(times)]
+
+
+def _finished_report_runs(cid, n):
+    for _ in range(n):
+        rid = metrics_store.create_run(cid, "生成上周经营周报")
+        metrics_store.finish_run(rid, RUN_SUCCEEDED)
+
+
+def test_single_report_purchase_grants_credit_run_then_consumes(env):
+    cid = env["company_id"]
+    acc_id = env["store"].find_by_email(OWNER)["id"]
+    client = _client_for(env["store"], OWNER)
+
+    # Free trial exhausted: 2 lifetime runs → the friendly 402 upsell.
+    _finished_report_runs(cid, 2)
+    resp = client.post("/api/run", data={"goal": "做个经营周报"})
+    assert resp.status_code == 402
+    assert "免费体验额度已用完" in resp.get_json()["error"]
+
+    # Buy 单次 ¥29 — server-side price, mock-cashier flow unchanged.
+    order = client.post("/api/pay/create", json={"type": "single_report"}).get_json()
+    assert order["amount"] == config.SINGLE_REPORT_PRICE_YUAN == 29.0
+    responses = _pay(client, order["order_no"], 29.0, times=3)  # replayed notify
+    assert [r.status_code for r in responses] == [200, 200, 200]
+
+    acct = env["store"].get_by_id(acc_id)
+    assert acct["report_credits"] == 1          # exactly one, despite 3 notifies
+    # The latent bug C3 guards against: a ¥29 order must NOT grant a 'basic'
+    # subscription via the plan_code=None fallthrough.
+    assert metrics_store.get_subscription(acc_id) is None
+    # The balance was NOT credited either (it's not a topup).
+    assert acct["balance"] == 1000.0
+
+    # Quota gate now open (2 used < 2+1 effective): empty-goal 400 = gates passed.
+    assert client.post("/api/run", data={"goal": ""}).status_code == 400
+
+    # The 3rd counting run lands beyond the base quota → consumes the credit.
+    _finished_report_runs(cid, 1)
+    assert env["store"].get_by_id(acc_id)["report_credits"] == 0
+
+    # One-shot: with the credit consumed the gate closes again (3/3).
+    resp = client.post("/api/run", data={"goal": "做个经营周报"})
+    assert resp.status_code == 402
+
+
+def test_runs_within_base_quota_never_consume_credits(env):
+    # Free user with 2 lifetime + 1 credit runs 3 TOTAL: the first two runs sit
+    # inside the base quota and must not touch the purchased credit (C4).
+    cid = env["company_id"]
+    acc_id = env["store"].find_by_email(OWNER)["id"]
+    client = _client_for(env["store"], OWNER)
+    order = client.post("/api/pay/create", json={"type": "single_report"}).get_json()
+    _pay(client, order["order_no"], 29.0)
+    assert env["store"].get_by_id(acc_id)["report_credits"] == 1
+
+    _finished_report_runs(cid, 1)
+    assert env["store"].get_by_id(acc_id)["report_credits"] == 1  # run 1: untouched
+    _finished_report_runs(cid, 1)
+    assert env["store"].get_by_id(acc_id)["report_credits"] == 1  # run 2: untouched
+    _finished_report_runs(cid, 1)
+    assert env["store"].get_by_id(acc_id)["report_credits"] == 0  # run 3: consumed
+
+
+def test_failed_run_never_consumes_a_credit(env):
+    from agent_team.models import RUN_FAILED
+    cid = env["company_id"]
+    acc_id = env["store"].find_by_email(OWNER)["id"]
+    client = _client_for(env["store"], OWNER)
+    order = client.post("/api/pay/create", json={"type": "single_report"}).get_json()
+    _pay(client, order["order_no"], 29.0)
+
+    _finished_report_runs(cid, 2)
+    rid = metrics_store.create_run(cid, "生成上周经营周报")
+    metrics_store.finish_run(rid, RUN_FAILED)   # the 3rd run FAILED
+    assert env["store"].get_by_id(acc_id)["report_credits"] == 1  # ¥29 kept
+
+
+def test_single_report_refund_decrements_and_blocks_when_consumed(env, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", OTHER)
+    cid = env["company_id"]
+    acc_id = env["store"].find_by_email(OWNER)["id"]
+    client = _client_for(env["store"], OWNER)
+    admin = _client_for(env["store"], OTHER)
+
+    # Unconsumed credit: partial refunds refused, full refund claws it back.
+    order1 = client.post("/api/pay/create", json={"type": "single_report"}).get_json()
+    _pay(client, order1["order_no"], 29.0)
+    r = admin.post("/admin/orders", data={"action": "refund",
+                                          "order_no": order1["order_no"],
+                                          "amount": "10"})
+    assert r.status_code == 400
+    assert "全额退款" in r.get_data(as_text=True)
+    r = admin.post("/admin/orders", data={"action": "refund",
+                                          "order_no": order1["order_no"],
+                                          "amount": "29"})
+    assert r.status_code == 200
+    assert env["store"].get_by_id(acc_id)["report_credits"] == 0
+    assert metrics_store.get_order(order1["order_no"])["status"] == "refunded"
+
+    # Consumed credit: the refund is refused with the 已被消费-style error.
+    order2 = client.post("/api/pay/create", json={"type": "single_report"}).get_json()
+    _pay(client, order2["order_no"], 29.0)
+    _finished_report_runs(cid, 3)   # 2 base + 1 credit → credit consumed
+    assert env["store"].get_by_id(acc_id)["report_credits"] == 0
+    r = admin.post("/admin/orders", data={"action": "refund",
+                                          "order_no": order2["order_no"],
+                                          "amount": "29"})
+    assert r.status_code == 400
+    assert "已被消费" in r.get_data(as_text=True)
+    assert metrics_store.get_order(order2["order_no"])["status"] == "paid"
+
+
+def test_migration_0006_adds_report_credits_to_legacy_accounts(tmp_path):
+    """Simulate a database deployed before Phase 7 (accounts WITHOUT
+    report_credits), stamped at 0005, then run the real `alembic upgrade head`
+    and inspect what arrived (the 0005 test's pattern)."""
+    import sqlite3
+    import subprocess
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE accounts (
+            id VARCHAR(32) PRIMARY KEY, email VARCHAR(320), phone VARCHAR(32),
+            name VARCHAR(255), company VARCHAR(255), password_hash VARCHAR(255),
+            key_hash VARCHAR(64), key_prefix VARCHAR(32), key_last4 VARCHAR(8),
+            models_json TEXT, balance_yuan NUMERIC(12,2),
+            spent_yuan NUMERIC(12,2) NOT NULL, requests INTEGER NOT NULL,
+            usage_json TEXT, status VARCHAR(9) NOT NULL,
+            rpm_limit INTEGER NOT NULL, daily_cap_yuan NUMERIC(12,2),
+            session_token VARCHAR(32), created_at DATETIME NOT NULL);
+        CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL);
+        INSERT INTO alembic_version VALUES ('0005_phase6_run_kind');
+        INSERT INTO accounts (id, email, spent_yuan, requests, status,
+                              rpm_limit, created_at)
+            VALUES ('cus_legacy01', 'legacy@corp.com', 0, 0, 'active', 60,
+                    '2026-01-01');
+    """)
+    conn.commit()
+    conn.close()
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=ROOT, capture_output=True, text=True,
+        env={**os.environ, "DATABASE_URL": f"sqlite:///{db_path}"})
+    assert proc.returncode == 0, proc.stderr
+
+    conn = sqlite3.connect(db_path)
+    cols = {row[1]: row for row in conn.execute("PRAGMA table_info(accounts)")}
+    assert "report_credits" in cols
+    notnull, default = cols["report_credits"][3], cols["report_credits"][4]
+    assert notnull == 1
+    assert "0" in str(default)
+    # The legacy row reads 0 credits, and the version landed at head (0006).
+    assert conn.execute(
+        "SELECT report_credits FROM accounts").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT version_num FROM alembic_version").fetchone()[0].startswith("0006")
+    conn.close()
+
+
 def test_budget_cny_write_is_founder_only(env, monkeypatch):
     acc_id = env["store"].find_by_email(OWNER)["id"]
     _subscribe(acc_id, "pro")  # scheduling is 企业版-only (D3)

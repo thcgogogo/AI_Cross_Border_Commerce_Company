@@ -111,10 +111,14 @@ AUDIT_ADMIN = "admin_action"
 AUDIT_ACTIONS = (AUDIT_LOGIN, AUDIT_PASSWORD_CHANGE, AUDIT_TOPUP,
                  AUDIT_DOWNLOAD, AUDIT_ADMIN)
 
-# Phase 9 — what a payment order buys.
+# Phase 9 — what a payment order buys. Phase 7 (redesign B4) adds the 单次
+# ¥29 report: one paid order grants ONE report credit (accounts.report_credits)
+# that raises the plan's effective quota — the commitment-free bridge to
+# subscription from the brief.
 ORDER_TOPUP = "topup"
 ORDER_SUBSCRIPTION = "subscription"
-ORDER_TYPES = (ORDER_TOPUP, ORDER_SUBSCRIPTION)
+ORDER_SINGLE_REPORT = "single_report"
+ORDER_TYPES = (ORDER_TOPUP, ORDER_SUBSCRIPTION, ORDER_SINGLE_REPORT)
 
 # Phase 9 — an order's lifecycle. created→paid happens ONLY inside the verified-
 # notify transaction (metrics_store.mark_order_paid); created→failed when the
@@ -385,6 +389,10 @@ class Account(Base):
     # cookie still carrying the old value. NULL on legacy rows => the check is
     # skipped, so existing logins are not forcibly dropped by the upgrade.
     session_token = Column(String(32), nullable=True)
+    # Phase 7 (redesign B4): unconsumed 单次报告 ¥29 purchases. Each paid
+    # single_report order adds one; the quota gate counts them on top of the
+    # plan quota; the run that lands beyond the base quota consumes one.
+    report_credits = Column(Integer, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 

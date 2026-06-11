@@ -80,6 +80,7 @@ from agent_team.models import (
     ONBOARDING_STARTED,
     ORDER_CREATED,
     ORDER_PAID,
+    ORDER_SINGLE_REPORT,
     ORDER_SUBSCRIPTION,
     ORDER_TOPUP,
     RUN_FAILED,
@@ -669,6 +670,10 @@ def _plan_gate(customer):
         return False, "免费体验额度已用完，升级套餐后可继续生成报告。", "no_balance"
     quota = int(p.get("monthly_report_quota") or 0)
     if quota:
+        # B4 — purchased 单次报告 credits RAISE the effective ceiling; the run
+        # that lands beyond the base quota consumes one (metrics_store.
+        # consume_report_credit_if_over_quota, hooked into finish_run).
+        effective = quota + int(customer.get("report_credits") or 0)
         try:
             company_id = metrics_store.get_or_create_company(
                 customer.get("email"),
@@ -679,12 +684,14 @@ def _plan_gate(customer):
                 used = metrics_store.count_runs_this_month(company_id)
         except Exception:
             return True, None, None
-        if used >= quota:
+        if used >= effective:
             if p.get("lifetime_quota"):
                 return False, ("免费体验额度已用完（%d/%d 份报告）。"
-                               "升级套餐后可继续生成报告。" % (used, quota)), "quota"
+                               "升级套餐后可继续生成报告，或单次购买一份。"
+                               % (used, effective)), "quota"
             return False, ("本月报告额度已用完（%d/%d · %s）。"
-                           "升级套餐可提高额度。" % (used, quota, p["label"])), "quota"
+                           "升级套餐可提高额度，或单次购买一份。"
+                           % (used, effective, p["label"])), "quota"
     return True, None, None
 
 
@@ -1443,11 +1450,17 @@ def _apply_verified_payment(provider_name, order_no, paid_amount, txn_id):
     result = metrics_store.mark_order_paid(order_no, paid_amount, txn_id)
     if result["ok"] and not result["replay"]:
         o = result["order"]
-        detail = ("top-up ¥%.2f via %s order %s"
-                  % (o["amount_yuan"], provider_name, o["order_no"])
-                  if o["type"] == ORDER_TOPUP else
-                  "subscription %s ¥%.2f via %s order %s"
-                  % (o["plan_code"], o["amount_yuan"], provider_name, o["order_no"]))
+        if o["type"] == ORDER_TOPUP:
+            detail = ("top-up ¥%.2f via %s order %s"
+                      % (o["amount_yuan"], provider_name, o["order_no"]))
+        elif o["type"] == ORDER_SINGLE_REPORT:
+            # Own label (B4) — the subscription fallback would mislabel it.
+            detail = ("single report ¥%.2f via %s order %s"
+                      % (o["amount_yuan"], provider_name, o["order_no"]))
+        else:
+            detail = ("subscription %s ¥%.2f via %s order %s"
+                      % (o["plan_code"], o["amount_yuan"], provider_name,
+                         o["order_no"]))
         metrics_store.write_audit(o["account_id"], AUDIT_TOPUP, _client_ip(),
                                   detail=detail)
         # Phase 10 — subscription payment receipt (deduped per order inside
@@ -1508,10 +1521,11 @@ def pay_create():
     """Open a payment order for the logged-in account.
 
     Body: {"type": "topup", "amount": <¥>} or
-          {"type": "subscription", "plan_code": "basic"|"pro"},
+          {"type": "subscription", "plan_code": "basic"|"pro"} or
+          {"type": "single_report"}  (redesign B4 — 单次报告 ¥29),
     plus optional {"provider": "alipay"|"wechat"} (default: first configured).
-    A subscription's amount comes from the PLANS table — NEVER from the client.
-    Returns {order_no, amount, provider, pay_url, qr_text}."""
+    Subscription and single-report amounts come from server config — NEVER
+    from the client. Returns {order_no, amount, provider, pay_url, qr_text}."""
     customer = _current_customer()
     if not customer:
         return jsonify({"error": "请先登录后再支付。"}), 401
@@ -1531,6 +1545,13 @@ def pay_create():
                             % (config.TOPUP_MIN_YUAN, config.TOPUP_MAX_YUAN)}), 400
         plan_code = None
         subject = "账户充值 ¥%.2f" % amount
+    elif otype == ORDER_SINGLE_REPORT:
+        # B4 — 单次 ¥29: the commitment-free bridge to subscription. Server-side
+        # price; plan_code stays None (mark_order_paid grants ONE report credit,
+        # never a subscription). Reuses the same cashier/QR/poll flow.
+        amount = config.SINGLE_REPORT_PRICE_YUAN
+        plan_code = None
+        subject = "单次报告 ¥%g" % config.SINGLE_REPORT_PRICE_YUAN
     elif otype == ORDER_SUBSCRIPTION:
         plan_code = (data.get("plan_code") or "").strip().lower()
         if plan_code not in config.PURCHASABLE_PLANS:
@@ -1539,7 +1560,7 @@ def pay_create():
         amount = p["monthly_price_yuan"]          # server-side price, never client
         subject = "订阅 · %s（%d天）" % (p["label"], config.SUBSCRIPTION_PERIOD_DAYS)
     else:
-        return jsonify({"error": "type 必须是 topup 或 subscription。"}), 400
+        return jsonify({"error": "type 必须是 topup、subscription 或 single_report。"}), 400
 
     order = metrics_store.create_order(customer["id"], otype, amount, prov.name,
                                        plan_code=plan_code, subject=subject)
@@ -1666,6 +1687,9 @@ def plans_list():
             "reports_used_this_month": used,
             "monthly_report_quota": p["monthly_report_quota"],
             "lifetime_quota": bool(p.get("lifetime_quota")),
+            # B4 — unconsumed 单次报告 purchases; the UI adds them to the
+            # quota meter's ceiling ("已生成 X/Y 份").
+            "report_credits": int(customer.get("report_credits") or 0),
         }
     return jsonify(out)
 
@@ -2966,6 +2990,18 @@ def _admin_refund(customer, order_no, amount_raw):
             return False, ("无法退款：该笔充值已被消费（当前余额 ¥%.2f < 退款 ¥%.2f）。"
                            % (bal, amount))
 
+    # 单次报告 refunds mirror the topup "已被消费" rule on the CREDIT (B4):
+    # one order ↔ one credit, so the refund is all-or-nothing and refused once
+    # the credit was consumed by a run.
+    if order["type"] == ORDER_SINGLE_REPORT:
+        acct = CUSTOMERS.get_by_id(order["account_id"])
+        if acct is None:
+            return False, "找不到该订单的账户。"
+        if amount != remaining:
+            return False, "单次报告订单只支持全额退款（¥%.2f）。" % remaining
+        if int(acct.get("report_credits") or 0) < 1:
+            return False, "无法退款：该单次报告额度已被消费（剩余 0 份）。"
+
     prov = payments.get_provider(order["provider"])
     if prov is None:
         return False, "支付渠道 %s 当前不可用，无法发起退款。" % order["provider"]
@@ -2983,6 +3019,15 @@ def _admin_refund(customer, order_no, amount_raw):
             _pay_log.error("refund deduct failed after provider refund: order=%s",
                            order["order_no"])
             return False, "渠道退款已发起，但扣减余额失败：%s 请人工核对！" % e
+    elif order["type"] == ORDER_SINGLE_REPORT:
+        try:
+            metrics_store.deduct_report_credit(order["account_id"])
+        except ValueError as e:
+            # Same gap as the topup path: the credit was consumed between the
+            # pre-check and now, after the provider refund went out.
+            _pay_log.error("refund credit-deduct failed after provider refund: "
+                           "order=%s", order["order_no"])
+            return False, "渠道退款已发起，但扣减报告额度失败：%s 请人工核对！" % e
     res = metrics_store.mark_order_refunded(order["order_no"], amount)
     if not res["ok"]:
         return False, "退款已发起，但订单标记失败（%s），请人工核对。" % res["reason"]
