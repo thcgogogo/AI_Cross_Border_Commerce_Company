@@ -461,8 +461,9 @@ devices):
 4. **生成第一份报告** — the SAME gated + billed run pipeline as the Chat bot
    (`balance → breaker → plan gate`), with the live agent feed; the step-4
    funnel event is only recorded when the run SUCCEEDS.
-5. **每周定时** — one click creates (idempotently) the `0 8 * * 1` weekly job
-   with the chosen delivery channels.
+5. **每周定时** — one click creates (idempotently) the `0 8 * * mon` weekly job
+   with the chosen delivery channels (named weekday on purpose: APScheduler's
+   `from_crontab` counts day_of_week 0=Monday, so numeric `1` meant Tuesday).
 
 Funnel events land in `onboarding_events` (one row per account/step/action);
 the day-3 nudge email deep-links to `/?onboarding=demo`, which reopens the

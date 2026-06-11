@@ -31,6 +31,26 @@ let obSnap = null;        // step-4 live snapshot
 let obPollTimer = null;
 let obScheduleDone = null;
 let obShowReport = false; // Phase-2: inline report preview on step 4
+let obPlanInfo = null;    // step-5 D3 branch: {canSchedule, proLabel} (lazy)
+
+// Step 5 is plan-gated per D3 — fetch the plan lazily for the wizard (state.js
+// doesn't hold plans). Failure defaults to the upgrade preview; the backend
+// enforces the real gate with a structured 402 either way.
+async function obLoadPlanInfo() {
+  try {
+    const data = await api.getPlans();
+    const cur = (data && data.current) || {};
+    const plans = (data && data.plans) || [];
+    const row = plans.find((p) => p.code === cur.plan_code) || {};
+    obPlanInfo = {
+      canSchedule: ((row.features) || []).includes("scheduled_delivery"),
+      proLabel: (plans.find((p) => p.code === "pro") || {}).label || "企业版",
+    };
+  } catch (e) {
+    obPlanInfo = { canSchedule: false, proLabel: "企业版" };
+  }
+  if (obOpen && obStep === 5) renderOnboard();
+}
 
 export function init() {
   $("onboardRoot").innerHTML = `
@@ -69,9 +89,12 @@ export async function maybeAutoOpenOnboarding() {
 export async function openOnboarding(opts) {
   if (!state.account) { openLoginModal(); return; }
   obError = ""; obBusy = false; obShowReport = false;
-  // Industry packs feed step 1; agent names feed the live feed. Best-effort.
+  // Industry packs feed step 1; agent names feed the live feed; the plan
+  // decides step 5's branch (D3). All best-effort.
   loadIndustries();
   loadAgents();
+  obPlanInfo = null;
+  obLoadPlanInfo();
   try {
     // /start returns the state AND records the funnel's “wizard opened” event.
     obState = await api.onboardingStart();
@@ -255,6 +278,31 @@ function obStep5HTML() {
         </div>
       </div>`;
   }
+  // D3 — the Monday ritual is 企业版-only: free/基础版 accounts get the ritual
+  // preview + upgrade CTA instead of the one-click creator (the wizard never
+  // dead-ends — 跳过 stays available either way).
+  if (!obPlanInfo) {
+    return `
+      <h2 class="ob-h">第 5 步 · 设置每周定时 + 交付方式</h2>
+      <div class="ob-card"><p class="ob-sub">正在载入…</p></div>`;
+  }
+  if (!obPlanInfo.canSchedule) {
+    return `
+      <h2 class="ob-h">第 5 步 · 周一早上，报告自己到</h2>
+      <p class="ob-sub">${esc(obPlanInfo.proLabel)}专属：设定一次，之后每周一早上 8 点，经营周报自动生成并送达 — 你什么都不用做。</p>
+      <div class="ob-card">
+        <div class="ritual-preview" aria-hidden="true">
+          <div class="ritual-line"><span class="ritual-ico">⏰</span><span><strong>每周一 08:00</strong> 自动用最近上传的数据生成周报</span></div>
+          <div class="ritual-line"><span class="ritual-ico">📱</span><span>核心结论推送<strong>企业微信群</strong>，PDF 同步到<strong>邮箱</strong></span></div>
+          <div class="ritual-line"><span class="ritual-ico">📂</span><span>平时只需把新数据丢进<strong>数据收件箱</strong></span></div>
+        </div>
+        ${obErrHTML()}
+        <div class="ob-actions">
+          <button id="obUpgradeBtn" class="run-btn" type="button">升级到${esc(obPlanInfo.proLabel)}，开启自动送达 →</button>
+          ${obSkipBtnHTML("跳过，结束引导")}
+        </div>
+      </div>`;
+  }
   return `
     <h2 class="ob-h">第 5 步 · 设置每周定时 + 交付方式</h2>
     <p class="ob-sub">一键创建「每周一早上 8 点」自动生成任务，用最近上传的数据出报告并自动送达。</p>
@@ -292,6 +340,7 @@ function wireOnboardBody(body) {
   });
   on("obNext4", () => { obStep = 5; obError = ""; renderOnboard(); });
   on("obSchedBtn", obSchedule);
+  on("obUpgradeBtn", () => { closeOnboarding(); navigate("/account"); });
   on("obFinish", closeOnboarding);
   const skip = body.querySelector("#obSkipBtn");
   if (skip) skip.addEventListener("click", obSkipStep);

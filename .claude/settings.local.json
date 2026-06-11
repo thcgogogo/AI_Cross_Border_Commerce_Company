@@ -41,7 +41,31 @@
       "Bash(sed -n '415,455p' /Users/brucetang/Company_Agent_Demo/agent_team/pdf_report.py)",
       "Bash(sqlite3 /Users/brucetang/Company_Agent_Demo/data/company_brain.db \"SELECT id, company_id, status, report_path FROM runs ORDER BY id DESC LIMIT 8;\")",
       "Bash(sqlite3 /Users/brucetang/Company_Agent_Demo/data/company_brain.db \"SELECT version_num FROM alembic_version;\")",
-      "Bash(git commit -m 'UI redesign Phase 4: report experience — zero-prompt 生成报告, branded /reports/<id> document view, 历史报告 archive, B7 delivery deep links + job ownership gates *)"
+      "Bash(git commit -m 'UI redesign Phase 4: report experience — zero-prompt 生成报告, branded /reports/<id> document view, 历史报告 archive, B7 delivery deep links + job ownership gates *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/api/reports/4)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(/Users/brucetang/Company_Agent_Demo/.venv/bin/python -m pytest /Users/brucetang/Company_Agent_Demo/tests/ -q)",
+      "Bash(python -m pytest tests/test_redesign_phase4.py -q)",
+      "Bash(ls /Users/brucetang/Company_Agent_Demo | head -20; ls /Users/brucetang/Company_Agent_Demo/.venv/bin/python /Users/brucetang/Company_Agent_Demo/venv/bin/python 2>/dev/null)",
+      "Bash(.venv/bin/python -m pytest tests/test_redesign_phase4.py -q)",
+      "Bash(grep -n '\\\\${' /Users/brucetang/Company_Agent_Demo/frontend/js/views/report_view.js)",
+      "Bash(grep -v \"esc\\(\\\\|renderMarkdown\\\\|statusPillHTML\\\\|feedbackBarHTML\\\\|computedByCN\\\\|sec-\\\\${i}\\\\|\\\\${i}\\\\|\\\\${s.i}\\\\|\\\\${rows.length}\\\\|\\\\${terms.length}\\\\|\\\\${trs}\\\\|\\\\${rows}\\\\|\\\\${bodyHTML}\\\\|\\\\${inner}\\\\|\\\\${html}\")",
+      "Bash(git -C /Users/brucetang/Company_Agent_Demo show 34617c9 -- app.py)",
+      "Bash(python3 -c \"import apscheduler; print\\(apscheduler.__version__\\)\")",
+      "Bash(/Users/brucetang/Company_Agent_Demo/.venv/bin/python -c \"import apscheduler; print\\(apscheduler.__version__\\)\")",
+      "Bash(sed -n '100,160p' /Users/brucetang/Company_Agent_Demo/agent_team/orchestrator.py)",
+      "Bash(sed -n '50,75p' /Users/brucetang/Company_Agent_Demo/agent_team/base_agent.py)",
+      "Bash(.venv/bin/python -c \"import apscheduler; print\\(apscheduler.__version__\\)\")",
+      "Bash(.venv/bin/python -c \"import ast; ast.parse\\(open\\('app.py'\\).read\\(\\)\\); print\\('syntax ok'\\)\")",
+      "Bash(.venv/bin/python -m pytest -q -x)",
+      "Bash(.venv/bin/python -m pytest tests/test_redesign_phase5.py -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_redesign_phase5.py::test_next_run_at_present_for_active_weekly_job -q)",
+      "Read(//private/tmp/**)",
+      "Bash(rm -f p5free.cookies)",
+      "Bash(curl -s -c p5free.cookies -X POST http://127.0.0.1:8000/api/login -H 'Content-Type: application/json' -d '{\"email\":\"free.phase5@local.test\",\"password\":\"Phase5-local-pw\"}')",
+      "Bash(curl -s -w \"\\\\nHTTP %{http_code}\\\\n\" -b p5free.cookies -X POST http://127.0.0.1:8000/api/scheduled-jobs -H 'Content-Type: application/json' -d '{\"name_cn\":\"每周经营周报\",\"cron_expr\":\"0 8 * * mon\"}')",
+      "Bash(curl -s -w \"\\\\nHTTP %{http_code}\\\\n\" -b p5free.cookies -X POST http://127.0.0.1:8000/api/onboarding/schedule -H 'Content-Type: application/json' -d '{\"channels\":[\"email\"]}')",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

@@ -67,6 +67,8 @@ from agent_team.models import (
     AUDIT_TOPUP,
     CODE_RESET,
     CODE_SIGNUP,
+    DELIVERY_FAILED,
+    DELIVERY_SENT,
     FAPIAO_ISSUED,
     FAPIAO_REJECTED,
     FAPIAO_REQUESTED,
@@ -922,6 +924,17 @@ def _execute_scheduled_job(job, llm=None):
         return result
     recipient_email = customer.get("email")
 
+    # D3 PLAN-FEATURE GATE (redesign B5) — scheduled auto-delivery is 企业版
+    # only. A still-active job whose account dropped the feature (pro→basic
+    # downgrade, lapsed subscription) is skipped and RECORDED, never silent.
+    # Resolved directly from the subscription — _plan_gate answers quota, not
+    # which plan the account is on.
+    plan_code, _sub, _locked = metrics_store.effective_plan(customer["id"])
+    if not config.plan_has(plan_code, "scheduled_delivery"):
+        metrics_store.mark_job_run(job_id, "skipped_plan_feature")
+        result["status"] = "skipped_plan_feature"
+        return result
+
     # BALANCE GATE — a scheduled fire must NEVER push an account below zero. If the
     # balance is already spent, do NOT open a run: deliver the "余额不足" notice
     # (best-effort) and record one skipped delivery row per channel for the audit.
@@ -1040,6 +1053,58 @@ def _start_scheduler():
 # ---------------------------------------------------------------------------
 # Poll a run
 # ---------------------------------------------------------------------------
+def _load_job_memory(job_id):
+    """The job's SharedMemory (live or persisted), or None when it doesn't exist
+    OR its on-disk snapshot is unreadable (corrupt JSON / IO error). Routes treat
+    both the same way — a friendly 404 — instead of a 500 (redesign Phase 5 A5)."""
+    live = JOBS.get(job_id)
+    if live is not None:
+        return live
+    try:
+        return SharedMemory.load(job_id, store_dir=MEMORY_DIR)
+    except (ValueError, OSError):
+        return None
+
+
+# Redesign Phase 5 (A1) — the SERVER-side twin of run_feed.js's customer filter.
+# Customers get the theater, never the machinery (plan §2 rules 1 + 8): the
+# token_manager's lines, the orchestrator's context-block debug confirmations
+# (which echo prompt content), and the raw budget/length warnings never leave
+# the server for a non-admin session. What gets LOGGED is unchanged — tests and
+# founder debugging keep the full feed; the filter lives at the route.
+_MACHINERY_INFO_PREFIXES = (
+    "Received COMPANY MEMORY",
+    "Received KPI MAPPING",
+    "Received INDUSTRY PACK",
+)
+_BUDGET_REACHED_PREFIX = "Token budget reached"
+_FRIENDLY_BUDGET_LINE = "已达本次生成上限，本次报告到此为止。"
+
+
+def _customer_safe_activity(activity):
+    """The activity feed with machinery entries removed (and the token-budget
+    warning replaced by a friendly Chinese line a customer can understand)."""
+    out = []
+    for a in activity or []:
+        if not isinstance(a, dict):
+            continue
+        if a.get("agent") == "token_manager":
+            continue
+        msg = str(a.get("message") or "")
+        if a.get("type") == "info" and msg.startswith(_MACHINERY_INFO_PREFIXES):
+            continue
+        if msg.startswith("Output hit its length ceiling"):
+            continue
+        if msg.startswith(_BUDGET_REACHED_PREFIX):
+            friendly = dict(a)
+            friendly["agent"] = "system"
+            friendly["message"] = _FRIENDLY_BUDGET_LINE
+            out.append(friendly)
+            continue
+        out.append(a)
+    return out
+
+
 def _job_owner_check(job_id):
     """Redesign Phase 4 ownership gate for the job capability URLs. When the
     job's snapshot is tied to a company brain (company_id set), the requester
@@ -1050,7 +1115,7 @@ def _job_owner_check(job_id):
 
     Returns (error_response, status_code) to refuse the request, or (None, None)
     to let it through."""
-    memory = JOBS.get(job_id) or SharedMemory.load(job_id, store_dir=MEMORY_DIR)
+    memory = _load_job_memory(job_id)
     owner_company = memory.snapshot().get("company_id") if memory is not None else None
     if not owner_company:
         return None, None
@@ -1064,8 +1129,14 @@ def _job_owner_check(job_id):
 
 @app.route("/api/status/<job_id>")
 def status(job_id):
-    memory = JOBS.get(job_id) or SharedMemory.load(job_id, store_dir=MEMORY_DIR)
+    customer = _current_customer()
+    memory = _load_job_memory(job_id)
     if memory is None:
+        # Phase 5 (A4) — login comes BEFORE existence disclosure, mirroring the
+        # /api/files gate: an anonymous probe gets the same 401 whether the job
+        # id exists or not, so unguessable ids can't be confirmed from outside.
+        if not customer:
+            return jsonify({"error": "请先登录。"}), 401
         return jsonify({"error": "Unknown job id."}), 404
     snap = memory.snapshot()
     # Phase 4 — a job owned by a company is only pollable by that company.
@@ -1073,6 +1144,10 @@ def status(job_id):
         refusal, code = _job_owner_check(job_id)
         if refusal is not None:
             return refusal, code
+    # Phase 5 (A1) — non-admin sessions get the customer-filtered feed; what is
+    # LOGGED is unchanged (founder/is_admin keeps the raw machinery lines).
+    if not _is_admin(customer):
+        snap["activity"] = _customer_safe_activity(snap.get("activity"))
     return jsonify(snap)
 
 
@@ -2112,16 +2187,71 @@ def _clean_channels(raw):
     return out
 
 
+# The scheduler runs Asia/Shanghai (agent_team.scheduler.DEFAULT_TIMEZONE) — the
+# wall clock the customer typed their 每周一 08:00 in.
+_SCHEDULE_TZ = "Asia/Shanghai"
+
+
+def _job_next_run_at(job):
+    """The job's next fire time as an ISO string (Asia/Shanghai), or None for an
+    inactive job / malformed cron. Computed STATELESSLY from the cron expression —
+    never from live APScheduler state: in production the web process runs with
+    RUN_SCHEDULER=0 (a dedicated scheduler container owns the cron loop), so the
+    web process has no live Job to ask (redesign B5)."""
+    if not job.get("active"):
+        return None
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+        trigger = CronTrigger.from_crontab((job.get("cron_expr") or "").strip(),
+                                           timezone=_SCHEDULE_TZ)
+        nxt = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
+        return nxt.isoformat() if nxt else None
+    except Exception:
+        return None
+
+
+def _jobs_payload(company_id):
+    """The account's jobs, each enriched with next_run_at (every jobs response
+    carries it so the UI can re-render from any CRUD reply)."""
+    jobs = metrics_store.list_scheduled_jobs(company_id)
+    for j in jobs:
+        j["next_run_at"] = _job_next_run_at(j)
+    return jobs
+
+
+def _scheduling_plan_gate(customer):
+    """D3 (redesign B5) — scheduled auto-delivery is 企业版 (pro) only. Returns
+    (allowed, refusal_response): the refusal is a structured, friendly 402 the
+    schedule page and the wizard both render as the upgrade explainer."""
+    plan_code, _sub, _locked = metrics_store.effective_plan(customer["id"])
+    if config.plan_has(plan_code, "scheduled_delivery"):
+        return True, None
+    pro = config.plan("pro")
+    return False, (jsonify({
+        "error": ("定时自动送达是%s专属功能。升级后，每周一早上 8 点经营报告自动"
+                  "生成并送达企业微信和邮箱 — 你什么都不用做。" % pro["label"]),
+        "code": "upgrade_required",
+        "feature": "scheduled_delivery",
+        "required_plan": pro["code"],
+        "required_plan_label": pro["label"],
+    }), 402)
+
+
 @app.route("/api/scheduled-jobs", methods=["GET", "POST"])
 def scheduled_jobs():
-    """List (GET) or create (POST) the logged-in account's 定时任务."""
+    """List (GET) or create (POST) the logged-in account's 定时任务. Creation is
+    plan-gated per D3 — only plans with the scheduled_delivery feature."""
     customer, company_id = _brain_company()
     if not customer:
         return jsonify({"error": "请先登录。"}), 401
     if not company_id:
         return jsonify({"error": "公司大脑暂不可用。"}), 503
     if request.method == "GET":
-        return jsonify({"jobs": metrics_store.list_scheduled_jobs(company_id)})
+        return jsonify({"jobs": _jobs_payload(company_id)})
+
+    allowed, refusal = _scheduling_plan_gate(customer)
+    if not allowed:
+        return refusal
 
     data = request.get_json(silent=True) or {}
     name_cn = (data.get("name_cn") or "").strip()
@@ -2142,7 +2272,7 @@ def scheduled_jobs():
         active=bool(data.get("active", True)),
     )
     SCHEDULER.reload()
-    return jsonify({"jobs": metrics_store.list_scheduled_jobs(company_id),
+    return jsonify({"jobs": _jobs_payload(company_id),
                     "job_id": job_id, "ok": True})
 
 
@@ -2158,6 +2288,12 @@ def scheduled_jobs_update():
         "name_cn", "cron_expr", "industry_override", "goal_template",
         "source_mode", "fixed_file_paths", "delivery_channels",
         "budget_cny", "active") if k in data}
+    # D3 — RE-ACTIVATING a job is gated like creating one (deactivating, editing
+    # fields, or deleting stays open so a downgraded account can manage its rows).
+    if fields.get("active"):
+        allowed, refusal = _scheduling_plan_gate(customer)
+        if not allowed:
+            return refusal
     if "cron_expr" in fields and not _valid_cron((fields.get("cron_expr") or "").strip()):
         return jsonify({"error": "频率无效（cron 表达式无法解析）。"}), 400
     if "delivery_channels" in fields:
@@ -2166,7 +2302,7 @@ def scheduled_jobs_update():
     SCHEDULER.reload()
     if not ok:
         return jsonify({"error": "任务不存在或无权修改。"}), 404
-    return jsonify({"jobs": metrics_store.list_scheduled_jobs(company_id), "ok": True})
+    return jsonify({"jobs": _jobs_payload(company_id), "ok": True})
 
 
 @app.route("/api/scheduled-jobs/delete", methods=["POST"])
@@ -2181,7 +2317,177 @@ def scheduled_jobs_delete():
     SCHEDULER.reload()
     if not ok:
         return jsonify({"error": "任务不存在或无权删除。"}), 404
-    return jsonify({"jobs": metrics_store.list_scheduled_jobs(company_id), "ok": True})
+    return jsonify({"jobs": _jobs_payload(company_id), "ok": True})
+
+
+# ---------------------------------------------------------------------------
+# DELIVERY TEST (redesign B5) — the 送达渠道 card's 发送测试消息 button. Errors
+# are credential-free by construction (delivery.py's senders guarantee it) and
+# the webhook URL is NEVER echoed back in the response.
+# ---------------------------------------------------------------------------
+@app.route("/api/delivery/test", methods=["POST"])
+@limiter.limit(config.run_rate_limit, key_func=_run_rate_key)
+def delivery_test():
+    """Send one test message over a configured channel. Body: {"channel":
+    "email"|"wechat"}. Returns {ok: true} or {ok: false, error: <friendly>}."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    data = request.get_json(silent=True) or {}
+    channel = (data.get("channel") or "").strip().lower()
+    product = config.product_name()
+    if channel == "email":
+        ok, err = delivery.send_email(
+            customer.get("email"), "%s · 测试消息" % product,
+            "您好：\n\n这是一条来自 %s 的测试消息。收到它，说明邮箱送达渠道配置"
+            "正常，之后的定时经营报告会发送到这个邮箱。\n\n— %s" % (product, product))
+    elif channel == "wechat":
+        webhook = (metrics_store.get_branding(company_id).get("wechat_webhook")
+                   if company_id else "")
+        ok, err = delivery.send_wechat_webhook(
+            webhook,
+            "### %s · 测试消息\n\n收到这条消息，说明企业微信群机器人配置正常。\n"
+            "之后的定时经营报告会自动推送到这个群。" % product)
+    else:
+        return jsonify({"error": "channel 必须是 email 或 wechat。"}), 400
+    # One audit row per attempt — channel + outcome only, never the webhook/creds.
+    try:
+        metrics_store.record_delivery(channel,
+                                      DELIVERY_SENT if ok else DELIVERY_FAILED,
+                                      error=(None if ok else err))
+    except Exception:
+        pass
+    if ok:
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": err})
+
+
+# ---------------------------------------------------------------------------
+# DATA INBOX (数据收件箱, redesign B5) — view and edit the staged upload batch
+# the next "latest_upload" scheduled fire will read. No run is started here.
+# ---------------------------------------------------------------------------
+def _upload_inbox_payload(company_id):
+    """{batch, batch_time, files: [{name, size}]} for the newest upload batch.
+    size is the on-disk (ciphertext when FERNET is set) size — the name and the
+    count are the load-bearing information for the UI."""
+    latest = metrics_store.latest_upload_dir(company_id) if company_id else None
+    files = metrics_store.list_files(latest) if latest else []
+    batch = os.path.basename(latest) if latest else None
+    batch_time = None
+    if batch:
+        try:  # batch dirs are named UTC "%Y%m%d-%H%M%S-%f" (new_upload_batch_dir)
+            batch_time = (datetime.strptime(batch, "%Y%m%d-%H%M%S-%f")
+                          .replace(tzinfo=timezone.utc).isoformat())
+        except ValueError:
+            batch_time = None
+    return {
+        "batch": batch,
+        "batch_time": batch_time,
+        "files": [{"name": os.path.basename(p), "size": os.path.getsize(p)}
+                  for p in files],
+    }
+
+
+@app.route("/api/uploads/latest")
+def uploads_latest():
+    """The files the next scheduled "latest_upload" fire will use."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    return jsonify(_upload_inbox_payload(company_id))
+
+
+# 数据收件箱 file names are customer-facing, load-bearing info — werkzeug's
+# secure_filename strips every non-ASCII char, so 六月销售明细.csv would land
+# (and display) as "csv", and any two Chinese-named files would collide. This
+# keeps CJK while preserving the same safety: basename only (no traversal),
+# no separators/控制字符, never empty or dot-only.
+_UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+
+def _inbox_safe_filename(filename, fallback="file"):
+    base = os.path.basename((filename or "").replace("\\", "/")).strip()
+    base = _UNSAFE_FILENAME_CHARS.sub("_", base).strip(" .")
+    if not base:
+        return fallback
+    return base[:120]
+
+
+@app.route("/api/uploads", methods=["POST"])
+def uploads_modify():
+    """Add files to / remove files from the data inbox WITHOUT starting a run.
+
+    Multipart: repeated "files" parts to add, plus an optional "remove" form
+    field (a JSON array of file names, or repeated plain values). A pure-removal
+    call may instead POST JSON {"remove": ["name.csv", ...]}.
+
+    CRITICAL batch semantics: latest_upload_dir returns only the single newest
+    batch, so the current batch's files are COPIED FORWARD into the new batch
+    (minus removals / same-name replacements) before the new files are saved —
+    otherwise adding one file would silently drop everything previously staged.
+    Upload guards are identical to /api/run and run BEFORE anything is written."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"error": "公司档案暂不可用。"}), 503
+
+    upload_files = [f for f in request.files.getlist("files") if f and f.filename]
+    remove = set()
+    if request.form.getlist("remove"):
+        for raw in request.form.getlist("remove"):
+            raw = (raw or "").strip()
+            if raw.startswith("["):
+                try:
+                    remove.update(str(x) for x in json.loads(raw))
+                except ValueError:
+                    pass
+            elif raw:
+                remove.add(raw)
+    else:
+        body = request.get_json(silent=True) or {}
+        if isinstance(body.get("remove"), list):
+            remove.update(str(x) for x in body["remove"])
+    if not upload_files and not remove:
+        return jsonify({"error": "请添加要上传的文件，或指定要移除的文件。"}), 400
+
+    # Phase 8 upload guards, verbatim from /api/run — count, size, magic bytes.
+    if len(upload_files) > config.MAX_UPLOAD_FILES_PER_RUN:
+        return jsonify({"error": f"一次最多上传 {config.MAX_UPLOAD_FILES_PER_RUN} 个文件"
+                                 f"（你选择了 {len(upload_files)} 个）。"}), 400
+    max_mb = config.MAX_UPLOAD_BYTES_PER_FILE // (1024 * 1024)
+    for f in upload_files:
+        head = f.stream.read(16)
+        f.stream.seek(0, os.SEEK_END)
+        size = f.stream.tell()
+        f.stream.seek(0)
+        if security.looks_executable(head):
+            return jsonify({"error": f"文件 “{f.filename}” 看起来是可执行程序，已拒绝上传。"}), 400
+        if size > config.MAX_UPLOAD_BYTES_PER_FILE:
+            return jsonify({"error": f"文件 “{f.filename}” 超过单个文件 {max_mb} MB 的上限。"}), 400
+
+    new_names = {_inbox_safe_filename(f.filename) for f in upload_files}
+    # Resolve the CURRENT batch before creating the new one — new_upload_batch_dir
+    # creates its (newer) directory immediately, which would become the "latest".
+    prev = metrics_store.latest_upload_dir(company_id)
+    carry = [p for p in metrics_store.list_files(prev)
+             if os.path.basename(p) not in remove
+             and os.path.basename(p) not in new_names] if prev else []
+    if len(carry) + len(upload_files) > config.MAX_UPLOAD_FILES_PER_RUN:
+        return jsonify({"error": f"数据收件箱最多保留 {config.MAX_UPLOAD_FILES_PER_RUN} 个文件，"
+                                 f"请先移除一些旧文件。"}), 400
+
+    batch_dir = metrics_store.new_upload_batch_dir(company_id)
+    for sp in carry:
+        dest = os.path.join(batch_dir, os.path.basename(sp))
+        shutil.copy2(sp, dest)  # sp is already encrypted; copy keeps it so
+        crypto.encrypt_file_in_place(dest)  # idempotent — guarantees at-rest
+    for f in upload_files:
+        path = os.path.join(batch_dir, _inbox_safe_filename(f.filename))
+        f.save(path)
+        crypto.encrypt_file_in_place(path)
+
+    return jsonify(_upload_inbox_payload(company_id))
 
 
 # ---------------------------------------------------------------------------
@@ -2191,6 +2497,9 @@ def scheduled_jobs_delete():
 # ---------------------------------------------------------------------------
 @app.route("/api/reports")
 def list_reports():
+    """The 历史报告 rows — CUSTOMER-SAFE fields only (redesign Phase 5 A3):
+    total_cost_yuan is internal COGS and report_path is a raw job id, so neither
+    leaves the server; has_content says whether /reports/<id> can render."""
     customer, company_id = _brain_company()
     if not customer:
         return jsonify({"error": "请先登录。"}), 401
@@ -2200,6 +2509,12 @@ def list_reports():
     for r in metrics_store.list_runs(company_id, limit=100):
         rid = r.get("id")
         has_pdf = os.path.isfile(metrics_store.report_pdf_path(company_id, rid))
+        job_id = (r.pop("report_path", "") or "").strip()
+        r.pop("total_cost_yuan", None)
+        r["has_content"] = bool(
+            job_id and re.fullmatch(r"[A-Za-z0-9_-]+", job_id)
+            and (job_id in JOBS
+                 or os.path.isfile(os.path.join(MEMORY_DIR, "%s.json" % job_id))))
         r["has_pdf"] = has_pdf
         r["download_url"] = ("/api/reports/%s/download" % rid) if has_pdf else None
         out.append(r)
@@ -2237,10 +2552,11 @@ def report_detail(run_id):
 
     # History-import and crashed runs never stamped a job id — no web content,
     # though the PDF (when present, included above) may still be downloadable.
+    # A corrupt-but-present snapshot degrades the same way (A5), never a 500.
     job_id = (run.get("report_path") or "").strip()
     memory = None
     if job_id and re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
-        memory = SharedMemory.load(job_id, store_dir=MEMORY_DIR)
+        memory = _load_job_memory(job_id)
     if memory is None:
         out["error"] = "报告内容不可用（该报告可能来自历史导入，或当时未正常完成）。"
         return jsonify(out), 404
@@ -2738,7 +3054,12 @@ def admin_reconciliation():
 ONBOARDING_FIRST_GOAL = ("生成第一份经营周报：总结各渠道核心指标、环比变化与异常，"
                          "并给出下周建议。")
 ONBOARDING_WEEKLY_JOB_NAME = "每周经营周报"
-ONBOARDING_WEEKLY_CRON = "0 8 * * 1"        # Monday 08:00 (scheduler runs Asia/Shanghai)
+# Monday 08:00 (the scheduler runs Asia/Shanghai). The weekday is NAMED, not
+# numeric, on purpose: APScheduler's from_crontab numbers day_of_week 0=Monday
+# (NOT the crontab standard 0=Sunday), so the old "0 8 * * 1" silently fired
+# TUESDAY mornings — found by the stateless next_run_at (redesign Phase 5/B1).
+# "mon" means Monday under both conventions.
+ONBOARDING_WEEKLY_CRON = "0 8 * * mon"
 
 
 def _onboarding_ctx():
@@ -2968,12 +3289,17 @@ def onboarding_generate():
 @app.route("/api/onboarding/schedule", methods=["POST"])
 def onboarding_schedule():
     """Step 5 设置每周定时 — ONE click creates (or re-points) the standing
-    Monday-08:00 weekly job with the chosen delivery channels."""
+    Monday-08:00 weekly job with the chosen delivery channels. Plan-gated per
+    D3: a non-企业版 account gets the structured 402 the wizard renders as the
+    upgrade explainer (it used to silently create the job)."""
     customer, company_id = _onboarding_ctx()
     if not customer:
         return jsonify({"error": "请先登录。"}), 401
     if not company_id:
         return jsonify({"error": "公司档案暂不可用。"}), 503
+    allowed, refusal = _scheduling_plan_gate(customer)
+    if not allowed:
+        return refusal
     data = request.get_json(silent=True) or {}
     channels = _clean_channels(data.get("channels")) or ["email"]
 

@@ -16,15 +16,27 @@ const MACHINERY_INFO_PREFIXES = [
   "Received INDUSTRY PACK",
 ];
 
+// The raw budget warning is machinery; customers see a friendly line instead.
+// (The server already filters /api/status for non-admins — Phase 5 A1; this
+// client filter stays as belt-and-braces.)
+const BUDGET_REACHED_PREFIX = "Token budget reached";
+const FRIENDLY_BUDGET_LINE = "已达本次生成上限，本次报告到此为止。";
+
 export function filterActivity(activity, { admin = isAdmin() } = {}) {
   if (admin) return activity || [];
-  return (activity || []).filter((a) => {
-    if (a.agent === "token_manager") return false;
+  const out = [];
+  for (const a of activity || []) {
+    if (a.agent === "token_manager") continue;
     const msg = String(a.message || "");
-    if (a.type === "info" && MACHINERY_INFO_PREFIXES.some((p) => msg.startsWith(p))) return false;
-    if (msg.startsWith("Output hit its length ceiling")) return false;
-    return true;
-  });
+    if (a.type === "info" && MACHINERY_INFO_PREFIXES.some((p) => msg.startsWith(p))) continue;
+    if (msg.startsWith("Output hit its length ceiling")) continue;
+    if (msg.startsWith(BUDGET_REACHED_PREFIX)) {
+      out.push({ ...a, agent: "system", message: FRIENDLY_BUDGET_LINE });
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
 }
 
 export function feedHTML(activity, opts) {

@@ -1150,3 +1150,93 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
   .founder-scope .fusion-answers { grid-template-columns: 1fr; }
   .founder-scope .fusion-compose .run-btn, .founder-scope .dash-save-bar .run-btn { width: 100%; }
 }
+
+/* ===========================================================================
+   PHASE 5 — 定时与送达 (schedule & delivery) + 工作台 (workbench).
+   =========================================================================== */
+
+/* ---- toggle atom (no switch CSS survived the redesign — built once here) --- */
+.toggle { position: relative; display: inline-block; width: 42px; height: 24px; flex: none; vertical-align: middle; }
+.toggle input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; margin: 0; cursor: pointer; }
+.toggle .tknob { position: absolute; inset: 0; background: #cbd5e1; border-radius: 999px; transition: background .15s ease; pointer-events: none; }
+.toggle .tknob::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px;
+  background: #fff; border-radius: 50%; box-shadow: 0 1px 2px rgba(16,24,40,.25); transition: left .15s ease;
+}
+.toggle input:checked + .tknob { background: var(--accent); }
+.toggle input:checked + .tknob::after { left: 21px; }
+.toggle input:focus-visible + .tknob { box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* ---- 定时与送达: schedule card ---------------------------------------------- */
+.sch-job {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border: 1px solid var(--line); border-radius: 11px; padding: 12px 14px; margin-top: 10px;
+  background: var(--card);
+}
+.sch-job-main { min-width: 0; flex: 1 1 220px; }
+.sch-job-name { font-size: 14.5px; font-weight: 800; }
+.sch-job-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+.sch-job-next { font-size: 12.5px; font-weight: 700; color: var(--accent-text, var(--accent)); }
+.sch-job-acts { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.sch-del { border: none; background: none; color: var(--muted); font-size: 13px; cursor: pointer; padding: 4px 6px; }
+.sch-del:hover { color: var(--red); }
+.freq-tabs { display: flex; gap: 8px; margin: 4px 0 10px; flex-wrap: wrap; }
+.freq-tab {
+  border: 1.5px solid var(--line); background: var(--card); border-radius: 999px;
+  padding: 6px 14px; font: inherit; font-size: 13px; font-weight: 700; color: var(--muted); cursor: pointer;
+}
+.freq-tab.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.sch-grid { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.sch-grid[hidden] { display: none !important; } /* hidden attr must beat display:flex */
+.sch-grid .ob-select, .sch-grid .field-input { width: auto; min-width: 110px; }
+.sch-inline-label { font-size: 13px; color: var(--muted); font-weight: 600; }
+.sch-check-row { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 4px; }
+.sch-ok { color: var(--green); font-size: 13px; font-weight: 600; margin: 10px 0 0; }
+
+/* ---- 定时与送达: 送达渠道 card ----------------------------------------------- */
+.chan-row { border-top: 1px solid var(--line); padding: 14px 0; }
+.chan-row:first-of-type { border-top: none; padding-top: 4px; }
+.chan-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chan-name { font-size: 14px; font-weight: 800; }
+.chan-value { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.chan-test {
+  margin-left: auto; border: 1px solid var(--line); background: var(--card); border-radius: 8px;
+  padding: 7px 12px; font: inherit; font-size: 12.5px; font-weight: 700; color: var(--accent-text, var(--accent)); cursor: pointer; flex: none;
+}
+.chan-test:hover { border-color: var(--accent); background: var(--accent-soft); }
+.chan-test:disabled { opacity: .55; cursor: wait; }
+.chan-result { font-size: 12.5px; font-weight: 600; margin-top: 8px; }
+.chan-result.ok { color: var(--green); }
+.chan-result.err { color: var(--red); }
+.chan-howto { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; padding-left: 18px; line-height: 1.7; }
+.chan-save-row { display: flex; gap: 8px; margin-top: 8px; }
+.chan-save-row .field-input { flex: 1; margin-top: 0; }
+.chan-save-row .ghost-btn { flex: none; width: auto; margin: 0; padding: 9px 16px; }
+
+/* ---- 数据收件箱 -------------------------------------------------------------- */
+.inbox-note { font-size: 12.5px; color: var(--muted); margin: 10px 0 0; line-height: 1.6; }
+
+/* ---- 工作台 (workbench §3.2) -------------------------------------------------- */
+.wb-hero { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin: 0 0 16px; }
+.wb-hero .run-btn { width: auto; margin: 0; padding: 12px 26px; }
+.wb-count-val { font-size: 30px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: .01em; margin: 8px 0 2px; }
+.wb-count-sub { font-size: 12.5px; color: var(--muted); }
+.wb-report-title { font-size: 15px; font-weight: 800; margin: 6px 0 4px; }
+.wb-report-meta { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+.wb-links { display: flex; gap: 14px; margin-top: 12px; font-size: 13px; font-weight: 700; }
+.wb-files { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13px; color: var(--muted); }
+.wb-files li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 0; }
+.wb-card-cta { margin-top: 12px; }
+.wb-card-cta .ghost-btn { width: auto; margin: 0; padding: 8px 16px; }
+
+/* ---- D3 upsell: the Monday-ritual preview ------------------------------------ */
+.ritual-preview {
+  border: 1.5px dashed var(--line); border-radius: 12px; padding: 16px;
+  background: var(--inset); margin-top: 12px;
+}
+.ritual-line { display: flex; align-items: center; gap: 10px; font-size: 13.5px; padding: 7px 0; }
+.ritual-ico { flex: none; }
+@media (max-width: 640px) {
+  .sch-job-acts { margin-left: 0; width: 100%; justify-content: flex-end; }
+  .wb-hero .run-btn { width: 100%; }
+}

@@ -6,7 +6,7 @@
 // it lands on the branded report view at /reports/<run_id>.
 // ===========================================================================
 import * as api from "../api.js";
-import { state, loadIndustries } from "../state.js";
+import { state, loadAgents, loadIndustries } from "../state.js";
 import { esc, fmtBytes, pageHead, quotaMeter, statusPillHTML, renderMarkdown } from "../components.js";
 import { startRunFeed } from "../run_feed.js";
 
@@ -25,6 +25,10 @@ export function mount(el, ctx) {
 
   const templates = (state.meta && state.meta.report_goal_templates) || [];
   if (templates.length) typeCode = templates[0].code; // first = default (经营周报)
+
+  // A hard load of /new starts with an empty org chart — without it the live
+  // feed would show raw agent ids ("report_writer") instead of 报告撰写人.
+  loadAgents();
 
   el.innerHTML = `<div class="page page-narrow">
     ${pageHead("生成报告", "选择报告类型、拖入数据文件，点一个按钮 — 不用写任何提示词。")}

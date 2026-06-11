@@ -2,8 +2,8 @@
 // reports.js — 历史报告 (plan §3.5). Every run grouped by month with a type
 // badge (周报/月报/自定义/历史导入), an extended status pill, the web report
 // deep link (/reports/<id>) and the PDF download. Rows without web content
-// (report_path "") are not links — PDF-only or plain. The empty state sells
-// the Monday-morning schedule.
+// (has_content false) are not links — PDF-only or plain. The empty state
+// sells the Monday-morning schedule.
 // ===========================================================================
 import * as api from "../api.js";
 import { state } from "../state.js";
@@ -13,7 +13,7 @@ function typeBadge(r) {
   const templates = (state.meta && state.meta.report_goal_templates) || [];
   const t = templates.find((x) => x.goal === r.goal_text);
   if (t) return t.code === "monthly" ? ["月报", "rep-badge-monthly"] : ["周报", "rep-badge-weekly"];
-  if (!(r.report_path || "").trim()) return ["历史导入", "rep-badge-import"];
+  if (!r.has_content) return ["历史导入", "rep-badge-import"];
   return ["自定义", "rep-badge-custom"];
 }
 
@@ -31,7 +31,7 @@ function dayLabel(iso) {
 
 function rowHTML(r) {
   const [badge, badgeCls] = typeBadge(r);
-  const viewable = !!(r.report_path || "").trim();
+  const viewable = !!r.has_content;
   const title = badge === "历史导入" ? "历史数据导入" : `经营${badge === "月报" ? "月报" : badge === "周报" ? "周报" : "分析报告"}`;
   return `<div class="rep-row ${viewable ? "viewable" : ""}" ${viewable ? `data-id="${esc(r.id)}" role="link" tabindex="0"` : ""}>
       <div class="rep-main">

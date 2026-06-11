@@ -105,6 +105,19 @@ def _post_json(client, url, payload=None):
     return client.post(url, json=(payload or {}))
 
 
+def _subscribe_pro(account_id):
+    """An active 企业版 subscription for the wizard account. Step 5 (每周定时)
+    is plan-gated per redesign D3 (Phase 5/B5) — a free account now gets the
+    structured 402 upgrade explainer instead of silently creating the job."""
+    now = datetime.utcnow()
+    with db.session_scope() as s:
+        s.add(Subscription(account_id=str(account_id), plan_code="pro",
+                           status="active", current_period_start=now,
+                           current_period_end=now + timedelta(days=30),
+                           cancel_at_period_end=False,
+                           created_at=now, updated_at=now))
+
+
 # ---------------------------------------------------------------------------
 # (1) Fresh account + demo data → finished first report through the wizard.
 # ---------------------------------------------------------------------------
@@ -114,6 +127,7 @@ def test_wizard_demo_data_reaches_finished_first_report_e2e(
     store = _store(tmp_path, **{"wizard@corp.com": "password1"})
     account_id = store.find_by_email("wizard@corp.com")["id"]
     start_balance = store.find_by_email("wizard@corp.com")["balance"]
+    _subscribe_pro(account_id)   # D3 — step 5's scheduling is 企业版-only
     client = _login(store, "wizard@corp.com")
 
     # The wizard opens (funnel start) and resumes at step 1.
@@ -182,7 +196,10 @@ def test_wizard_demo_data_reaches_finished_first_report_e2e(
     assert final_state["done"] is True
     jobs = metrics_store.list_scheduled_jobs(company_id)
     assert len(jobs) == 1
-    assert jobs[0]["cron_expr"] == "0 8 * * 1" and jobs[0]["active"] is True
+    # "0 8 * * mon" — named weekday on purpose: APScheduler's from_crontab
+    # numbers day_of_week 0=Monday (non-standard), so numeric "1" fired Tuesday.
+    assert jobs[0]["cron_expr"] == app.ONBOARDING_WEEKLY_CRON
+    assert jobs[0]["active"] is True
     assert jobs[0]["delivery_channels"] == ["email"]
 
     # A second click must update, never duplicate (idempotent).

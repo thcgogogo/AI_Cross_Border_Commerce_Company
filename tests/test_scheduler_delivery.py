@@ -136,6 +136,23 @@ def _fund_account(store_path, email, balance):
     return store
 
 
+def _subscribe_pro(account_id):
+    """Give the account an active 企业版 subscription. Scheduled auto-delivery is
+    plan-gated per redesign D3 (Phase 5/B5): without the scheduled_delivery
+    feature a fire skips as "skipped_plan_feature" before any other gate, so the
+    fixtures below subscribe their accounts to reach the behavior under test."""
+    from datetime import datetime, timedelta
+
+    from agent_team.models import SUB_ACTIVE, Subscription
+    now = datetime.utcnow()
+    with db.session_scope() as s:
+        s.add(Subscription(account_id=str(account_id), plan_code="pro",
+                           status=SUB_ACTIVE, current_period_start=now,
+                           current_period_end=now + timedelta(days=30),
+                           cancel_at_period_end=False,
+                           created_at=now, updated_at=now))
+
+
 # ---------------------------------------------------------------------------
 # (a) A funded scheduled job RUNS: PDF produced, balance dropped, email delivered.
 # ---------------------------------------------------------------------------
@@ -148,6 +165,7 @@ def test_scheduled_job_runs_produces_pdf_bills_and_delivers(
     store = _fund_account(tmp_path / "customers.json", "owner@corp.com", 50_000.0)
     cust = store.find_by_email("owner@corp.com")
     cust_id, start_balance = cust["id"], cust["balance"]
+    _subscribe_pro(cust_id)                  # D3 — scheduling is 企业版-only
     monkeypatch.setattr(app, "CUSTOMERS", store)
     # The orchestrator imports ModelRouter at module scope, so patch it THERE; with
     # llm=None the orchestrator builds our fake with the real biller wired in.
@@ -264,13 +282,14 @@ def test_zero_balance_skips_run_and_logs_notice(
     cid = metrics_store.get_or_create_company("broke@corp.com", company_name="BrokeCo")
 
     store = _fund_account(tmp_path / "customers.json", "broke@corp.com", 0.0)
+    _subscribe_pro(store.find_by_email("broke@corp.com")["id"])  # D3 gate first
     monkeypatch.setattr(app, "CUSTOMERS", store)
     # No SMTP configured → the best-effort notice send is a no-op; the audit row
     # (a skipped delivery carrying the 余额不足 reason) is what we assert.
     monkeypatch.delenv("SMTP_HOST", raising=False)
 
     job_id = metrics_store.create_scheduled_job(
-        cid, "每周经营周报", "0 8 * * 1",
+        cid, "每周经营周报", "0 8 * * mon",
         goal_template="生成上周经营周报",
         delivery_channels=["email"])
     job = metrics_store.get_scheduled_job(job_id)

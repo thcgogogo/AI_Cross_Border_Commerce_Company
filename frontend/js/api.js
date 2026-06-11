@@ -111,6 +111,12 @@ export const createScheduledJob = (payload) => postJSON("/api/scheduled-jobs", p
 export const updateScheduledJob = (payload) => postJSON("/api/scheduled-jobs/update", payload);
 export const deleteScheduledJob = (id) => postJSON("/api/scheduled-jobs/delete", { id });
 
+// ---- 送达渠道 + 数据收件箱 (Phase 5 / B5) ------------------------------------------
+export const deliveryTest = (channel) => postJSON("/api/delivery/test", { channel });
+export const getUploadsLatest = () => getJSON("/api/uploads/latest");
+export const modifyUploads = (formData) => postForm("/api/uploads", formData);
+export const removeUploads = (names) => postJSON("/api/uploads", { remove: names });
+
 // ---- onboarding wizard -----------------------------------------------------------
 export const onboardingState = () => getJSON("/api/onboarding/state");
 export const onboardingStart = () => postJSON("/api/onboarding/start");
