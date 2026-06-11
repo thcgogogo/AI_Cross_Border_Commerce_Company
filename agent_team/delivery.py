@@ -145,8 +145,13 @@ def send_service_account_template(company_id, template_payload):
 def report_download_url(run_id):
     """The login-protected download URL for a run's PDF. Base from APP_BASE_URL
     (default the local dev server). The route itself re-checks ownership."""
-    base = (os.environ.get("APP_BASE_URL") or "http://127.0.0.1:8000").rstrip("/")
-    return "%s/api/reports/%s/download" % (base, run_id)
+    return "%s/api/reports/%s/download" % (config.app_base_url(), run_id)
+
+
+def report_view_url(run_id):
+    """The login-protected web report view (redesign B7) — the mobile-readable
+    page the 企业微信/email message deep-links, next to the PDF download."""
+    return "%s/reports/%s" % (config.app_base_url(), run_id)
 
 
 def _summary_blurb(report_markdown):
@@ -154,14 +159,17 @@ def _summary_blurb(report_markdown):
     return blurb or "本期经营周报已生成，详见附件。"
 
 
-def _deliver_email(company_name, blurb, pdf_path, recipient_email, download_url):
+def _deliver_email(company_name, blurb, pdf_path, recipient_email, download_url,
+                   view_url=None):
     if not recipient_email:
         return False, "缺少账户邮箱"
     subject = "%s · 经营周报" % company_name
     body = ("%s 您好：\n\n本期经营周报已生成。\n\n本周核心结论：\n%s\n"
             % (company_name, blurb))
+    if view_url:
+        body += "\n在线查看报告（需登录）：%s\n" % view_url
     if download_url:
-        body += "\n在线查看（需登录）：%s\n" % download_url
+        body += "\n下载 PDF：%s\n" % download_url
     body += "\n（完整报告见附件 PDF）\n— %s AI 团队" % config.product_name()
     # The PDF is encrypted at rest; hand SMTP a real plaintext temp file (no-op
     # passthrough when FERNET is unset), cleaned up on context exit.
@@ -169,13 +177,15 @@ def _deliver_email(company_name, blurb, pdf_path, recipient_email, download_url)
         return send_email(recipient_email, subject, body, attachment_path=plain)
 
 
-def _deliver_wechat(company_id, company_name, blurb, download_url):
+def _deliver_wechat(company_id, company_name, blurb, download_url, view_url=None):
     webhook = metrics_store.get_branding(company_id).get("wechat_webhook")
     if not webhook:
         return False, "未配置企业微信群机器人 webhook"
     lines = ["### %s · 经营周报" % company_name, "", "**本周核心结论：**", blurb]
+    if view_url:
+        lines += ["", "[在线查看报告（需登录）](%s)" % view_url]
     if download_url:
-        lines += ["", "[点击查看完整报告（需登录）](%s)" % download_url]
+        lines += ["", "[下载 PDF](%s)" % download_url]
     return send_wechat_webhook(webhook, "\n".join(lines))
 
 
@@ -188,6 +198,9 @@ def deliver_report(*, company_id, run_id, channels, pdf_path, report_markdown,
     company_name = (company_name or "本公司").strip() or "本公司"
     if download_url is None:
         download_url = report_download_url(run_id)
+    # The B7 deep link: the mobile-readable web report at /reports/<run_id>.
+    # Only meaningful when the run row exists (history-less fires send PDF only).
+    view_url = report_view_url(run_id) if run_id else None
     blurb = _summary_blurb(report_markdown)
 
     results = []
@@ -195,9 +208,11 @@ def deliver_report(*, company_id, run_id, channels, pdf_path, report_markdown,
         ch = (raw_ch or "").strip().lower()
         if ch == "email":
             ok, err = _deliver_email(company_name, blurb, pdf_path,
-                                     recipient_email, download_url)
+                                     recipient_email, download_url,
+                                     view_url=view_url)
         elif ch == "wechat":
-            ok, err = _deliver_wechat(company_id, company_name, blurb, download_url)
+            ok, err = _deliver_wechat(company_id, company_name, blurb,
+                                      download_url, view_url=view_url)
         elif ch in ("service_account", "service-account", "fwh"):
             ok, err = send_service_account_template(company_id, {})
         else:

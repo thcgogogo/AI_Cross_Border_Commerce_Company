@@ -600,6 +600,246 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 }
 
 /* ===========================================================================
+   PHASE 4 — the report experience: 生成报告, the branded report view, 历史报告.
+   Mobile-first: the report view must be excellent at 390px (plan §2 rule 7).
+   =========================================================================== */
+
+/* ---- 生成报告: report-type cards ------------------------------------------ */
+.rn-type-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 4px; }
+.rn-type {
+  display: flex; flex-direction: column; gap: 4px; text-align: left; cursor: pointer;
+  border: 1.5px solid var(--line); border-radius: 11px; padding: 13px 14px;
+  background: var(--card); font-family: inherit; transition: all .15s ease;
+}
+.rn-type:hover { border-color: var(--accent); }
+.rn-type.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-soft); }
+.rn-type-name { font-size: 14.5px; font-weight: 800; color: var(--ink); }
+.rn-type.on .rn-type-name { color: var(--accent); }
+.rn-type-sub { font-size: 12px; color: var(--muted); line-height: 1.45; }
+@media (max-width: 640px) { .rn-type-grid { grid-template-columns: 1fr; } }
+
+/* ---- 生成报告: drag-drop file zone ----------------------------------------- */
+.drop-zone {
+  margin-top: 4px; padding: 26px 16px; text-align: center; cursor: pointer;
+  border: 1.5px dashed var(--line); border-radius: 11px; background: var(--inset);
+  transition: all .15s ease;
+}
+.drop-zone:hover, .drop-zone:focus-visible { border-color: var(--accent); outline: none; }
+.drop-zone.drag { border-color: var(--accent); background: var(--accent-soft); }
+.dz-icon { font-size: 26px; margin-bottom: 4px; }
+.dz-title { font-size: 14px; font-weight: 700; }
+.dz-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.file-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.file-item {
+  display: flex; align-items: center; gap: 10px; font-size: 13.5px;
+  border: 1px solid var(--line); border-radius: 9px; padding: 8px 12px; margin-top: 6px;
+  background: var(--card);
+}
+.file-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-size { flex: none; color: var(--muted); font-size: 12px; }
+.file-rm {
+  flex: none; margin-left: auto; width: 24px; height: 24px; border-radius: 50%;
+  border: none; background: var(--inset); color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer;
+}
+.file-rm:hover { background: var(--red-soft); color: var(--red); }
+.rn-quota { margin-top: 18px; }
+.rn-quota:empty { margin-top: 0; }
+.rn-live-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.run-feed {
+  max-height: 380px; overflow-y: auto; border: 1px solid var(--line);
+  border-radius: 10px; padding: 4px 14px; margin-top: 14px; background: var(--card);
+}
+
+/* ---- markdown tables (reports carry them; phones scroll them) --------------- */
+.md-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 10px 0; }
+.md-table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+.md-table th, .md-table td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; white-space: nowrap; }
+.md-table th { background: var(--inset); font-weight: 700; font-size: 12.5px; color: var(--muted); }
+.md-table td { font-variant-numeric: tabular-nums; }
+
+/* ---- 报告视图: the branded document frame ----------------------------------- */
+.report-page { max-width: 880px; }
+.report-frame {
+  --brand: var(--accent);
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.report-brandbar {
+  display: flex; align-items: center; gap: 14px; padding: 16px 24px;
+  background: var(--brand); color: #fff;
+}
+.report-logo { width: 40px; height: 40px; border-radius: 9px; object-fit: contain; background: #fff; flex: none; }
+.report-id { min-width: 0; }
+.report-title { font-size: 19px; font-weight: 800; letter-spacing: -.01em; }
+.report-date { font-size: 12.5px; opacity: .92; display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.report-date .pill { background: rgba(255,255,255,.18); color: #fff; }
+.brandbar-dl {
+  margin-left: auto; flex: none; font-size: 13px; font-weight: 700; text-decoration: none;
+  color: #fff; border: 1px solid rgba(255,255,255,.55); border-radius: 9px; padding: 7px 14px;
+}
+.brandbar-dl:hover { background: rgba(255,255,255,.14); }
+
+/* sticky, horizontally-scrolling section TOC (its chip styles already exist) */
+.report-toc {
+  position: sticky; top: 57px; z-index: 10;
+  background: var(--card); border-bottom: 1px solid var(--line); padding: 8px 24px;
+}
+.report-inner { padding: 22px 24px 26px; }
+.report-section { scroll-margin-top: 110px; }
+.report-body .report-section + .report-section { margin-top: 6px; }
+.report-foot {
+  text-align: center; color: var(--muted); font-size: 12.5px;
+  border-top: 1px solid var(--line); padding: 14px 18px; background: var(--inset);
+}
+.report-actions { margin-top: 26px; text-align: center; }
+.report-actions .dl-btn {
+  display: block; max-width: 320px; margin: 0 auto; text-decoration: none; text-align: center;
+}
+.forward-hint { color: var(--muted); font-size: 12.5px; margin: 10px 0 0; }
+
+/* the prepended audit warning (## ⚠️ 数据核验提示) as a banner */
+.audit-banner {
+  border: 1px solid rgba(201,138,0,.4); background: var(--amber-soft);
+  border-radius: 11px; padding: 14px 16px; margin: 4px 0 18px;
+}
+.audit-banner .ab-title { font-weight: 800; font-size: 14.5px; color: var(--amber); margin-bottom: 6px; }
+.audit-banner p, .audit-banner li { font-size: 13.5px; }
+.audit-banner .ab-foot { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+
+/* 【N】 anchors are buttons now */
+.anchor-chip { border: none; font-family: inherit; line-height: inherit; vertical-align: 1px; margin: 0 1px; }
+.anchor-chip:hover { background: var(--accent); color: #fff; }
+
+/* ---- 数据来源与核验 appendix -------------------------------------------------- */
+.sources-block {
+  margin-top: 26px; border: 1px solid var(--line); border-radius: 11px; background: var(--inset);
+}
+.sources-block summary {
+  cursor: pointer; list-style: none; font-weight: 800; font-size: 14px; padding: 13px 16px;
+}
+.sources-block summary::-webkit-details-marker { display: none; }
+.sources-block summary::after { content: "▾"; float: right; color: var(--muted); }
+.sources-block[open] summary::after { content: "▴"; }
+.sources-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; padding: 0 10px 12px; }
+.sources-table { border-collapse: collapse; width: 100%; font-size: 12.5px; background: var(--card); }
+.sources-table th, .sources-table td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; }
+.sources-table th { background: var(--inset); color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.sources-table .src-anchor { font-weight: 800; color: var(--accent); white-space: nowrap; }
+.sources-table tr.flash td { background: var(--amber-soft); transition: background .3s ease; }
+.verify-badge {
+  display: inline-block; font-size: 11px; font-weight: 800; white-space: nowrap;
+  color: var(--green); background: var(--green-soft); border-radius: 999px; padding: 2px 9px;
+}
+.sources-banner {
+  margin-top: 26px; border: 1px solid rgba(201,138,0,.4); background: var(--amber-soft);
+  border-radius: 11px; padding: 12px 16px; font-size: 13px; color: var(--ink);
+}
+
+/* ---- per-section feedback bar -------------------------------------------------- */
+.fb-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  border: 1px dashed var(--line); border-radius: 10px; padding: 8px 12px; margin: 12px 0 20px;
+  background: var(--inset);
+}
+.fb-bar.fb-done { color: var(--green); font-size: 13px; font-weight: 600; border-style: solid; }
+.fb-q { font-size: 12.5px; color: var(--muted); flex: none; }
+.fb-vote {
+  border: 1px solid var(--line); background: var(--card); border-radius: 8px;
+  font-size: 15px; padding: 4px 10px; cursor: pointer; line-height: 1;
+}
+.fb-vote.selected { border-color: var(--accent); background: var(--accent-soft); }
+.fb-comment {
+  flex: 1; min-width: 150px; border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 10px; font: inherit; font-size: 12.5px; background: var(--card); color: var(--ink);
+}
+.fb-comment:focus { outline: none; border-color: var(--accent); }
+.fb-submit, .fb-savepref {
+  border: none; background: var(--accent); color: #fff; border-radius: 8px;
+  padding: 6px 13px; font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; flex: none;
+}
+.fb-submit:disabled, .fb-savepref:disabled { background: #aebadb; cursor: default; }
+.fb-savepref { background: var(--green); }
+.fb-msg { font-size: 12px; flex: none; }
+.fb-msg.ok { color: var(--green); }
+.fb-msg.err { color: var(--red); }
+
+/* ---- UNKNOWN_TERMS confirm banner ----------------------------------------------- */
+.confirm-banner {
+  margin-top: 26px; border: 1px solid var(--accent); background: var(--accent-soft);
+  border-radius: 11px; padding: 16px 18px;
+}
+.confirm-banner .cb-title { font-weight: 800; font-size: 15px; }
+.confirm-banner .cb-sub { color: var(--muted); font-size: 13px; margin: 4px 0 10px; }
+.cb-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.cb-term { flex: none; min-width: 90px; font-weight: 700; font-size: 13.5px; }
+.cb-actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.cb-actions .run-btn, .cb-actions .ghost-btn { width: auto; margin-top: 0; padding: 9px 18px; }
+@media (max-width: 560px) { .cb-row { flex-direction: column; align-items: stretch; gap: 4px; } }
+
+/* ---- mobile bottom sheet (anchor → source row on a phone) ------------------------- */
+.bsheet-backdrop {
+  position: fixed; inset: 0; background: rgba(16,24,40,.4); z-index: 70;
+  opacity: 0; transition: opacity .2s ease;
+}
+.bsheet-backdrop.show { opacity: 1; }
+.bsheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 71;
+  background: var(--card); border-radius: 16px 16px 0 0; box-shadow: var(--shadow);
+  padding: 10px 20px calc(20px + env(safe-area-inset-bottom));
+  transform: translateY(102%); transition: transform .22s ease;
+  max-height: 70vh; overflow-y: auto;
+}
+.bsheet.open { transform: none; }
+.bsheet-grip { width: 38px; height: 4px; border-radius: 999px; background: var(--line); margin: 4px auto 12px; }
+.bsheet-title { font-weight: 800; font-size: 15px; margin-bottom: 10px; }
+.bsheet-rows { margin: 0; }
+.bsheet-rows dt { font-size: 11.5px; color: var(--muted); font-weight: 700; margin-top: 10px; }
+.bsheet-rows dd { margin: 2px 0 0; font-size: 14px; }
+.bsheet .bsheet-close { margin-top: 16px; }
+
+/* ---- 历史报告 ----------------------------------------------------------------------- */
+.rep-month { margin-bottom: 22px; }
+.rep-month-h { font-size: 13px; font-weight: 800; color: var(--muted); letter-spacing: .04em; margin: 0 0 8px; }
+.rep-card { padding: 4px 6px; }
+.rep-row {
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+  border-bottom: 1px solid var(--line); border-radius: 8px;
+}
+.rep-row:last-child { border-bottom: none; }
+.rep-row.viewable { cursor: pointer; }
+.rep-row.viewable:hover { background: var(--accent-soft); }
+.rep-main { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.rep-title { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rep-badge { flex: none; font-size: 11px; font-weight: 800; border-radius: 999px; padding: 2px 9px; }
+.rep-badge-weekly { color: var(--accent); background: var(--accent-soft); }
+.rep-badge-monthly { color: #7c5cff; background: rgba(124,92,255,.12); }
+.rep-badge-custom { color: var(--amber); background: var(--amber-soft); }
+.rep-badge-import { color: var(--muted); background: var(--inset); }
+.rep-date { flex: none; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rep-actions { flex: none; display: flex; gap: 4px; }
+.rep-act {
+  font-size: 12.5px; font-weight: 700; text-decoration: none; color: var(--accent);
+  border: 1px solid var(--line); border-radius: 8px; padding: 5px 11px; background: var(--card);
+}
+.rep-act:hover { border-color: var(--accent); }
+.muted-act { color: var(--muted); border-style: dashed; }
+
+/* ---- report experience at phone width ----------------------------------------------- */
+@media (max-width: 720px) {
+  .report-page { padding-left: 10px; padding-right: 10px; }
+  .report-brandbar { padding: 14px 16px; gap: 10px; }
+  .report-title { font-size: 16.5px; }
+  .brandbar-dl { padding: 6px 10px; font-size: 12px; }
+  .report-toc { top: 53px; padding: 8px 14px; }
+  .report-inner { padding: 16px 14px 20px; }
+  .md-table th, .md-table td { padding: 6px 8px; font-size: 12.5px; }
+  .fb-bar { padding: 8px 10px; }
+  .fb-comment { min-width: 100%; order: 5; }
+  .rep-row { flex-wrap: wrap; row-gap: 6px; }
+  .rep-main { flex-basis: 100%; }
+}
+
+/* ===========================================================================
    ===========================================================================
    FOUNDER SCOPE (内部工具) — the old dark dev theme, alive only in here.
    The five machinery views are ports of the pre-redesign screens; their HTML

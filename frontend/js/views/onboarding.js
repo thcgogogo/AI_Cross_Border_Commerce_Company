@@ -4,13 +4,16 @@
 // funnel events, light theme. The step list itself is reworked in Phase 8
 // (history-import step + plan-gated finale).
 //
-// One Phase-2 adaptation: the old “查看完整报告” jumped into the Chat bot tab,
-// which no longer exists; until the Phase-4 report view lands, the finished
-// report opens inline inside the wizard card.
+// Phase 4: step 4's live feed runs through the shared customer filter
+// (run_feed.js — no machinery lines), and 查看完整报告 closes the wizard and
+// opens the branded report view at /reports/<run_id>. The inline preview
+// survives only as the fallback for runs without a run id.
 // ===========================================================================
 import * as api from "../api.js";
 import { state, loadAgents, loadIndustries } from "../state.js";
-import { esc, feedRowHTML, renderMarkdown } from "../components.js";
+import { esc, renderMarkdown } from "../components.js";
+import { feedHTML } from "../run_feed.js";
+import { navigate } from "../main.js";
 import { openLoginModal } from "./auth.js";
 
 const $ = (id) => document.getElementById(id);
@@ -197,16 +200,18 @@ function obStep3HTML() {
 
 function obStep4HTML() {
   const status = obSnap ? obSnap.status : null;
-  const acts = (obSnap && obSnap.activity) || [];
-  const feed = acts.length
-    ? `<ul class="ob-feed" id="obFeed">${acts.map(feedRowHTML).join("")}</ul>` : "";
+  const acts = feedHTML((obSnap && obSnap.activity) || []);
+  const feed = acts ? `<ul class="ob-feed" id="obFeed">${acts}</ul>` : "";
   let action;
   if (status === "done") {
-    const report = obShowReport && obSnap.final_report
+    // With a run id the full branded report view exists — link there. The
+    // inline preview only remains for runs the company brain couldn't record.
+    const hasRunId = obSnap.run_id != null && obSnap.run_id !== "";
+    const report = !hasRunId && obShowReport && obSnap.final_report
       ? `<div class="ob-report-preview report-body">${renderMarkdown(obSnap.final_report)}</div>` : "";
     action = `<p class="ob-ok">✅ 第一份报告已生成！</p>
       <div class="ob-actions">
-        <button id="obViewReport" class="run-btn" type="button">${obShowReport ? "收起报告" : "查看完整报告"}</button>
+        <button id="obViewReport" class="run-btn" type="button">${!hasRunId && obShowReport ? "收起报告" : "查看完整报告"}</button>
         <button id="obNext4" class="run-btn" type="button">下一步：设置每周定时 →</button>
       </div>
       ${report}`;
@@ -276,7 +281,15 @@ function wireOnboardBody(body) {
   on("obNext2", () => { obStep = 3; obError = ""; renderOnboard(); });
   on("obKpiBtn", obConfirmKpi);
   on("obGenBtn", obGenerate);
-  on("obViewReport", () => { obShowReport = !obShowReport; renderOnboard(); });
+  on("obViewReport", () => {
+    if (obSnap && obSnap.run_id != null && obSnap.run_id !== "") {
+      closeOnboarding();
+      navigate(`/reports/${obSnap.run_id}`);
+      return;
+    }
+    obShowReport = !obShowReport; // fallback: inline preview (no run id)
+    renderOnboard();
+  });
   on("obNext4", () => { obStep = 5; obError = ""; renderOnboard(); });
   on("obSchedBtn", obSchedule);
   on("obFinish", closeOnboarding);

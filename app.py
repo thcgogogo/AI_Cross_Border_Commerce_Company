@@ -1040,12 +1040,40 @@ def _start_scheduler():
 # ---------------------------------------------------------------------------
 # Poll a run
 # ---------------------------------------------------------------------------
+def _job_owner_check(job_id):
+    """Redesign Phase 4 ownership gate for the job capability URLs. When the
+    job's snapshot is tied to a company brain (company_id set), the requester
+    must be a logged-in session whose company OWNS the job — the snapshot holds
+    the customer's uploaded raw text, so an unguessable URL alone is no longer
+    enough once an owner exists. Jobs without a company_id (pre-login flows,
+    plain demo jobs, files with no snapshot) keep the original open behavior.
+
+    Returns (error_response, status_code) to refuse the request, or (None, None)
+    to let it through."""
+    memory = JOBS.get(job_id) or SharedMemory.load(job_id, store_dir=MEMORY_DIR)
+    owner_company = memory.snapshot().get("company_id") if memory is not None else None
+    if not owner_company:
+        return None, None
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if company_id != owner_company:
+        return jsonify({"error": "无权访问该任务。"}), 403
+    return None, None
+
+
 @app.route("/api/status/<job_id>")
 def status(job_id):
     memory = JOBS.get(job_id) or SharedMemory.load(job_id, store_dir=MEMORY_DIR)
     if memory is None:
         return jsonify({"error": "Unknown job id."}), 404
-    return jsonify(memory.snapshot())
+    snap = memory.snapshot()
+    # Phase 4 — a job owned by a company is only pollable by that company.
+    if snap.get("company_id"):
+        refusal, code = _job_owner_check(job_id)
+        if refusal is not None:
+            return refusal, code
+    return jsonify(snap)
 
 
 @app.route("/api/files/<job_id>/<path:filename>")
@@ -1059,6 +1087,10 @@ def download_file(job_id, filename):
     our origin."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id or ""):
         return jsonify({"error": "Bad job id."}), 400
+    # Phase 4 — files of a company-owned job require that company's session.
+    refusal, code = _job_owner_check(job_id)
+    if refusal is not None:
+        return refusal, code
     path = safe_join(os.path.join(OUTPUT_DIR, job_id), filename)
     if not path or not os.path.isfile(path):
         return jsonify({"error": "File not found."}), 404
@@ -2172,6 +2204,55 @@ def list_reports():
         r["download_url"] = ("/api/reports/%s/download" % rid) if has_pdf else None
         out.append(r)
     return jsonify({"reports": out})
+
+
+@app.route("/api/reports/<int:run_id>")
+def report_detail(run_id):
+    """The web report view's data source (redesign §3.4 / B7): one finished run
+    as a CUSTOMER-SAFE document. Login required and the run must belong to the
+    requesting account's company (the same auth ladder as the PDF download).
+
+    runs.report_path stores the run's JOB ID (orchestrator._finish_run), which
+    keys the memory_store snapshot. Only report-facing fields are returned —
+    NEVER documents (the uploaded raw text), artifacts, or activity (machinery)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    run = metrics_store.get_run(run_id)
+    if not run:
+        return jsonify({"error": "报告不存在。"}), 404
+    if not company_id or run.get("company_id") != company_id:
+        return jsonify({"error": "无权访问该报告。"}), 403
+
+    has_pdf = os.path.isfile(metrics_store.report_pdf_path(company_id, run_id))
+    out = {
+        "id": run_id,
+        "goal_text": run.get("goal_text") or "",
+        "status": run.get("status"),
+        "started_at": run.get("started_at"),
+        "finished_at": run.get("finished_at"),
+        "has_pdf": has_pdf,
+        "download_url": ("/api/reports/%s/download" % run_id) if has_pdf else None,
+    }
+
+    # History-import and crashed runs never stamped a job id — no web content,
+    # though the PDF (when present, included above) may still be downloadable.
+    job_id = (run.get("report_path") or "").strip()
+    memory = None
+    if job_id and re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+        memory = SharedMemory.load(job_id, store_dir=MEMORY_DIR)
+    if memory is None:
+        out["error"] = "报告内容不可用（该报告可能来自历史导入，或当时未正常完成）。"
+        return jsonify(out), 404
+
+    snap = memory.snapshot()
+    out.update({
+        "final_report": snap.get("final_report") or "",
+        "sources": snap.get("sources") or [],
+        "sources_status": snap.get("sources_status"),
+        "unknown_terms": snap.get("unknown_terms") or [],
+    })
+    return jsonify(out)
 
 
 @app.route("/api/reports/<int:run_id>/download")

@@ -42,50 +42,104 @@ export function cny(n, dp = 2) {
 }
 
 // ---- tiny, SAFE markdown renderer (escape first, then format) ----------------
-export function renderMarkdown(md) {
+// Phase 4 additions, still escape-first: GFM tables (reports carry them — the
+// wrap div lets them scroll horizontally on a phone), safe [text](url) links,
+// and — opt-in via `opts.anchors` — the report's 【N】 source anchors rendered
+// as tappable chips wired by the report view.
+export function renderMarkdown(md, opts = {}) {
   const lines = esc(md).split("\n");
   let html = "";
   let listType = null;
+  let tableRows = null;
   const closeList = () => {
     if (listType) { html += `</${listType}>`; listType = null; }
   };
+  const flushTable = () => {
+    if (tableRows) { html += tableHTML(tableRows, opts); tableRows = null; }
+  };
   for (const raw of lines) {
     const line = raw.trimEnd();
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      closeList();
+      (tableRows = tableRows || []).push(line.trim());
+      continue;
+    }
+    flushTable();
     if (/^\s*#{1,6}\s+/.test(line)) {
       closeList();
       const level = line.match(/^\s*(#{1,6})/)[1].length;
-      html += `<h${level}>${inline(line.replace(/^\s*#{1,6}\s+/, ""))}</h${level}>`;
+      html += `<h${level}>${inline(line.replace(/^\s*#{1,6}\s+/, ""), opts)}</h${level}>`;
     } else if (/^\s*[-*]\s+/.test(line)) {
       if (listType !== "ul") { closeList(); html += "<ul>"; listType = "ul"; }
-      html += `<li>${inline(line.replace(/^\s*[-*]\s+/, ""))}</li>`;
+      html += `<li>${inline(line.replace(/^\s*[-*]\s+/, ""), opts)}</li>`;
     } else if (/^\s*\d+\.\s+/.test(line)) {
       if (listType !== "ol") { closeList(); html += "<ol>"; listType = "ol"; }
-      html += `<li>${inline(line.replace(/^\s*\d+\.\s+/, ""))}</li>`;
+      html += `<li>${inline(line.replace(/^\s*\d+\.\s+/, ""), opts)}</li>`;
     } else if (line.trim() === "") {
       closeList();
     } else {
       closeList();
-      html += `<p>${inline(line)}</p>`;
+      html += `<p>${inline(line, opts)}</p>`;
     }
   }
   closeList();
+  flushTable();
   return html;
 }
 
-function inline(s) {
-  return s
+// "| a | b |" → ["a", "b"] (cells keep their inline markdown for inline()).
+function splitTableRow(row) {
+  return row.replace(/^\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
+}
+
+const isSeparatorRow = (cells) =>
+  cells.length > 0 && cells.every((c) => /^:?-{2,}:?$/.test(c));
+
+function tableHTML(rows, opts) {
+  const parsed = rows.map(splitTableRow);
+  let header = null;
+  let body = parsed;
+  if (parsed.length >= 2 && isSeparatorRow(parsed[1])) {
+    header = parsed[0];
+    body = parsed.slice(2).filter((r) => !isSeparatorRow(r));
+  }
+  const cells = (tag, r) => r.map((c) => `<${tag}>${inline(c, opts)}</${tag}>`).join("");
+  let html = '<div class="md-table-wrap"><table class="md-table">';
+  if (header) html += `<thead><tr>${cells("th", header)}</tr></thead>`;
+  html += `<tbody>${body.map((r) => `<tr>${cells("td", r)}</tr>`).join("")}</tbody>`;
+  return html + "</table></div>";
+}
+
+function inline(s, opts = {}) {
+  s = s
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+?)`/g, "<code>$1</code>")
-    .replace(/(^|[^*])\*([^*]+?)\*(?!\*)/g, "$1<em>$2</em>");
+    .replace(/(^|[^*])\*([^*]+?)\*(?!\*)/g, "$1<em>$2</em>")
+    // Links: the text/href are already HTML-escaped (escape-first); only
+    // http(s)/mailto/relative/in-page destinations become real links.
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, text, href) => {
+      if (!/^(https?:\/\/|mailto:|\/|#)/i.test(href)) return m;
+      return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+    });
+  if (opts.anchors) {
+    s = s.replace(/【\s*(\d+)\s*】/g,
+      '<button type="button" class="anchor-chip" data-anchor="$1">【$1】</button>');
+  }
+  return s;
 }
 
 // ---- status pill (Chinese-first) ---------------------------------------------
+// Covers both live job snapshots (starting/running/done/error) and the DB run
+// statuses the 历史报告 rows carry (running/succeeded/failed/stopped_budget).
 export function statusPillHTML(status) {
   const map = {
     starting: ["启动中…", "pill-running"],
     running: ["生成中…", "pill-running"],
     done: ["已完成", "pill-done"],
     error: ["出错", "pill-error"],
+    succeeded: ["已完成", "pill-done"],
+    failed: ["生成失败", "pill-error"],
+    stopped_budget: ["已中止", "pill-idle"],
   };
   const [label, cls] = map[status] || ["待开始", "pill-idle"];
   return `<span class="pill ${cls}">${label}</span>`;

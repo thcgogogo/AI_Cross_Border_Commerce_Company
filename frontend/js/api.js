@@ -56,6 +56,7 @@ export const setAgentModel = (agentId, model) =>
 
 // ---- reports / feedback / learning loop --------------------------------------
 export const getReports = () => getJSON("/api/reports");
+export const getReport = (runId) => getJSON(`/api/reports/${encodeURIComponent(runId)}`);
 export const sendFeedback = (payload) => postJSON("/api/feedback", payload);
 export const saveFeedbackPreference = (id) => postJSON("/api/feedback/save-preference", { id });
 export const confirmGlossaryTerms = (answers) => postJSON("/api/glossary/confirm", { answers });

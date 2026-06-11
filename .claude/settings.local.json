@@ -32,7 +32,16 @@
       "Bash(curl -s http://localhost:8000/api/status/onboard-4122f52a37)",
       "Bash(.venv/bin/python -m pytest tests/test_sources_truncation.py -v)",
       "Bash(git add *)",
-      "Bash(git commit -m 'UI redesign Phase 3: Tangent AI brand + full 营销首页 with real sample-report showcase *)"
+      "Bash(git commit -m 'UI redesign Phase 3: Tangent AI brand + full 营销首页 with real sample-report showcase *)",
+      "Bash(sed -n 240,275p /Users/brucetang/Company_Agent_Demo/docs/ui-redesign-plan.md)",
+      "Bash(sed -n 120,140p /Users/brucetang/Company_Agent_Demo/docs/ui-redesign-plan.md)",
+      "Bash(sed -n 300,320p /Users/brucetang/Company_Agent_Demo/docs/ui-redesign-plan.md)",
+      "Bash(sed -n '125,140p' /Users/brucetang/Company_Agent_Demo/docs/ui-redesign-plan.md)",
+      "Bash(sed -n '305,315p' /Users/brucetang/Company_Agent_Demo/docs/ui-redesign-plan.md)",
+      "Bash(sed -n '415,455p' /Users/brucetang/Company_Agent_Demo/agent_team/pdf_report.py)",
+      "Bash(sqlite3 /Users/brucetang/Company_Agent_Demo/data/company_brain.db \"SELECT id, company_id, status, report_path FROM runs ORDER BY id DESC LIMIT 8;\")",
+      "Bash(sqlite3 /Users/brucetang/Company_Agent_Demo/data/company_brain.db \"SELECT version_num FROM alembic_version;\")",
+      "Bash(git commit -m 'UI redesign Phase 4: report experience — zero-prompt 生成报告, branded /reports/<id> document view, 历史报告 archive, B7 delivery deep links + job ownership gates *)"
     ]
   }
 }
