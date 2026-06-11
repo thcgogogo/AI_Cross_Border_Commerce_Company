@@ -544,11 +544,11 @@ def _notify_renewal(sub, plan, order, pay_link):
         "%s 您好：\n\n您的「%s」订阅将于 %s 到期。\n"
         "请确认续费（¥%.2f / %d天）：\n%s\n\n"
         "到期后有 %d 天宽限期；逾期未续费将锁定功能（仅保留数据导出），"
-        "续费成功后立即恢复。\n— 统一智能体中转站"
+        "续费成功后立即恢复。\n— %s"
         % (contact.get("name") or "客户", plan["label"],
            (sub.get("current_period_end") or "")[:10], order["amount_yuan"],
            config.SUBSCRIPTION_PERIOD_DAYS, pay_link,
-           config.subscription_grace_days()))
+           config.subscription_grace_days(), config.product_name()))
     try:
         if contact.get("email"):
             delivery.send_email(contact["email"], "订阅续费提醒", body)

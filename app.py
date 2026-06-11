@@ -434,9 +434,12 @@ def _save_model_overrides():
 
 
 def _agents_payload():
-    """The org chart for the UI. `model` is the EFFECTIVE model (UI pick wins)."""
+    """The org chart for the UI. `model` is the EFFECTIVE model (UI pick wins).
+    `name_cn` is the customer-facing Chinese role name (redesign B1) — the
+    restyled live feed shows it instead of the English title."""
     return [
         {"id": a["id"], "name": a["name"], "title": a["title"],
+         "name_cn": a.get("name_cn", ""),
          "reports_to": a["reports_to"], "model": config.effective_model(a["id"])}
         for a in config.AGENTS
     ]
@@ -549,6 +552,11 @@ def meta():
     """Currency + model-function metadata so the UI can format ¥ and build the
     function tabs / modality lines without hard-coding any of it."""
     return jsonify({
+        # Redesign B1 — product identity + the zero-prompt report templates, so
+        # every customer-facing surface brands and composes goals from config.
+        "product_name": config.product_name(),
+        "product_tagline": config.product_tagline(),
+        "report_goal_templates": config.REPORT_GOAL_TEMPLATES,
         "currency": config.CURRENCY,
         "currency_symbol": config.CURRENCY_SYMBOL,
         "usd_to_cny": config.USD_TO_CNY,
@@ -604,8 +612,9 @@ def _plan_gate(customer):
     the daily tick persists a transition):
       - past_due → everything locked EXCEPT data export (downloads stay open —
         they are separate routes this gate never touches);
-      - the plan's monthly report quota (free/basic/pro) caps runs per calendar
-        month; failed runs don't count.
+      - the plan's report quota caps run starts: per calendar month normally, or
+        as a LIFETIME total when the plan sets lifetime_quota (the 免费体验
+        trial's 2 reports, redesign B3); failed runs don't count.
     Quota metering is best-effort: if the brain DB hiccups we allow the run —
     a metering outage must not take the product down."""
     plan_code, _sub, locked = metrics_store.effective_plan(customer["id"])
@@ -619,10 +628,16 @@ def _plan_gate(customer):
             company_id = metrics_store.get_or_create_company(
                 customer.get("email"),
                 company_name=customer.get("company") or customer.get("name"))
-            used = metrics_store.count_runs_this_month(company_id)
+            if p.get("lifetime_quota"):
+                used = metrics_store.count_runs_total(company_id)
+            else:
+                used = metrics_store.count_runs_this_month(company_id)
         except Exception:
             return True, None
         if used >= quota:
+            if p.get("lifetime_quota"):
+                return False, ("免费体验额度已用完（%d/%d 份报告）。"
+                               "升级套餐后可继续生成报告。" % (used, quota))
             return False, ("本月报告额度已用完（%d/%d · %s）。"
                            "升级套餐可提高额度。" % (used, quota, p["label"]))
     return True, None
@@ -1095,10 +1110,14 @@ def _gateway_error(message, status, code):
 
 
 def _account_view(customer):
-    """public_view enriched with a per-model `available` flag (live vs. waiting on a key)."""
+    """public_view enriched with a per-model `available` flag (live vs. waiting on a key)
+    and the founder-mode flag (redesign B2): is_admin marks the account's email as
+    being on the $ADMIN_EMAILS allow-list. UI gating only — every /admin* route
+    keeps its own server-side authorization check."""
     view = CUSTOMERS.public_view(customer)
     for m in view["models"]:
         m["available"] = providers.model_available(m["id"])
+    view["is_admin"] = (customer.get("email") or "").strip().lower() in _admin_emails()
     return view
 
 
@@ -1462,18 +1481,25 @@ def plans_list():
     customer = _current_customer()
     if customer:
         plan_code, sub, locked = metrics_store.effective_plan(customer["id"])
+        p = config.plan(plan_code)
         used = 0
         try:
             company_id = metrics_store.get_or_create_company(
                 customer.get("email"),
                 company_name=customer.get("company") or customer.get("name"))
-            used = metrics_store.count_runs_this_month(company_id)
+            # Mirror the run gate (redesign B3): lifetime-quota plans (免费体验)
+            # meter ALL non-failed runs, not just this calendar month's.
+            if p.get("lifetime_quota"):
+                used = metrics_store.count_runs_total(company_id)
+            else:
+                used = metrics_store.count_runs_this_month(company_id)
         except Exception:
             pass
         out["current"] = {
             "plan_code": plan_code, "locked": locked, "subscription": sub,
             "reports_used_this_month": used,
-            "monthly_report_quota": config.plan(plan_code)["monthly_report_quota"],
+            "monthly_report_quota": p["monthly_report_quota"],
+            "lifetime_quota": bool(p.get("lifetime_quota")),
         }
     return jsonify(out)
 
@@ -2482,9 +2508,10 @@ def admin_fapiao():
                         updated["email"], "发票已开具",
                         "您好：\n\n您申请的发票已开具完成。\n\n"
                         "抬头：%s\n税号：%s\n订单：%s（¥%.2f）\n\n"
-                        "如有问题请直接回复本邮件。\n— 统一智能体中转站"
+                        "如有问题请直接回复本邮件。\n— %s"
                         % (updated["title"], updated["tax_no"],
-                           updated.get("order_no") or "", updated.get("amount_yuan") or 0))
+                           updated.get("order_no") or "", updated.get("amount_yuan") or 0,
+                           config.product_name()))
                 msg = ("已标记开具并通知客户。" if new_status == FAPIAO_ISSUED
                        else "已驳回该申请。")
     status_filter = (request.args.get("status") or "").strip() or None
@@ -2957,7 +2984,7 @@ def _public_page(title, body_html, active=None, extra_nav=""):
     return Response(
         "<!doctype html><html lang=zh><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width, initial-scale=1'>"
-        "<title>" + _h(title) + " · 统一智能体中转站</title>"
+        "<title>" + _h(title) + " · " + _h(config.product_name()) + "</title>"
         "<style>" + _PUBLIC_CSS + "</style></head><body>"
         + nav + body_html + _support_widget_html() + "</body></html>",
         mimetype="text/html; charset=utf-8")

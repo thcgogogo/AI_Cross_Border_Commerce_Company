@@ -44,7 +44,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-PRODUCT_NAME = "统一智能体中转站"
+from . import config
+
 DEFAULT_BRAND_COLOR = "#1D9E75"
 FONT_NAME = "NotoSansSC"
 
@@ -367,15 +368,18 @@ class _NumberedCanvas(canvas.Canvas):
 def build_report_pdf(*, out_path, markdown_text, company_name,
                      report_title="经营周报", period_label="",
                      logo_path=None, brand_color=DEFAULT_BRAND_COLOR,
-                     product_name=PRODUCT_NAME, sources=None,
+                     product_name=None, sources=None,
                      sources_status=None, product_domain=""):
     """Render `markdown_text` into a branded, CJK-correct PDF at `out_path`.
     Returns the path. Raises PdfFontError only if the bundled font is missing.
 
+    `product_name` defaults to the config knob (redesign B1) — resolved at call
+    time so a .env PRODUCT_NAME edit rebrands the next PDF without a restart.
     `sources` / `sources_status` (Phase 6) drive the 数据来源与核验 section:
     a table when status == "ok", a "本次未能生成数据溯源表" banner when parsing
     failed. `product_domain` (from .env, optional) appends to the marketing footer.
     """
+    product_name = product_name or config.product_name()
     _ensure_font()
     brand = _brand(brand_color)
     styles = _styles(brand)

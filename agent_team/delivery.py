@@ -24,7 +24,7 @@ import ssl
 import urllib.request
 from email.message import EmailMessage
 
-from . import crypto, metrics_store, pdf_report
+from . import config, crypto, metrics_store, pdf_report
 from .models import DELIVERY_FAILED, DELIVERY_SENT, DELIVERY_SKIPPED
 
 INSUFFICIENT_BALANCE_MSG = "余额不足，本次周报未生成"
@@ -162,7 +162,7 @@ def _deliver_email(company_name, blurb, pdf_path, recipient_email, download_url)
             % (company_name, blurb))
     if download_url:
         body += "\n在线查看（需登录）：%s\n" % download_url
-    body += "\n（完整报告见附件 PDF）\n— 统一智能体中转站 AI 团队"
+    body += "\n（完整报告见附件 PDF）\n— %s AI 团队" % config.product_name()
     # The PDF is encrypted at rest; hand SMTP a real plaintext temp file (no-op
     # passthrough when FERNET is unset), cleaned up on context exit.
     with crypto.materialize_plaintext(pdf_path) as plain:

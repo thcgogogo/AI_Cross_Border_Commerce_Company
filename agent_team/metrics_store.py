@@ -1792,6 +1792,18 @@ def count_runs_this_month(company_id, now=None):
                            Run.status != RUN_FAILED).count())
 
 
+def count_runs_total(company_id):
+    """How many runs (reports) this company has EVER started — the meter for
+    plans whose quota is a lifetime total (the 免费体验 trial, redesign B3).
+    Failed runs don't count, same as the monthly meter."""
+    if not company_id:
+        return 0
+    with db.session_scope() as s:
+        return int(s.query(Run.id)
+                   .filter(Run.company_id == company_id,
+                           Run.status != RUN_FAILED).count())
+
+
 def account_contact(account_id):
     """{"email", "name"} for an account (renewal notices), or None."""
     if not account_id:

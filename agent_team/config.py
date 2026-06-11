@@ -358,19 +358,27 @@ def app_base_url():
 
 
 # ---- Subscription plans ----------------------------------------------------
-# The plan contract the gating middleware reads. monthly_report_quota caps how
-# many agent-team reports (runs) an account may start per calendar month; seats
-# is the number of team members the plan contracts for (surfaced on the plans
-# page now; enforced when multi-user login lands). The free tier is what every
-# account has with no (or a canceled) subscription — its quota matches the
-# pre-Phase-9 demo experience so existing accounts aren't suddenly locked out.
+# The plan contract the gating middleware reads, aligned with the product brief
+# (redesign B3). Internal codes stay free/basic/pro — no data migration; only
+# labels/quotas/features changed. monthly_report_quota caps how many agent-team
+# reports (runs) an account may start per calendar month — EXCEPT when
+# lifetime_quota is true (the 免费体验 trial): then it is a lifetime total, not
+# a monthly allowance. seats is the number of team members the plan contracts
+# for (surfaced on the plans page now; enforced when multi-user login lands).
+# features holds the plan-gated capability flags, read through plan_has() —
+# scheduled_delivery (定时自动送达), contract_review (合同审查 add-on),
+# priority_models (优先模型).
 PLANS = {
-    "free":  {"code": "free",  "label": "免费版", "monthly_price_yuan": 0.0,
-              "monthly_report_quota": 10,  "seats": 1},
+    "free":  {"code": "free",  "label": "免费体验", "monthly_price_yuan": 0.0,
+              "monthly_report_quota": 2,   "lifetime_quota": True,  "seats": 1,
+              "features": []},
     "basic": {"code": "basic", "label": "基础版", "monthly_price_yuan": 199.0,
-              "monthly_report_quota": 100, "seats": 3},
-    "pro":   {"code": "pro",   "label": "专业版", "monthly_price_yuan": 599.0,
-              "monthly_report_quota": 500, "seats": 10},
+              "monthly_report_quota": 20,  "lifetime_quota": False, "seats": 1,
+              "features": []},
+    "pro":   {"code": "pro",   "label": "企业版", "monthly_price_yuan": 599.0,
+              "monthly_report_quota": 500, "lifetime_quota": False, "seats": 5,
+              "features": ["scheduled_delivery", "contract_review",
+                           "priority_models"]},
 }
 PURCHASABLE_PLANS = ("basic", "pro")   # what /api/pay/create accepts as plan_code
 SUBSCRIPTION_PERIOD_DAYS = 30          # one paid period = 30 days ("a month")
@@ -379,6 +387,11 @@ SUBSCRIPTION_PERIOD_DAYS = 30          # one paid period = 30 days ("a month")
 def plan(code):
     """The PLANS row for `code`, falling back to the free plan."""
     return PLANS.get((code or "").strip().lower()) or PLANS["free"]
+
+
+def plan_has(code, feature):
+    """True when `code`'s plan includes `feature` (e.g. "scheduled_delivery")."""
+    return feature in (plan(code).get("features") or ())
 
 
 def subscription_renewal_lead_days():
@@ -471,6 +484,51 @@ def support_wechat_qr_url():
     popup, or "" (the UI then shows a placeholder telling the operator to set
     SUPPORT_WECHAT_QR_URL)."""
     return _env("SUPPORT_WECHAT_QR_URL")
+
+
+# ===========================================================================
+# PRODUCT IDENTITY (UI redesign B1) — the customer-facing brand, one knob
+# ===========================================================================
+# We sell finished reports, so every customer-facing surface (PDF footer, emails,
+# /api/meta for the web UI) reads the brand from HERE instead of hardcoding it.
+# The default keeps today's name until the real product name is decided (plan
+# §9 D1); set PRODUCT_NAME / PRODUCT_TAGLINE in .env to rebrand without a code
+# change (re-read per call, same live-edit behavior as the support knobs).
+PRODUCT_NAME_DEFAULT = "统一智能体中转站"
+PRODUCT_TAGLINE_DEFAULT = "你的 AI 经营分析团队"
+
+
+def product_name():
+    """The customer-facing product/brand name (PRODUCT_NAME env wins)."""
+    return _env("PRODUCT_NAME") or PRODUCT_NAME_DEFAULT
+
+
+def product_tagline():
+    """The one-line tagline shown under the product name (PRODUCT_TAGLINE env wins)."""
+    return _env("PRODUCT_TAGLINE") or PRODUCT_TAGLINE_DEFAULT
+
+
+# The 生成报告 page composes the /api/run goal from these per report type, so the
+# customer never types a prompt (redesign §3.3 — zero-configuration surface).
+# `label` is the report-type card title; `goal` is the exact text POSTed to the
+# existing /api/run. 自定义分析 is deliberately NOT here: its 补充说明 textarea IS
+# the goal. Ordered list — the UI renders cards in this order, first is default.
+REPORT_GOAL_TEMPLATES = [
+    {
+        "code": "weekly",
+        "label": "经营周报",
+        "goal": ("基于本次上传的最新经营数据，生成一份面向企业老板的经营周报，"
+                 "使用商务汇报体中文：本周核心结论、关键指标与环比变化、与历史数据对比、"
+                 "风险与异常提醒、下周三条建议行动。"),
+    },
+    {
+        "code": "monthly",
+        "label": "经营月报",
+        "goal": ("基于本次上传的最新经营数据，生成一份面向企业老板的经营月报，"
+                 "使用商务汇报体中文：本月核心结论、关键指标与上月环比、与历史趋势对比、"
+                 "风险与异常提醒、下月三条建议行动。"),
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -737,6 +795,7 @@ AGENTS = [
         "id": "ceo",
         "name": "Ava",
         "title": "Chief Executive Officer (Orchestrator)",
+        "name_cn": "首席执行官",  # customer-facing Chinese role name (redesign B1)
         "reports_to": None,
         "model": OPUS,
         "effort": "high",
@@ -753,6 +812,7 @@ AGENTS = [
         "id": "document_analyst",
         "name": "Diego",
         "title": "Document Analyst",
+        "name_cn": "文档分析师",
         "reports_to": "ceo",
         "model": OPUS,  # cost tip: SONNET works well here too
         "effort": "high",
@@ -772,6 +832,7 @@ AGENTS = [
         "id": "records_manager",
         "name": "Nora",
         "title": "Records Manager",
+        "name_cn": "资料管理员",
         "reports_to": "ceo",
         "model": OPUS,  # cost tip: SONNET works well here too
         "effort": "high",
@@ -801,6 +862,7 @@ AGENTS = [
         "id": "data_analyst",
         "name": "Mei",
         "title": "Data Analyst",
+        "name_cn": "数据分析师",
         "reports_to": "ceo",
         "model": OPUS,  # cost tip: SONNET works well here too
         "effort": "high",
@@ -822,6 +884,7 @@ AGENTS = [
         "id": "report_writer",
         "name": "Sam",
         "title": "Report Writer",
+        "name_cn": "报告撰写人",
         "reports_to": "ceo",
         "model": OPUS,
         "effort": "high",
@@ -858,6 +921,7 @@ AGENTS = [
         "id": "media_producer",
         "name": "Leo",
         "title": "Creative & Media Producer",
+        "name_cn": "媒体制作人",
         "reports_to": "ceo",
         "model": OPUS,  # cost tip: SONNET works well here too
         "effort": "high",

@@ -67,14 +67,15 @@ def send_welcome_email(account_id, email, name=None):
         return False
     body = (
         "%s 您好：\n\n"
-        "欢迎使用统一智能体中转站！三步生成你的第一份经营周报：\n\n"
+        "欢迎使用%s！三步生成你的第一份经营周报：\n\n"
         "1. 登录后按「新手引导」上传一份近期经营数据（Excel/CSV），"
         "没有数据就点「用示例数据体验」；\n"
         "2. 点「生成第一份报告」，AI 团队几分钟内完成分析并出报告；\n"
         "3. 一键设置每周一早 8 点自动生成，报告自动送达邮箱/企业微信。\n\n"
         "开始体验：%s\n\n"
-        "有任何问题，直接回复本邮件即可。\n— 统一智能体中转站"
-        % ((name or "").strip() or "客户", config.app_base_url())
+        "有任何问题，直接回复本邮件即可。\n— %s"
+        % ((name or "").strip() or "客户", config.product_name(),
+           config.app_base_url(), config.product_name())
     )
     return _send(email, "欢迎使用 · 三步生成你的第一份经营周报", body, "welcome")
 
@@ -104,8 +105,8 @@ def daily_lifecycle_tick(now=None):
                 "点这里用示例数据一键生成：%s\n"
                 "（登录后会自动打开新手引导，选「用示例数据体验」即可，"
                 "AI 团队几分钟内就能交出一份完整的经营周报。）\n\n"
-                "有任何问题，直接回复本邮件即可。\n— 统一智能体中转站"
-                % (acct["name"], _demo_link())
+                "有任何问题，直接回复本邮件即可。\n— %s"
+                % (acct["name"], _demo_link(), config.product_name())
             )
             if _send(acct["email"], "还没生成第一份报告？用示例数据一键体验",
                      body, "nudge_day3"):
@@ -140,9 +141,9 @@ def send_renewal_receipt(order):
         "套餐：%s\n金额：¥%.2f\n订单号：%s\n"
         "服务有效期至：%s\n\n"
         "如需发票，请在控制台「订单与发票」中对该订单点击「申请发票」。\n"
-        "— 统一智能体中转站"
+        "— %s"
         % (contact.get("name") or "客户", plan["label"],
            float(order.get("amount_yuan") or 0), order.get("order_no") or "",
-           paid_through or "见控制台")
+           paid_through or "见控制台", config.product_name())
     )
     return _send(contact["email"], "订阅付款成功 · 收据", body, "receipt")
