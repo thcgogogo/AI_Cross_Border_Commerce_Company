@@ -110,7 +110,18 @@
       "Bash(.venv/bin/python -m pytest tests/test_metric_extraction.py -q)",
       "Bash(.venv/bin/python -m pytest tests/test_metric_extraction.py::test_parse_pure_prose_and_junk_returns_none -q)",
       "Bash(rm -f /tmp/extract_verify.db && grep -n \"def count_runs_this_month\\\\|def count_runs_total\\\\|def list_runs\\\\|kind\\\\b\" /Users/brucetang/Company_Agent_Demo/agent_team/metrics_store.py | head -20)",
-      "Bash(git commit -m 'Phase 6 Part A: metric-extraction hardening — the company brain finally learns from real runs *)"
+      "Bash(git commit -m 'Phase 6 Part A: metric-extraction hardening — the company brain finally learns from real runs *)",
+      "Bash(.venv/bin/python -m pytest tests/test_redesign_phase6.py -q)",
+      "Bash(sqlite3 data/company_brain.db \"SELECT version_num FROM alembic_version;\")",
+      "Bash(sqlite3 data/company_brain.db \"PRAGMA table_info\\(runs\\);\")",
+      "Bash(sqlite3 data/company_brain.db \"SELECT id, name_cn, cron_expr FROM scheduled_jobs;\")",
+      "Bash(sqlite3 data/company_brain.db \"SELECT id, goal_text, status FROM runs;\")",
+      "Bash(sqlite3 data/company_brain.db \"SELECT COUNT\\(*\\) FROM metrics;\")",
+      "Bash(.venv/bin/python -m alembic upgrade head)",
+      "Bash(sqlite3 data/company_brain.db \"SELECT version_num FROM alembic_version; SELECT id, name_cn, cron_expr FROM scheduled_jobs;\")",
+      "Bash(sqlite3 data/company_brain.db \"SELECT phone, code_hash, purpose, created_at FROM phone_codes ORDER BY id DESC LIMIT 3;\")",
+      "Bash(sqlite3 data/company_brain.db \".tables\")",
+      "Bash(sqlite3 data/company_brain.db \"SELECT DISTINCT period_label FROM metrics WHERE run_id=5 ORDER BY period_label LIMIT 20;\")"
     ]
   }
 }

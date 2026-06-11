@@ -71,6 +71,11 @@ RUN_FAILED = "failed"
 RUN_STOPPED_BUDGET = "stopped_budget"
 RUN_STATUSES = (RUN_RUNNING, RUN_SUCCEEDED, RUN_FAILED, RUN_STOPPED_BUDGET)
 
+# The allowed values for runs.kind (Phase 6 B1): what produced the row.
+RUN_KIND_REPORT = "report"   # interactive / scheduled pipeline run — quota-metered
+RUN_KIND_IMPORT = "import"   # 历史数据导入 back-fill — free, hidden from 历史报告
+RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT)
+
 # Where a scheduled run gets its input files from.
 SOURCE_LATEST_UPLOAD = "latest_upload"   # the most recent files the account uploaded
 SOURCE_FIXED_FILES = "fixed_files"       # an explicit, pinned list of file paths
@@ -192,6 +197,11 @@ class Run(Base):
     finished_at = Column(DateTime, nullable=True)
     status = Column(Enum(*RUN_STATUSES, name="run_status"),
                     default=RUN_RUNNING, nullable=False)
+    # What produced this row: "report" (interactive/scheduled pipeline run) or
+    # "import" (历史数据导入 back-fill). Import runs must never eat the plan's
+    # report quota nor appear in 历史报告 (redesign Phase 6 B1).
+    kind = Column(String(32), nullable=False, default=RUN_KIND_REPORT,
+                  server_default=RUN_KIND_REPORT)
     total_cost_yuan = Column(Float, default=0.0)
     report_path = Column(String(255), nullable=True)
 
@@ -273,7 +283,10 @@ class ScheduledJob(Base):
     id = Column(Integer, primary_key=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     name_cn = Column(String(255), nullable=False)
-    cron_expr = Column(String(128), nullable=False)        # 5-field cron, e.g. "0 8 * * 1"
+    cron_expr = Column(String(128), nullable=False)        # 5-field cron, e.g. "0 8 * * mon"
+                                                           # (named weekday — APScheduler numbers
+                                                           # day_of_week 0=Monday, so numeric "1"
+                                                           # silently means TUESDAY here)
     industry_override = Column(String(64), nullable=True)  # None/"" => use the profile
     goal_template = Column(Text)                           # e.g. "生成上周经营周报"
     source_mode = Column(Enum(*SOURCE_MODES, name="source_mode"),

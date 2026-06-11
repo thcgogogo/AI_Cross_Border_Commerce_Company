@@ -209,3 +209,30 @@ export function quotaMeter({ used, total, caption = "本月已生成" }) {
       <div class="meter"><div class="meter-fill ${cls}" style="width:${pct}%"></div></div>
     </div>`;
 }
+
+// Inline SVG sparkline from a numeric series (企业大脑 KPI tiles, B6). Flat
+// single-color polyline, no axes/labels — the tile text carries the numbers.
+export function sparklineSVG(values, { width = 120, height = 34, stroke = "var(--accent)" } = {}) {
+  const nums = (values || []).map(Number).filter((v) => !isNaN(v));
+  if (nums.length < 2) return "";
+  const min = Math.min(...nums);
+  const span = (Math.max(...nums) - min) || 1;
+  const pad = 2;
+  const step = (width - pad * 2) / (nums.length - 1);
+  const pts = nums.map((v, i) =>
+    `${(pad + i * step).toFixed(1)},${(height - pad - ((v - min) / span) * (height - pad * 2)).toFixed(1)}`).join(" ");
+  return `<svg class="sparkline" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+      <polyline points="${pts}" fill="none" stroke="${stroke}" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+    </svg>`;
+}
+
+// Pill tab strip (the .freq-tab pattern generalized into a reusable atom —
+// 企业大脑 editors are its first user). Views wire the click handler and call
+// it again (or toggle .on) when the active tab changes.
+export function tabsHTML(tabs, activeKey) {
+  return `<div class="tabs" role="tablist">
+      ${tabs.map((t) => `<button type="button" role="tab" class="tab${t.key === activeKey ? " on" : ""}"
+        data-tab="${esc(t.key)}" aria-selected="${t.key === activeKey ? "true" : "false"}">${esc(t.label)}</button>`).join("")}
+    </div>`;
+}

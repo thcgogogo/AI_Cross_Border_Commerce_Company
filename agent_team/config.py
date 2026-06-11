@@ -314,6 +314,13 @@ def run_rate_limit():
     return _env("RUN_RATE_LIMIT") or "10 per hour"
 
 
+def upload_rate_limit():
+    """Per-account limit on 数据收件箱 writes (/api/uploads) — generous enough
+    for drag-drop bursts, tight enough that the inbox can't be hammered (it was
+    the only unthrottled write route, redesign Phase 6 E1)."""
+    return _env("UPLOAD_RATE_LIMIT") or "20 per minute"
+
+
 def ratelimit_enabled():
     """Rate limiting is on by default; set RATELIMIT_ENABLED=0 to disable (e.g. in
     a test that isn't exercising it)."""

@@ -28,6 +28,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from html import escape as _h
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from flask import (Flask, Response, g, jsonify, redirect, request, send_file,
@@ -35,7 +36,7 @@ from flask import (Flask, Response, g, jsonify, redirect, request, send_file,
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from sqlalchemy import text
-from werkzeug.utils import safe_join, secure_filename
+from werkzeug.utils import safe_join
 
 from admin import queries as admin_queries
 from agent_team import (
@@ -55,6 +56,7 @@ from agent_team import (
     reconciliation,
     security,
     sms,
+    trends,
 )
 from agent_team.customers import CustomerStore
 from agent_team.file_tools import parse_file
@@ -81,6 +83,7 @@ from agent_team.models import (
     ORDER_SUBSCRIPTION,
     ORDER_TOPUP,
     RUN_FAILED,
+    RUN_KIND_IMPORT,
     RUN_STOPPED_BUDGET,
     RUN_SUCCEEDED,
     SOURCE_FIXED_FILES,
@@ -315,6 +318,8 @@ JOBS = {}
 IMPORT_JOBS = {}
 IMPORT_MAX_FILES = 12           # how many past spreadsheets you can import at once
 IMPORT_EST_OUTPUT_TOKENS = 700  # rough JSON-array size per file, for the ¥ estimate
+IMPORT_EST_SECONDS_PER_FILE = 15  # rough wall-clock per file — the customer-facing
+                                  # estimate (customers never see the ¥ figures)
 
 # The team's "CFO" — one shared, persistent ¥ spend tracker for the whole app.
 TOKENS = TokenManager(
@@ -744,7 +749,9 @@ def run():
     saved = 0
     saved_paths = []
     for f in upload_files:
-        safe_name = secure_filename(f.filename) or "file"
+        # CJK-safe sanitizer — secure_filename strips every non-ASCII char, so
+        # 六月销售明细.csv landed (and displayed in the feed) as "csv".
+        safe_name = _inbox_safe_filename(f.filename)
         path = os.path.join(job_upload_dir, safe_name)
         f.save(path)
         saved_paths.append(path)
@@ -1941,6 +1948,59 @@ def _clean_kpi_mappings(raw):
     return out
 
 
+# How many KPI trend tiles the 企业大脑 page shows, and how many sparkline
+# points each carries (redesign B6 — "last 12 points").
+BRAIN_KPI_TILE_CAP = 8
+BRAIN_KPI_SERIES_POINTS = 12
+
+
+@app.route("/api/company-brain/summary")
+def brain_summary():
+    """企业大脑 hero stats + KPI trend tiles (redesign B6, plan §3.7) — the
+    page that makes Moat 1 visible. Read-only composition over metrics_store
+    (counts + ONE series GROUP BY) and trends.py (deterministic deltas /
+    streaks / series); zero LLM calls, so it's always fast and free.
+
+    KPI tile selection is data-driven: company-total series (dimension IS
+    NULL) ranked by distinct-period coverage then recency, capped at 8; if no
+    NULL-dimension totals exist (some analyses only break out dimensions),
+    per-dimension series fill in the same way. An empty brain answers clean
+    zeros + [] — the page renders its 等待第一份报告 state from that."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+
+    out = metrics_store.brain_stats(company_id)  # clean zeros if no company
+    out["kpis"] = []
+    if not company_id:
+        return jsonify(out)
+
+    index = metrics_store.metric_series_index(company_id)
+    totals = [e for e in index if e["dimension"] is None]
+    pool = sorted(totals or index, key=lambda e: (-e["periods"], -e["last_id"]))
+    chosen = pool[:BRAIN_KPI_TILE_CAP]
+
+    briefs = metrics_store.metric_briefs([e["last_id"] for e in chosen])
+    for e in chosen:
+        brief = briefs.get(e["last_id"], {})
+        deltas = trends.compute_deltas(company_id, e["metric_name"], e["dimension"])
+        streak = trends.detect_streaks(company_id, e["metric_name"], e["dimension"])
+        series = trends.metric_series(company_id, e["metric_name"], e["dimension"],
+                                      last_n=BRAIN_KPI_SERIES_POINTS)
+        name = (brief.get("metric_name_cn") or "").strip() or e["metric_name"]
+        if e["dimension"]:  # per-dimension fallback tiles carry the dimension
+            name = f"{name}（{e['dimension'].split('=', 1)[-1]}）"
+        out["kpis"].append({
+            "name": name,
+            "latest": deltas["latest"],
+            "unit": (brief.get("unit") or "").strip(),
+            "delta_pct": deltas["wow_pct"],   # 环比 vs previous period
+            "streak": streak,                 # {"direction","length"} | null
+            "series": series,                 # [{label, value}] — sparkline
+        })
+    return jsonify(out)
+
+
 @app.route("/api/company-brain/profile", methods=["GET", "POST"])
 def brain_profile():
     """a. 公司档案 + b. 指标定义 (KPI mapping) — both live in profile_json."""
@@ -2104,6 +2164,16 @@ def _save_company_logo(company_id, ext, data):
     return os.path.relpath(abs_path, metrics_store.PROJECT_ROOT)
 
 
+def _valid_wechat_webhook(url):
+    """True only for a genuine 企业微信群机器人 endpoint: https, host exactly
+    qyapi.weixin.qq.com. Everything else is refused at save time (E3)."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and parsed.hostname == "qyapi.weixin.qq.com"
+
+
 @app.route("/api/company-brain/branding", methods=["GET", "POST"])
 def brain_branding():
     """GET the current branding, or POST (multipart) a logo file + brand_color +
@@ -2123,7 +2193,14 @@ def brain_branding():
             return jsonify({"error": "品牌色需为 #RRGGBB 十六进制格式。"}), 400
         updates["brand_color"] = color
     if "wechat_webhook" in request.form:
-        updates["wechat_webhook"] = (request.form.get("wechat_webhook") or "").strip()
+        webhook = (request.form.get("wechat_webhook") or "").strip()
+        # Only the real 企业微信 robot endpoint is accepted ("" clears it). The
+        # delivery-test button POSTs to whatever is stored, so an arbitrary URL
+        # here was a server-side request forgery surface (Phase 6 E3).
+        if webhook and not _valid_wechat_webhook(webhook):
+            return jsonify({"error": "仅支持企业微信群机器人地址"
+                                     "（https://qyapi.weixin.qq.com/…）。"}), 400
+        updates["wechat_webhook"] = webhook
 
     f = request.files.get("logo")
     if f and f.filename:
@@ -2210,12 +2287,17 @@ def _job_next_run_at(job):
         return None
 
 
-def _jobs_payload(company_id):
+def _jobs_payload(company_id, customer=None):
     """The account's jobs, each enriched with next_run_at (every jobs response
-    carries it so the UI can re-render from any CRUD reply)."""
+    carries it so the UI can re-render from any CRUD reply). budget_cny is the
+    per-run internal cost cap — machinery, so it ships to founder sessions
+    only (the customer UI already hid it; the API leaked it, Phase 6 E2)."""
     jobs = metrics_store.list_scheduled_jobs(company_id)
+    admin = _is_admin(customer)
     for j in jobs:
         j["next_run_at"] = _job_next_run_at(j)
+        if not admin:
+            j.pop("budget_cny", None)
     return jobs
 
 
@@ -2247,7 +2329,7 @@ def scheduled_jobs():
     if not company_id:
         return jsonify({"error": "公司大脑暂不可用。"}), 503
     if request.method == "GET":
-        return jsonify({"jobs": _jobs_payload(company_id)})
+        return jsonify({"jobs": _jobs_payload(company_id, customer)})
 
     allowed, refusal = _scheduling_plan_gate(customer)
     if not allowed:
@@ -2272,7 +2354,7 @@ def scheduled_jobs():
         active=bool(data.get("active", True)),
     )
     SCHEDULER.reload()
-    return jsonify({"jobs": _jobs_payload(company_id),
+    return jsonify({"jobs": _jobs_payload(company_id, customer),
                     "job_id": job_id, "ok": True})
 
 
@@ -2302,7 +2384,7 @@ def scheduled_jobs_update():
     SCHEDULER.reload()
     if not ok:
         return jsonify({"error": "任务不存在或无权修改。"}), 404
-    return jsonify({"jobs": _jobs_payload(company_id), "ok": True})
+    return jsonify({"jobs": _jobs_payload(company_id, customer), "ok": True})
 
 
 @app.route("/api/scheduled-jobs/delete", methods=["POST"])
@@ -2317,7 +2399,7 @@ def scheduled_jobs_delete():
     SCHEDULER.reload()
     if not ok:
         return jsonify({"error": "任务不存在或无权删除。"}), 404
-    return jsonify({"jobs": _jobs_payload(company_id), "ok": True})
+    return jsonify({"jobs": _jobs_payload(company_id, customer), "ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -2413,7 +2495,25 @@ def _inbox_safe_filename(filename, fallback="file"):
     return base[:120]
 
 
+# The inbox batch swap is read-prev → create-new → copy-forward → save; two
+# concurrent /api/uploads for the SAME company both read the same "prev", each
+# builds its own new batch, and whichever finishes second silently drops the
+# other's file (reproduced race, Phase 6 E1). One lock per company serializes
+# the swap; different companies never contend.
+_UPLOAD_LOCKS = {}
+_UPLOAD_LOCKS_GUARD = threading.Lock()
+
+
+def _company_upload_lock(company_id):
+    with _UPLOAD_LOCKS_GUARD:
+        lock = _UPLOAD_LOCKS.get(company_id)
+        if lock is None:
+            lock = _UPLOAD_LOCKS[company_id] = threading.Lock()
+        return lock
+
+
 @app.route("/api/uploads", methods=["POST"])
+@limiter.limit(config.upload_rate_limit, key_func=_run_rate_key)
 def uploads_modify():
     """Add files to / remove files from the data inbox WITHOUT starting a run.
 
@@ -2467,25 +2567,29 @@ def uploads_modify():
             return jsonify({"error": f"文件 “{f.filename}” 超过单个文件 {max_mb} MB 的上限。"}), 400
 
     new_names = {_inbox_safe_filename(f.filename) for f in upload_files}
-    # Resolve the CURRENT batch before creating the new one — new_upload_batch_dir
-    # creates its (newer) directory immediately, which would become the "latest".
-    prev = metrics_store.latest_upload_dir(company_id)
-    carry = [p for p in metrics_store.list_files(prev)
-             if os.path.basename(p) not in remove
-             and os.path.basename(p) not in new_names] if prev else []
-    if len(carry) + len(upload_files) > config.MAX_UPLOAD_FILES_PER_RUN:
-        return jsonify({"error": f"数据收件箱最多保留 {config.MAX_UPLOAD_FILES_PER_RUN} 个文件，"
-                                 f"请先移除一些旧文件。"}), 400
+    # The whole read-prev → new-batch → write sequence runs under the company's
+    # upload lock: concurrent calls would otherwise both copy forward from the
+    # same prev batch and silently lose one call's files (E1).
+    with _company_upload_lock(company_id):
+        # Resolve the CURRENT batch before creating the new one — new_upload_batch_dir
+        # creates its (newer) directory immediately, which would become the "latest".
+        prev = metrics_store.latest_upload_dir(company_id)
+        carry = [p for p in metrics_store.list_files(prev)
+                 if os.path.basename(p) not in remove
+                 and os.path.basename(p) not in new_names] if prev else []
+        if len(carry) + len(upload_files) > config.MAX_UPLOAD_FILES_PER_RUN:
+            return jsonify({"error": f"数据收件箱最多保留 {config.MAX_UPLOAD_FILES_PER_RUN} 个文件，"
+                                     f"请先移除一些旧文件。"}), 400
 
-    batch_dir = metrics_store.new_upload_batch_dir(company_id)
-    for sp in carry:
-        dest = os.path.join(batch_dir, os.path.basename(sp))
-        shutil.copy2(sp, dest)  # sp is already encrypted; copy keeps it so
-        crypto.encrypt_file_in_place(dest)  # idempotent — guarantees at-rest
-    for f in upload_files:
-        path = os.path.join(batch_dir, _inbox_safe_filename(f.filename))
-        f.save(path)
-        crypto.encrypt_file_in_place(path)
+        batch_dir = metrics_store.new_upload_batch_dir(company_id)
+        for sp in carry:
+            dest = os.path.join(batch_dir, os.path.basename(sp))
+            shutil.copy2(sp, dest)  # sp is already encrypted; copy keeps it so
+            crypto.encrypt_file_in_place(dest)  # idempotent — guarantees at-rest
+        for f in upload_files:
+            path = os.path.join(batch_dir, _inbox_safe_filename(f.filename))
+            f.save(path)
+            crypto.encrypt_file_in_place(path)
 
     return jsonify(_upload_inbox_payload(company_id))
 
@@ -3171,7 +3275,8 @@ def onboarding_upload():
         max_mb = config.MAX_UPLOAD_BYTES_PER_FILE // (1024 * 1024)
         return jsonify({"error": "文件超过单个文件 %d MB 的上限。" % max_mb}), 400
     ext = os.path.splitext(f.filename)[1].lower()
-    safe_name = secure_filename(f.filename) or ("数据文件" + (ext or ".csv"))
+    # CJK-safe (the name echoes through the wizard + KPI step + 数据收件箱).
+    safe_name = _inbox_safe_filename(f.filename, fallback="数据文件" + (ext or ".csv"))
     batch_dir = metrics_store.new_upload_batch_dir(company_id)
     path = os.path.join(batch_dir, safe_name)
     f.save(path)
@@ -3303,13 +3408,18 @@ def onboarding_schedule():
     data = request.get_json(silent=True) or {}
     channels = _clean_channels(data.get("channels")) or ["email"]
 
-    # Idempotent: a second click updates the existing wizard job, never duplicates.
+    # Idempotent: a second click updates the existing wizard job, never
+    # duplicates. Matched by NAME ONLY — matching on cron too meant a legacy
+    # row (pre Monday-cron fix, "0 8 * * 1") slipped past the dedupe and one
+    # wizard click created a SECOND weekly job (double weekly billing). The
+    # update also re-points the cron, so any legacy Tuesday row is healed here
+    # as well as by migration 0005.
     existing = [j for j in metrics_store.list_scheduled_jobs(company_id)
-                if j["name_cn"] == ONBOARDING_WEEKLY_JOB_NAME
-                and j["cron_expr"] == ONBOARDING_WEEKLY_CRON]
+                if j["name_cn"] == ONBOARDING_WEEKLY_JOB_NAME]
     if existing:
         job_id = existing[0]["id"]
         metrics_store.update_scheduled_job(company_id, job_id,
+                                           cron_expr=ONBOARDING_WEEKLY_CRON,
                                            delivery_channels=channels, active=True)
     else:
         job_id = metrics_store.create_scheduled_job(
@@ -3705,16 +3815,39 @@ def _render_admin_feedback_html(rows, vote):
 
 
 # ---- Onboarding import (导入历史数据) -------------------------------------
+class _ImportUploadRejected(ValueError):
+    """A friendly, customer-facing refusal raised by _parse_import_files."""
+
+
 def _parse_import_files(files):
     """Save & parse up to IMPORT_MAX_FILES uploaded spreadsheets into [(name, text)].
-    Skips empties; truncates the list at the cap. Reused by estimate + start."""
-    import_dir = os.path.join(UPLOAD_DIR, "import_" + uuid.uuid4().hex[:8])
-    os.makedirs(import_dir, exist_ok=True)
-    out = []
+    Skips empties; truncates the list at the cap. Reused by estimate + start.
+
+    Same upload guards as /api/run (the import path used to have NEITHER): each
+    file is size-capped and magic-byte-checked BEFORE anything is written, and
+    names go through the CJK-safe sanitizer — they echo back in the estimate
+    and progress UI, so 六月销售明细.csv must not degrade to "csv". A rejected
+    file raises _ImportUploadRejected with the friendly message."""
+    checked = []
+    max_mb = config.MAX_UPLOAD_BYTES_PER_FILE // (1024 * 1024)
     for f in files[:IMPORT_MAX_FILES]:
         if not f or not f.filename:
             continue
-        safe_name = secure_filename(f.filename) or "file"
+        head = f.stream.read(16)
+        f.stream.seek(0, os.SEEK_END)
+        size = f.stream.tell()
+        f.stream.seek(0)
+        if security.looks_executable(head):
+            raise _ImportUploadRejected(f"文件 “{f.filename}” 看起来是可执行程序，已拒绝上传。")
+        if size > config.MAX_UPLOAD_BYTES_PER_FILE:
+            raise _ImportUploadRejected(f"文件 “{f.filename}” 超过单个文件 {max_mb} MB 的上限。")
+        checked.append(f)
+
+    import_dir = os.path.join(UPLOAD_DIR, "import_" + uuid.uuid4().hex[:8])
+    os.makedirs(import_dir, exist_ok=True)
+    out = []
+    for f in checked:
+        safe_name = _inbox_safe_filename(f.filename)
         path = os.path.join(import_dir, safe_name)
         f.save(path)
         doc = parse_file(path)
@@ -3725,11 +3858,16 @@ def _parse_import_files(files):
 
 @app.route("/api/company-brain/import/estimate", methods=["POST"])
 def brain_import_estimate():
-    """Show the ¥ cost BEFORE importing: one cheap Haiku extraction call per file."""
+    """Size up an import BEFORE running it. Customers see file count + a rough
+    duration — the ¥ figures (internal COGS) are founder-only: raw model cost
+    is machinery and never reaches a customer screen (plan §2.1/.5)."""
     customer, company_id = _brain_company()
     if not customer:
         return jsonify({"error": "请先登录。"}), 401
-    parsed = _parse_import_files(request.files.getlist("files"))
+    try:
+        parsed = _parse_import_files(request.files.getlist("files"))
+    except _ImportUploadRejected as e:
+        return jsonify({"error": str(e)}), 400
     if not parsed:
         return jsonify({"error": "请上传至少一个文件。"}), 400
     total, items = 0.0, []
@@ -3738,8 +3876,14 @@ def brain_import_estimate():
         c = config.cost_cny(config.HAIKU, in_tok, IMPORT_EST_OUTPUT_TOKENS)
         total += c
         items.append({"name": name, "chars": len(text), "cost": round(c, 4)})
-    return jsonify({"file_count": len(parsed),
-                    "estimated_cost": round(total, 4), "files": items})
+    out = {"file_count": len(parsed),
+           "estimated_seconds": IMPORT_EST_SECONDS_PER_FILE * len(parsed),
+           "estimated_cost": round(total, 4), "files": items}
+    if not _is_admin(customer):
+        out.pop("estimated_cost")
+        for item in out["files"]:
+            item.pop("cost")
+    return jsonify(out)
 
 
 @app.route("/api/company-brain/import", methods=["POST"])
@@ -3752,12 +3896,16 @@ def brain_import_start():
         return jsonify({"error": "公司大脑暂不可用。"}), 503
     if not CUSTOMERS.has_balance(customer):
         return jsonify({"error": "账户余额不足，请先充值。"}), 402
-    parsed = _parse_import_files(request.files.getlist("files"))
+    try:
+        parsed = _parse_import_files(request.files.getlist("files"))
+    except _ImportUploadRejected as e:
+        return jsonify({"error": str(e)}), 400
     if not parsed:
         return jsonify({"error": "请上传至少一个文件。"}), 400
     job_id = uuid.uuid4().hex[:12]
     job = {
         "job_id": job_id,
+        "company_id": company_id,    # ownership gate for the progress poll
         "status": "running",          # running | done | stopped_budget
         "total": len(parsed),
         "done": 0,
@@ -3775,10 +3923,22 @@ def brain_import_start():
 
 @app.route("/api/company-brain/import/<job_id>")
 def brain_import_status(job_id):
+    """Progress poll. Login + ownership gated (jobs are per-company), and the
+    running ¥ tally is founder-only — customers see counts, never model cost.
+    IMPORT_JOBS is in-memory, so after a server restart polls get a plain 404
+    (the frontend treats that as "job gone", not an error loop)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
     job = IMPORT_JOBS.get(job_id)
-    if job is None:
+    if job is None or job.get("company_id") != company_id:
+        # Same 404 for "never existed" and "not yours" — no existence oracle.
         return jsonify({"error": "未知的导入任务。"}), 404
-    return jsonify(job)
+    out = dict(job)
+    out.pop("company_id", None)  # internal bookkeeping, not payload
+    if not _is_admin(customer):
+        out.pop("cost", None)
+    return jsonify(out)
 
 
 def _run_import_job(job, customer_id, company_id, files, llm=None):
@@ -3802,7 +3962,10 @@ def _run_import_job(job, customer_id, company_id, files, llm=None):
     router = llm or ModelRouter(token_manager=TOKENS, cost_listener=biller)
 
     try:
-        run_id = metrics_store.create_run(company_id, "历史数据导入 (historical import)")
+        # kind="import": back-fills never eat the plan's report quota and never
+        # appear in 历史报告 (Phase 6 B1).
+        run_id = metrics_store.create_run(company_id, "历史数据导入 (historical import)",
+                                          kind=RUN_KIND_IMPORT)
     except Exception:
         run_id = None
 

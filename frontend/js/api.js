@@ -82,6 +82,7 @@ export const subscriptionResume = () => postJSON("/api/subscription/resume");
 export const requestFapiao = (payload) => postJSON("/api/fapiao/request", payload);
 
 // ---- 企业大脑 (company brain) ---------------------------------------------------
+export const getBrainSummary = () => getJSON("/api/company-brain/summary");
 export const getBrainProfile = () => getJSON("/api/company-brain/profile");
 export const saveBrainProfile = (payload) => postJSON("/api/company-brain/profile", payload);
 export const getBrainGlossary = () => getJSON("/api/company-brain/glossary");

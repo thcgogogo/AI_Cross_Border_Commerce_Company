@@ -77,6 +77,17 @@ def detect_streaks(company_id, metric_name, dimension=None, min_len=DEFAULT_MIN_
     return _streak_from_values(values, min_len=min_len)
 
 
+def metric_series(company_id, metric_name, dimension=None, last_n=None):
+    """Public, chart-ready view of one chronological metric series (redesign
+    B6 — the 企业大脑 KPI sparklines): [{"label", "value"}], oldest first,
+    optionally trimmed to the most recent `last_n` points. Same ordering and
+    same one-point-per-period dedup as every other function here."""
+    points = _ordered_series(company_id, metric_name, dimension)
+    if last_n:
+        points = points[-int(last_n):]
+    return [{"label": p["label"], "value": p["value"]} for p in points]
+
+
 def detect_anomalies(company_id):
     """Flag the latest value of every (metric_name, dimension) series with >=4
     periods of history when it deviates from the trailing mean by more than 2

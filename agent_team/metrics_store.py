@@ -31,6 +31,8 @@ import secrets
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
+from sqlalchemy import func
+
 from . import config, db
 from .models import (
     ACCOUNT_ACTIVE,
@@ -56,6 +58,9 @@ from .models import (
     ORDER_TOPUP,
     ORDER_TYPES,
     RUN_FAILED,
+    RUN_KIND_IMPORT,
+    RUN_KIND_REPORT,
+    RUN_KINDS,
     RUN_STATUSES,
     RUN_SUCCEEDED,
     SOURCE_LATEST_UPLOAD,
@@ -178,12 +183,19 @@ def get_or_create_company(account_email, company_name=None, industry=None):
         return company.id
 
 
-def create_run(company_id, goal_text):
-    """Open a runs row (status=running) and return its id, or None if no company."""
+def create_run(company_id, goal_text, kind=RUN_KIND_REPORT):
+    """Open a runs row (status=running) and return its id, or None if no company.
+
+    `kind` separates quota-metered report runs from the free 历史数据导入
+    back-fill (kind="import") — import runs used to eat the 免费体验 plan's
+    2-lifetime quota and show up as dead rows in 历史报告 (Phase 6 B1)."""
     if not company_id:
         return None
+    if kind not in RUN_KINDS:
+        kind = RUN_KIND_REPORT
     with db.session_scope() as s:
-        run = Run(company_id=company_id, goal_text=goal_text or "", status="running")
+        run = Run(company_id=company_id, goal_text=goal_text or "", status="running",
+                  kind=kind)
         s.add(run)
         s.flush()
         return run.id
@@ -380,6 +392,72 @@ def _short(v, n):
         return None
     s = str(v).strip()
     return s[:n] if s else None
+
+
+# ---------------------------------------------------------------------------
+# Brain summary reads (redesign Phase 6 / B6) — the 企业大脑 hero stats and the
+# KPI-tile index. Read-only compositions; trends.py does the per-series math.
+# ---------------------------------------------------------------------------
+def brain_stats(company_id):
+    """The 企业大脑 hero counters: {metrics_count, kpi_count, weeks_covered,
+    glossary_count, preferences_count}. metrics_count is total stored metric
+    ROWS (how much the brain has recorded); kpi_count is DISTINCT metric names
+    (how many different indicators it tracks); weeks_covered is DISTINCT
+    period labels; preferences_count counts ACTIVE standing instructions (the
+    ones reports actually apply). Clean zeros for an empty/missing brain."""
+    zeros = {"metrics_count": 0, "kpi_count": 0, "weeks_covered": 0,
+             "glossary_count": 0, "preferences_count": 0}
+    if not company_id:
+        return zeros
+    with db.session_scope() as s:
+        row = (s.query(func.count(Metric.id),
+                       func.count(func.distinct(Metric.metric_name)),
+                       func.count(func.distinct(Metric.period_label)))
+               .filter(Metric.company_id == company_id).one())
+        glossary = (s.query(func.count(GlossaryTerm.id))
+                    .filter(GlossaryTerm.company_id == company_id).scalar())
+        prefs = (s.query(func.count(ReportPreference.id))
+                 .filter(ReportPreference.company_id == company_id,
+                         ReportPreference.active.is_(True)).scalar())
+        return {
+            "metrics_count": int(row[0] or 0),
+            "kpi_count": int(row[1] or 0),
+            "weeks_covered": int(row[2] or 0),
+            "glossary_count": int(glossary or 0),
+            "preferences_count": int(prefs or 0),
+        }
+
+
+def metric_series_index(company_id):
+    """Every (metric_name, dimension) series the brain holds, in ONE GROUP BY
+    over ix_metrics_company_id: [{"metric_name", "dimension", "periods",
+    "last_id"}], where periods is the DISTINCT period_label coverage and
+    last_id the newest row id (recency tiebreak for KPI-tile ranking)."""
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        rows = (s.query(Metric.metric_name, Metric.dimension,
+                        func.count(func.distinct(Metric.period_label)),
+                        func.max(Metric.id))
+                .filter(Metric.company_id == company_id)
+                .group_by(Metric.metric_name, Metric.dimension)
+                .all())
+        return [{"metric_name": name, "dimension": dim,
+                 "periods": int(periods or 0), "last_id": int(last_id)}
+                for name, dim, periods, last_id in rows
+                if name]  # a row with no metric_name can't be charted
+
+
+def metric_briefs(metric_ids):
+    """{id: {"metric_name_cn", "unit"}} for the given metric row ids — the
+    KPI tiles' display name + unit come from each series' NEWEST row."""
+    ids = [int(i) for i in (metric_ids or []) if i]
+    if not ids:
+        return {}
+    with db.session_scope() as s:
+        rows = s.query(Metric).filter(Metric.id.in_(ids)).all()
+        return {r.id: {"metric_name_cn": r.metric_name_cn, "unit": r.unit}
+                for r in rows}
 
 
 # ---------------------------------------------------------------------------
@@ -918,6 +996,7 @@ def _run_to_dict(r):
         "company_id": r.company_id,
         "goal_text": r.goal_text or "",
         "status": r.status,
+        "kind": r.kind or RUN_KIND_REPORT,
         "total_cost_yuan": float(r.total_cost_yuan or 0.0),
         "report_path": r.report_path or "",
         "started_at": _iso(r.started_at),
@@ -934,16 +1013,19 @@ def get_run(run_id):
         return _run_to_dict(r) if r is not None else None
 
 
-def list_runs(company_id, limit=50):
-    """An account's runs, newest first, as plain dicts (for the history page)."""
+def list_runs(company_id, limit=50, kind=RUN_KIND_REPORT):
+    """An account's runs, newest first, as plain dicts (for the history page).
+
+    Defaults to kind="report" — 历史数据导入 back-fill rows are bookkeeping,
+    not reports, and used to show up in 历史报告 as dead has_content=false
+    rows (Phase 6 B1). Pass kind=None to list everything."""
     if not company_id:
         return []
     with db.session_scope() as s:
-        rows = (s.query(Run)
-                .filter_by(company_id=company_id)
-                .order_by(Run.id.desc())
-                .limit(int(limit))
-                .all())
+        q = s.query(Run).filter_by(company_id=company_id)
+        if kind is not None:
+            q = q.filter(Run.kind == kind)
+        rows = q.order_by(Run.id.desc()).limit(int(limit)).all()
         return [_run_to_dict(r) for r in rows]
 
 
@@ -1835,8 +1917,9 @@ def set_cancel_at_period_end(account_id, flag):
 
 
 def count_runs_this_month(company_id, now=None):
-    """How many runs (reports) this company started this calendar month — the
-    plan quota meter. Failed runs don't count against the quota."""
+    """How many REPORT runs this company started this calendar month — the
+    plan quota meter. Failed runs don't count against the quota, and neither
+    do kind="import" back-fills (Phase 6 B1 — imports used to eat the quota)."""
     if not company_id:
         return 0
     now = now or datetime.utcnow()
@@ -1844,19 +1927,22 @@ def count_runs_this_month(company_id, now=None):
     with db.session_scope() as s:
         return int(s.query(Run.id)
                    .filter(Run.company_id == company_id,
+                           Run.kind == RUN_KIND_REPORT,
                            Run.started_at >= month_start,
                            Run.status != RUN_FAILED).count())
 
 
 def count_runs_total(company_id):
-    """How many runs (reports) this company has EVER started — the meter for
+    """How many REPORT runs this company has EVER started — the meter for
     plans whose quota is a lifetime total (the 免费体验 trial, redesign B3).
-    Failed runs don't count, same as the monthly meter."""
+    Failed runs and kind="import" back-fills don't count, same as the monthly
+    meter."""
     if not company_id:
         return 0
     with db.session_scope() as s:
         return int(s.query(Run.id)
                    .filter(Run.company_id == company_id,
+                           Run.kind == RUN_KIND_REPORT,
                            Run.status != RUN_FAILED).count())
 
 

@@ -1180,12 +1180,24 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 .sch-job-acts { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 .sch-del { border: none; background: none; color: var(--muted); font-size: 13px; cursor: pointer; padding: 4px 6px; }
 .sch-del:hover { color: var(--red); }
+/* Pill tabs — the schedule card's frequency picker generalized into a reusable
+   atom (Phase 6): .tabs/.tab is the shared form (brain editors use it via
+   components.tabsHTML); .freq-tabs/.freq-tab keeps its name for the schedule
+   card but shares every rule. .tabs scrolls horizontally instead of wrapping
+   (a 6-tab strip must stay one row on a phone). */
 .freq-tabs { display: flex; gap: 8px; margin: 4px 0 10px; flex-wrap: wrap; }
-.freq-tab {
+.tabs {
+  display: flex; gap: 8px; margin: 4px 0 10px; flex-wrap: nowrap;
+  overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  padding-bottom: 2px;
+}
+.tabs::-webkit-scrollbar { display: none; }
+.freq-tab, .tab {
   border: 1.5px solid var(--line); background: var(--card); border-radius: 999px;
   padding: 6px 14px; font: inherit; font-size: 13px; font-weight: 700; color: var(--muted); cursor: pointer;
+  flex: none; white-space: nowrap;
 }
-.freq-tab.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.freq-tab.on, .tab.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .sch-grid { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .sch-grid[hidden] { display: none !important; } /* hidden attr must beat display:flex */
 .sch-grid .ob-select, .sch-grid .field-input { width: auto; min-width: 110px; }
@@ -1215,6 +1227,69 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 
 /* ---- 数据收件箱 -------------------------------------------------------------- */
 .inbox-note { font-size: 12.5px; color: var(--muted); margin: 10px 0 0; line-height: 1.6; }
+
+/* ---- 企业大脑 (§3.7, Phase 6) -------------------------------------------------- */
+.brain-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+}
+.brain-stats .stat-val { font-size: 26px; }
+.kpi-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px; margin-top: 12px;
+}
+.kpi-tile {
+  border: 1px solid var(--line); border-radius: 11px; padding: 12px 14px;
+  background: var(--card); display: flex; flex-direction: column; gap: 3px; min-width: 0;
+}
+.kpi-name {
+  font-size: 12.5px; color: var(--muted); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kpi-val {
+  font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums;
+  font-family: var(--font-num, inherit); letter-spacing: .01em;
+}
+.kpi-unit { font-size: 12px; font-weight: 600; color: var(--muted); margin-left: 4px; }
+.kpi-delta { font-size: 12.5px; font-weight: 700; }
+.kpi-delta.up { color: var(--green); }
+.kpi-delta.down { color: var(--red); }
+.kpi-delta.flat { color: var(--muted); font-weight: 600; }
+.kpi-streak { font-size: 12px; font-weight: 600; }
+.kpi-streak.up { color: var(--green); }
+.kpi-streak.down { color: var(--red); }
+.kpi-tile .sparkline { width: 100%; height: 34px; margin-top: 6px; opacity: .9; }
+.brain-panel .ob-table input { width: 100%; box-sizing: border-box; }
+.brain-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border-top: 1px solid var(--line); padding: 10px 0;
+}
+.brain-row:first-of-type { border-top: none; }
+.brain-row-main { flex: 1 1 220px; min-width: 0; }
+.brain-row-term { font-size: 14px; font-weight: 700; }
+.brain-row-def, .brain-row-text { font-size: 13px; color: var(--ink); margin-top: 2px; line-height: 1.6; }
+.brain-row-text.off { color: var(--muted); text-decoration: line-through; }
+.brain-row-acts { display: flex; align-items: center; gap: 10px; margin-left: auto; flex: none; }
+.brain-del { border: none; background: none; color: var(--muted); font-size: 13px; cursor: pointer; padding: 4px 6px; }
+.brain-del:hover { color: var(--red); }
+.brain-add-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.brain-add-row .field-input { flex: 1 1 160px; margin: 0; }
+.brain-add-row .ghost-btn { flex: none; width: auto; margin: 0; padding: 9px 16px; }
+.brand-logo-preview {
+  max-height: 56px; max-width: 200px; display: block; margin: 8px 0;
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px; background: #fff;
+}
+.brand-color-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.brand-color-row input[type="color"] {
+  width: 44px; height: 32px; padding: 2px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--card); cursor: pointer;
+}
+.imp-progress { margin-top: 12px; }
+.imp-file { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 4px 0; }
+.imp-file .imp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.imp-file .imp-state { margin-left: auto; flex: none; font-size: 12.5px; color: var(--muted); }
+.imp-file .imp-state.done { color: var(--green); font-weight: 700; }
+.imp-file .imp-state.error, .imp-file .imp-state.stopped { color: var(--red); font-weight: 700; }
 
 /* ---- 工作台 (workbench §3.2) -------------------------------------------------- */
 .wb-hero { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin: 0 0 16px; }

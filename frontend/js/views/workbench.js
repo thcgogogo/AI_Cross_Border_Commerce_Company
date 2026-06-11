@@ -2,12 +2,13 @@
 // workbench.js — 工作台 (logged-in home, plan §3.2). Cards: ① 下次送达 (live
 // countdown to the earliest active job's next_run_at — or the setup/upgrade
 // CTA per D3), ② 最新报告, ③ 本月额度 quota meter, ④ 数据收件箱 mini card,
-// ⑤ 企业大脑 teaser (live stats arrive with B6 in Phase 6), ⑥ the primary
-// action 立即生成报告. The countdown timer is returned as the mount cleanup.
+// ⑤ 企业大脑 teaser (已记住 N 个指标 · 覆盖 M 个周期, live from the B6
+// summary), ⑥ the primary action 立即生成报告. The countdown timer is
+// returned as the mount cleanup.
 // ===========================================================================
 import * as api from "../api.js";
 import { state } from "../state.js";
-import { esc, pageHead, quotaMeter, statusPillHTML } from "../components.js";
+import { esc, fmtNum, pageHead, quotaMeter, statusPillHTML } from "../components.js";
 import { openOnboarding } from "./onboarding.js";
 import { cronLabel } from "./schedule.js";
 
@@ -47,7 +48,7 @@ export function mount(el, ctx) {
       <div class="card" id="wbInbox"><h3 class="card-title">📂 数据收件箱</h3><p class="muted">正在载入…</p></div>
       <div class="card" id="wbBrain">
         <h3 class="card-title">🧠 企业大脑</h3>
-        <p class="muted">它记住你的公司：指标、口径、术语、偏好。每份报告都让它更聪明 — 已记住的指标与趋势统计即将在这里展示。</p>
+        <p class="muted">它记住你的公司：指标、口径、术语、偏好。每份报告都让它更聪明。</p>
         <div class="wb-card-cta"><button type="button" class="ghost-btn" id="wbBrainGo">打开企业大脑</button></div>
       </div>
     </div>
@@ -153,6 +154,22 @@ export function mount(el, ctx) {
     box.innerHTML = `<h3 class="card-title">📊 本月额度</h3>
       ${quotaMeter({ used, total, caption })}${extra}
       <div class="wb-links"><a href="/account" data-nav>套餐与购买 →</a></div>`;
+  })();
+
+  // ---- ⑤ 企业大脑 teaser — live stats from the B6 summary ----------------------
+  (async () => {
+    let summary = null;
+    try { summary = await api.getBrainSummary(); } catch (e) { /* keep static copy */ }
+    const box = $("wbBrain");
+    if (!box || !box.isConnected || !summary) return;
+    const n = summary.kpi_count || 0;
+    const m = summary.weeks_covered || 0;
+    const line = n
+      ? `已记住 <strong>${esc(fmtNum(n))}</strong> 个指标 · 覆盖 <strong>${esc(fmtNum(m))}</strong> 个周期 — 每份报告都让它更聪明。`
+      : "它记住你的公司：指标、口径、术语、偏好。生成第一份报告，让它开始积累。";
+    box.innerHTML = `<h3 class="card-title">🧠 企业大脑</h3>
+      <p class="muted">${line}</p>
+      <div class="wb-card-cta"><button type="button" class="ghost-btn" data-go="/brain">打开企业大脑</button></div>`;
   })();
 
   // ---- ④ 数据收件箱 mini card ---------------------------------------------------
