@@ -213,7 +213,9 @@ export function quotaMeter({ used, total, caption = "本月已生成" }) {
 // Inline SVG sparkline from a numeric series (企业大脑 KPI tiles, B6). Flat
 // single-color polyline, no axes/labels — the tile text carries the numbers.
 export function sparklineSVG(values, { width = 120, height = 34, stroke = "var(--accent)" } = {}) {
-  const nums = (values || []).map(Number).filter((v) => !isNaN(v));
+  // Number.isFinite, not !isNaN: an Infinity that slipped through would make
+  // every other point's y-coordinate NaN (span = Infinity) and kill the SVG.
+  const nums = (values || []).map(Number).filter((v) => Number.isFinite(v));
   if (nums.length < 2) return "";
   const min = Math.min(...nums);
   const span = (Math.max(...nums) - min) || 1;

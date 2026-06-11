@@ -1969,11 +1969,15 @@ def brain_summary():
     customer, company_id = _brain_company()
     if not customer:
         return jsonify({"error": "请先登录。"}), 401
-
-    out = metrics_store.brain_stats(company_id)  # clean zeros if no company
-    out["kpis"] = []
     if not company_id:
-        return jsonify(out)
+        # get_or_create_company THREW (the brain DB is down) — a 200 of zeros
+        # here is indistinguishable from a brand-new account, so the page would
+        # show 等待第一份报告 to a company with months of data. 503 like the
+        # sibling brain routes (Phase 7 A3).
+        return jsonify({"error": "企业大脑暂时无法加载，请稍后重试。"}), 503
+
+    out = metrics_store.brain_stats(company_id)
+    out["kpis"] = []
 
     index = metrics_store.metric_series_index(company_id)
     totals = [e for e in index if e["dimension"] is None]
@@ -2165,13 +2169,10 @@ def _save_company_logo(company_id, ext, data):
 
 
 def _valid_wechat_webhook(url):
-    """True only for a genuine 企业微信群机器人 endpoint: https, host exactly
-    qyapi.weixin.qq.com. Everything else is refused at save time (E3)."""
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return False
-    return parsed.scheme == "https" and parsed.hostname == "qyapi.weixin.qq.com"
+    """True only for a genuine 企业微信群机器人 endpoint (E3). The check itself
+    lives in delivery.valid_wechat_webhook so the senders re-validate the SAME
+    rule at send time (Phase 7 A5) — this is the save-time entrance."""
+    return delivery.valid_wechat_webhook(url)
 
 
 @app.route("/api/company-brain/branding", methods=["GET", "POST"])
@@ -2343,6 +2344,9 @@ def scheduled_jobs():
     if not _valid_cron(cron_expr):
         return jsonify({"error": "频率无效（cron 表达式无法解析）。"}), 400
     source_mode = data.get("source_mode") or SOURCE_LATEST_UPLOAD
+    # budget_cny is the internal per-run cost cap — machinery. It has been
+    # read-redacted for customers since Phase 6 (E2); the WRITE is founder-only
+    # too, or any logged-in account could set its own cap (Phase 7 A5).
     job_id = metrics_store.create_scheduled_job(
         company_id, name_cn, cron_expr,
         goal_template=(data.get("goal_template") or "").strip(),
@@ -2350,7 +2354,7 @@ def scheduled_jobs():
         industry_override=data.get("industry_override"),
         fixed_file_paths=data.get("fixed_file_paths") or [],
         delivery_channels=_clean_channels(data.get("delivery_channels")),
-        budget_cny=data.get("budget_cny"),
+        budget_cny=(data.get("budget_cny") if _is_admin(customer) else None),
         active=bool(data.get("active", True)),
     )
     SCHEDULER.reload()
@@ -2370,6 +2374,9 @@ def scheduled_jobs_update():
         "name_cn", "cron_expr", "industry_override", "goal_template",
         "source_mode", "fixed_file_paths", "delivery_channels",
         "budget_cny", "active") if k in data}
+    # budget_cny stays founder-only on write, same as the create route (A5).
+    if not _is_admin(customer):
+        fields.pop("budget_cny", None)
     # D3 — RE-ACTIVATING a job is gated like creating one (deactivating, editing
     # fields, or deleting stays open so a downgraded account can manage its rows).
     if fields.get("active"):
@@ -3843,20 +3850,27 @@ def _parse_import_files(files):
             raise _ImportUploadRejected(f"文件 “{f.filename}” 超过单个文件 {max_mb} MB 的上限。")
         checked.append(f)
 
+    # The on-disk copies exist only so parse_file can read them — the returned
+    # (name, text) pairs carry everything estimate/import use afterwards. Always
+    # delete the temp dir before returning: estimate calls used to leave up to
+    # 12×25MB behind PER CALL (a logged-in disk-DoS, Phase 7 A2).
     import_dir = os.path.join(UPLOAD_DIR, "import_" + uuid.uuid4().hex[:8])
     os.makedirs(import_dir, exist_ok=True)
     out = []
-    for f in checked:
-        safe_name = _inbox_safe_filename(f.filename)
-        path = os.path.join(import_dir, safe_name)
-        f.save(path)
-        doc = parse_file(path)
-        crypto.encrypt_file_in_place(path)  # encrypt the raw upload at rest (Phase 8)
-        out.append((doc.get("name") or safe_name, doc.get("text") or ""))
+    try:
+        for f in checked:
+            safe_name = _inbox_safe_filename(f.filename)
+            path = os.path.join(import_dir, safe_name)
+            f.save(path)
+            doc = parse_file(path)
+            out.append((doc.get("name") or safe_name, doc.get("text") or ""))
+    finally:
+        shutil.rmtree(import_dir, ignore_errors=True)
     return out
 
 
 @app.route("/api/company-brain/import/estimate", methods=["POST"])
+@limiter.limit(config.upload_rate_limit, key_func=_run_rate_key)
 def brain_import_estimate():
     """Size up an import BEFORE running it. Customers see file count + a rough
     duration — the ¥ figures (internal COGS) are founder-only: raw model cost
@@ -3887,6 +3901,7 @@ def brain_import_estimate():
 
 
 @app.route("/api/company-brain/import", methods=["POST"])
+@limiter.limit(config.upload_rate_limit, key_func=_run_rate_key)
 def brain_import_start():
     """Kick off the back-fill in a background thread; returns a job_id to poll."""
     customer, company_id = _brain_company()

@@ -25,6 +25,7 @@ ORM objects, so results are safe to pass across the background job threads.
 
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -377,13 +378,17 @@ def _coerce_float(v):
     if isinstance(v, bool):  # bool is an int subclass — reject it explicitly
         return None
     if isinstance(v, (int, float)):
-        return float(v)
+        return float(v) if math.isfinite(v) else None
     if isinstance(v, str):
+        # float() happily parses "NaN"/"Infinity"/"1e400" — non-finite values
+        # serialize as bare NaN/Infinity tokens, which is invalid JSON, so one
+        # such row would blank the whole 企业大脑 summary. Drop them at write time.
         cleaned = v.strip().replace(",", "").rstrip("%").strip()
         try:
-            return float(cleaned)
+            out = float(cleaned)
         except ValueError:
             return None
+        return out if math.isfinite(out) else None
     return None
 
 

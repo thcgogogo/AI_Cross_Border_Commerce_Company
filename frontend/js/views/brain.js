@@ -86,8 +86,26 @@ export function mount(el, ctx) {
 // ---------------------------------------------------------------------------
 async function refreshHero(hero, ctx) {
   let summary = null;
-  try { summary = await api.getBrainSummary(); } catch (e) { /* render empty below */ }
+  let loadFailed = false;
+  try { summary = await api.getBrainSummary(); } catch (e) { loadFailed = true; }
   if (!hero.isConnected) return;
+
+  // A fetch/503 failure is NOT an empty brain — a company with months of data
+  // must see a retry state, never the 等待第一份报告 CTA (Phase 7 A3).
+  if (loadFailed) {
+    hero.innerHTML = `<div class="card"><div class="empty" style="border:none;padding:26px 10px;">
+        <div class="empty-icon">⚠️</div>
+        <div class="empty-title">暂时无法加载</div>
+        <p class="empty-lead">企业大脑数据暂时取不回来，可能是网络波动。稍等片刻再试一次。</p>
+        <button type="button" class="run-btn" id="brainRetry">重试</button>
+      </div></div>`;
+    const retry = hero.querySelector("#brainRetry");
+    if (retry) retry.addEventListener("click", () => {
+      hero.innerHTML = `<div class="card"><p class="muted">正在载入…</p></div>`;
+      refreshHero(hero, ctx);
+    });
+    return;
+  }
 
   const s = summary || {};
   const isEmpty = !(s.metrics_count || s.kpi_count || s.glossary_count || s.preferences_count);

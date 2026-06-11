@@ -23,11 +23,25 @@ import smtplib
 import ssl
 import urllib.request
 from email.message import EmailMessage
+from urllib.parse import urlparse
 
 from . import config, crypto, metrics_store, pdf_report
 from .models import DELIVERY_FAILED, DELIVERY_SENT, DELIVERY_SKIPPED
 
 INSUFFICIENT_BALANCE_MSG = "余额不足，本次周报未生成"
+
+
+def valid_wechat_webhook(url):
+    """True only for a genuine 企业微信群机器人 endpoint: https, host exactly
+    qyapi.weixin.qq.com. The save path (app.py branding) validates with this,
+    and send_wechat_webhook re-checks it at SEND time — a row stored before the
+    save-time check existed (or tampered directly in the DB) must not turn the
+    delivery-test/scheduled-fire POST into an SSRF sink (Phase 7 A5)."""
+    try:
+        parsed = urlparse(url or "")
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and parsed.hostname == "qyapi.weixin.qq.com"
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +119,10 @@ def send_wechat_webhook(webhook_url, markdown_text, timeout=15):
     The webhook URL is NEVER included in the error string."""
     if not webhook_url:
         return False, "未配置企业微信群机器人 webhook"
+    # The error text deliberately names no host: delivery errors must never
+    # echo any part of a webhook URL (see test_delivery_test_failure_never_…).
+    if not valid_wechat_webhook(webhook_url):
+        return False, "企业微信 webhook 地址无效，请重新设置群机器人地址"
     payload = json.dumps(
         {"msgtype": "markdown", "markdown": {"content": markdown_text}}
     ).encode("utf-8")
