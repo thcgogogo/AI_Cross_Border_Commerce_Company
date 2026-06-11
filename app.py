@@ -583,7 +583,10 @@ def meta():
         # every customer-facing surface brands and composes goals from config.
         "product_name": config.product_name(),
         "product_tagline": config.product_tagline(),
+        "product_byline": config.product_byline(),
         "report_goal_templates": config.REPORT_GOAL_TEMPLATES,
+        # Landing/pricing copy (purchasable from Phase 7 / B4 on).
+        "single_report_price_yuan": config.SINGLE_REPORT_PRICE_YUAN,
         "currency": config.CURRENCY,
         "currency_symbol": config.CURRENCY_SYMBOL,
         "usd_to_cny": config.USD_TO_CNY,

@@ -48,6 +48,10 @@ class LLMClient:
         # optional callback(model, input_tokens, output_tokens) fired after every
         # call so a caller (e.g. the web app) can bill the logged-in account.
         self.cost_listener = cost_listener
+        # stop_reason of the most recent call ("end_turn" | "max_tokens" | ...).
+        # "max_tokens" means the answer was CUT OFF at the output ceiling — callers
+        # check this to log/handle truncation instead of failing silently.
+        self.last_stop_reason = None
 
     def complete(
         self,
@@ -106,6 +110,7 @@ class LLMClient:
             # next call resumes it rather than starting over.
             messages.append({"role": "assistant",
                              "content": _serialize_blocks(getattr(final, "content", []) or [])})
+        self.last_stop_reason = getattr(final, "stop_reason", None)
         return _text_of(final)
 
     # ----------------------------------------------------------------------
@@ -150,6 +155,7 @@ class LLMClient:
             api_tools.append(WEB_SEARCH_TOOL)
 
         texts = []
+        final = None
         for _ in range(max_iterations):
             if self.token_manager and budget:
                 self.token_manager.ensure_can_spend(budget)  # may raise BudgetExceededError
@@ -188,6 +194,7 @@ class LLMClient:
         else:
             texts.append("_(Stopped after reaching the tool-call limit.)_")
 
+        self.last_stop_reason = getattr(final, "stop_reason", None)
         joined = "\n\n".join(t.strip() for t in texts if t.strip())
         return joined or "(The model produced files but no summary text.)"
 

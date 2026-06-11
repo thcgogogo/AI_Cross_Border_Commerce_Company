@@ -211,17 +211,24 @@ class ModelRouter:
         # startup). Non-Anthropic providers are reached lazily via _openai_chat.
         self._anthropic = LLMClient(api_key=api_key, token_manager=token_manager,
                                     cost_listener=cost_listener)
+        # Mirrors LLMClient.last_stop_reason ("max_tokens" == the answer was cut
+        # off at the output ceiling). None on the OpenAI-compatible path, which
+        # doesn't surface a finish reason.
+        self.last_stop_reason = None
 
     # -- mirror LLMClient.complete -----------------------------------------
     def complete(self, system_prompt, user_content, model=config.OPUS, effort="high",
                  max_tokens=8000, max_retries=3, budget=None, web_search=False):
         if config.provider_for(model) == "anthropic":
-            return self._anthropic.complete(
+            text = self._anthropic.complete(
                 system_prompt, user_content, model=model, effort=effort,
                 max_tokens=max_tokens, max_retries=max_retries, budget=budget,
                 web_search=web_search,
             )
+            self.last_stop_reason = self._anthropic.last_stop_reason
+            return text
         # Non-Anthropic path: a single OpenAI-compatible chat call.
+        self.last_stop_reason = None
         if self.token_manager and budget:
             self.token_manager.ensure_can_spend(budget)  # may raise BudgetExceededError
         messages = [{"role": "system", "content": system_prompt},
@@ -240,11 +247,13 @@ class ModelRouter:
                             max_retries=3, budget=None, max_iterations=12,
                             web_search=False):
         if config.provider_for(model) == "anthropic":
-            return self._anthropic.complete_with_tools(
+            text = self._anthropic.complete_with_tools(
                 system_prompt, user_content, tool_specs, tool_executor, model=model,
                 effort=effort, max_tokens=max_tokens, max_retries=max_retries,
                 budget=budget, max_iterations=max_iterations, web_search=web_search,
             )
+            self.last_stop_reason = self._anthropic.last_stop_reason
+            return text
         # File-generation tools and web search are Anthropic-only features. Rather
         # than fake them, run a normal completion on the chosen model and add an
         # honest note so the agent (and user) know why no files were produced.

@@ -53,6 +53,7 @@ class SharedMemory:
             "run_id": None,
             "sources": [],
             "sources_status": None,
+            "sources_recovered": False,
             "output_dir": self._output_dir,
         }
         os.makedirs(store_dir, exist_ok=True)
@@ -165,12 +166,15 @@ class SharedMemory:
             self._state["run_id"] = run_id
             self._save()
 
-    def set_sources(self, sources, status):
+    def set_sources(self, sources, status, recovered=False):
         """Record the parsed 数据来源与核验 rows and the parse status
-        ("ok"|"malformed"|"missing") for the result page and the PDF."""
+        ("ok"|"malformed"|"missing") for the result page and the PDF.
+        `recovered` marks rows salvaged from a truncated/dropped SOURCES_JSON
+        block, so the contract-miss rate stays measurable after auto-repair."""
         with self._lock:
             self._state["sources"] = list(sources or [])
             self._state["sources_status"] = status
+            self._state["sources_recovered"] = bool(recovered)
             self._save()
 
     # ---- reads ------------------------------------------------------------
@@ -213,6 +217,7 @@ class SharedMemory:
         state.setdefault("run_id", None)
         state.setdefault("sources", [])
         state.setdefault("sources_status", None)
+        state.setdefault("sources_recovered", False)
         obj._state = state
         return obj
 

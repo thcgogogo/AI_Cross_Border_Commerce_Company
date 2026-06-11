@@ -7,7 +7,32 @@
       "Bash(cp \"/Users/brucetang/Desktop/product_description_and_moats.md\" /Users/brucetang/Company_Agent_Demo/docs/product-brief.md && ls /Users/brucetang/Company_Agent_Demo/docs/)",
       "mcp__visualize__read_me",
       "Bash(python3 -c ' *)",
-      "mcp__visualize__show_widget"
+      "mcp__visualize__show_widget",
+      "Bash(xargs kill)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(curl -s http://localhost:8000/api/meta)",
+      "Bash(.venv/bin/python -c \"import json,sys; m=json.load\\(sys.stdin\\); print\\(m['product_name'], '|', m['product_byline'], '|', m['single_report_price_yuan']\\)\")",
+      "Bash(curl -s http://localhost:8000/api/industries)",
+      "Bash(curl -s -b /tmp/sample_cookies.txt -c /tmp/sample_cookies.txt -X POST http://localhost:8000/api/onboarding/kpi-confirm -H 'Content-Type: application/json' -d '{\"kpi_mappings\":[{\"kpi_name_cn\":\"销售额\",\"aliases\":\"销售额\",\"unit\":\"¥\"},{\"kpi_name_cn\":\"订单数\",\"aliases\":\"订单数\",\"unit\":\"单\"},{\"kpi_name_cn\":\"广告费\",\"aliases\":\"广告费\",\"unit\":\"¥\"},{\"kpi_name_cn\":\"退款额\",\"aliases\":\"退款额\",\"unit\":\"¥\"},{\"kpi_name_cn\":\"渠道\",\"aliases\":\"渠道\",\"unit\":\"\"}]}' -o /dev/null -w 'kpi-confirm: %{http_code}\\\\n')",
+      "Bash(curl -s -b /tmp/sample_cookies.txt -c /tmp/sample_cookies.txt -X POST http://localhost:8000/api/onboarding/generate -H 'Content-Type: application/json' -d '{}')",
+      "Bash(curl -s http://localhost:8000/api/status/onboard-26c4746a00)",
+      "Bash(.venv/bin/python -c \"import json,sys; s=json.load\\(sys.stdin\\); print\\('status:', s.get\\('status'\\)\\); print\\('last:', \\(s.get\\('logs'\\) or s.get\\('activity'\\) or [{}]\\)[-1].get\\('message',''\\)[:80]\\)\")",
+      "Bash(sed -n '195,260p' /Users/brucetang/Company_Agent_Demo/frontend/style.css)",
+      "Bash(sed -n '345,395p' /Users/brucetang/Company_Agent_Demo/frontend/style.css)",
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(.venv/bin/python -c \"import fitz; print\\('pymupdf', fitz.__version__ if hasattr\\(fitz,'__version__'\\) else 'ok'\\)\")",
+      "Bash(curl -s http://localhost:8000/api/plans)",
+      "Bash(.venv/bin/python -m json.tool)",
+      "Bash(curl -s -b /tmp/sample_cookies.txt -o /tmp/sample_report.pdf http://localhost:8000/api/reports/1/download -w 'download: %{http_code} \\(%{size_download} bytes\\)\\\\n')",
+      "Bash(.venv/bin/python scripts/make_sample_assets.py --pdf /tmp/sample_report.pdf --out frontend/assets/sample)",
+      "Bash(.venv/bin/python -m pytest -q)",
+      "Bash(.venv/bin/python -)",
+      "Bash(curl -s http://localhost:8000/api/status/onboard-105addd658)",
+      "Bash(curl -s http://localhost:8000/api/status/onboard-4122f52a37)",
+      "Bash(.venv/bin/python -m pytest tests/test_sources_truncation.py -v)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'UI redesign Phase 3: Tangent AI brand + full 营销首页 with real sample-report showcase *)"
     ]
   }
 }

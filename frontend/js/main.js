@@ -210,8 +210,10 @@ function closeNavSheet() {
 }
 
 function renderFooter() {
+  const byline = (state.meta && state.meta.product_byline)
+    || `由 ${productName()} AI 团队生成 · 每个数字可溯源`;
   $("footer").innerHTML = `
-    <div class="footer-brandline">由 ${esc(productName())} AI 团队生成 · 每个数字可溯源</div>
+    <div class="footer-brandline">${esc(byline)}</div>
     <div>
       <a href="/help">帮助中心</a>·
       <a href="/changelog">更新日志${state.changelogHasNew ? '<span class="menu-badge">新功能</span>' : ""}</a>

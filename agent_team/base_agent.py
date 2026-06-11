@@ -52,6 +52,9 @@ class Agent:
                     # falling back to this agent's default from config.py.
                     model=config.effective_model(self.id),
                     effort=self.cfg.get("effort", "high"),
+                    # Per-agent output cap (org chart knob): the Report Writer
+                    # needs extra room for its mandatory SOURCES_JSON trail.
+                    max_tokens=self.cfg.get("max_tokens", 8000),
                     budget=self.cfg.get("budget", config.AGENT_TEAM_BUDGET),
                     web_search=web_search,
                 )
@@ -62,6 +65,13 @@ class Agent:
         except Exception as e:
             self.memory.log(self.id, f"Hit an error: {e}", type="error")
             raise
+
+        # An answer that stopped at the output ceiling was CUT OFF, not finished.
+        # Say so in the feed — a silent truncation looks identical to success.
+        if getattr(self.llm, "last_stop_reason", None) == "max_tokens":
+            self.memory.log(self.id,
+                            "Output hit its length ceiling — the end of this result "
+                            "may be cut off.", type="warning")
 
         self.memory.add_artifact(self.id, result)
         preview = result.replace("\n", " ")[:160]
@@ -92,6 +102,9 @@ class Agent:
             tool_executor=executor,
             model=config.effective_model(self.id),
             effort=self.cfg.get("effort", "high"),
+            # Same org-chart knob as the plain path (complete_with_tools'
+            # default is 12000 — file-building turns run longer).
+            max_tokens=self.cfg.get("max_tokens", 12000),
             budget=self.cfg.get("budget", config.AGENT_TEAM_BUDGET),
             web_search=web_search,
         )

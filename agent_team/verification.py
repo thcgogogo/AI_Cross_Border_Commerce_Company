@@ -17,6 +17,12 @@ report:
         raises — the caller still ships the report and the UI shows a small
         "本次未能生成数据溯源表" banner.
 
+        Because the block is contracted to be the LAST thing in the output, an
+        output-token cut destroys it first (and silently). recover_sources() is
+        the salvage path the orchestrator tries when the strict parse fails: it
+        keeps the complete rows the writer actually wrote and drops the
+        half-written one — rows are recovered verbatim, never reconstructed.
+
   2. audit_report(report, known_numbers, llm, ...)
         One cheap-model (Haiku) pass: given the report body and the set of
         numbers the system actually KNOWS (every metric in the company brain
@@ -130,6 +136,35 @@ def report_has_anchors(text):
     return bool(text) and bool(_ANCHOR_RE.search(str(text)))
 
 
+def count_anchors(text):
+    """Number of DISTINCT inline 【N】 anchors in the text, so a salvage log can
+    say how many anchors the body carries vs. how many source rows survived."""
+    if not text:
+        return 0
+    return len({int(re.sub(r"\D", "", m)) for m in _ANCHOR_RE.findall(str(text))})
+
+
+def recover_sources(text):
+    """Salvage whatever COMPLETE source rows follow the (last) SOURCES_JSON
+    marker, tolerating an array whose tail was cut off mid-row by an
+    output-token limit. A half-written row is dropped, never guessed at, so
+    every surviving row is one the writer actually authored (the trail is a
+    trust feature). Returns normalized rows (>=1) or None. Never raises."""
+    if not text:
+        return None
+    s = str(text)
+    idx = s.rfind(SOURCES_MARKER)
+    if idx == -1:
+        return None
+    tail = s[idx + len(SOURCES_MARKER):]
+    parsed = _extract_json_array(tail)
+    if not isinstance(parsed, list):
+        parsed = _repair_truncated_array(tail)
+    if not isinstance(parsed, list):
+        return None
+    return _normalize_sources(parsed) or None
+
+
 # ---------------------------------------------------------------------------
 # 2. Cheap-model auditor — flag numbers the system can't back up
 # ---------------------------------------------------------------------------
@@ -221,3 +256,25 @@ def _extract_json_array(text):
     except (json.JSONDecodeError, ValueError):
         return None
     return val if isinstance(val, list) else None
+
+
+def _repair_truncated_array(text):
+    """Parse a JSON array whose closing bracket (and likely its final element)
+    was cut off mid-stream: close the array right after a complete object,
+    trying from the LAST '}' backward, and return the first variant that
+    parses. Returns a list, or None when no complete element survives."""
+    if not text:
+        return None
+    s = str(text)
+    start = s.find("[")
+    if start == -1:
+        return None
+    frag = s[start:]
+    for end in reversed([m.end() for m in re.finditer(r"\}", frag)]):
+        try:
+            val = json.loads(frag[:end] + "]")
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(val, list):
+            return val
+    return None

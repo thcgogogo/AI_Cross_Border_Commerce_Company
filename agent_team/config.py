@@ -383,6 +383,10 @@ PLANS = {
 PURCHASABLE_PLANS = ("basic", "pro")   # what /api/pay/create accepts as plan_code
 SUBSCRIPTION_PERIOD_DAYS = 30          # one paid period = 30 days ("a month")
 
+# 单次报告 price (the brief's commitment-free bridge to subscription). Shown on
+# the landing/pricing pages now; becomes purchasable in Phase 7 (B4).
+SINGLE_REPORT_PRICE_YUAN = 29.0
+
 
 def plan(code):
     """The PLANS row for `code`, falling back to the free plan."""
@@ -491,10 +495,10 @@ def support_wechat_qr_url():
 # ===========================================================================
 # We sell finished reports, so every customer-facing surface (PDF footer, emails,
 # /api/meta for the web UI) reads the brand from HERE instead of hardcoding it.
-# The default keeps today's name until the real product name is decided (plan
-# §9 D1); set PRODUCT_NAME / PRODUCT_TAGLINE in .env to rebrand without a code
-# change (re-read per call, same live-edit behavior as the support knobs).
-PRODUCT_NAME_DEFAULT = "统一智能体中转站"
+# "Tangent AI" is the decided brand (plan §9 D1, 2026-06-11 — matches the long-
+# standing tng-sk- key prefix); set PRODUCT_NAME / PRODUCT_TAGLINE in .env to
+# rebrand without a code change (re-read per call, like the support knobs).
+PRODUCT_NAME_DEFAULT = "Tangent AI"
 PRODUCT_TAGLINE_DEFAULT = "你的 AI 经营分析团队"
 
 
@@ -506,6 +510,16 @@ def product_name():
 def product_tagline():
     """The one-line tagline shown under the product name (PRODUCT_TAGLINE env wins)."""
     return _env("PRODUCT_TAGLINE") or PRODUCT_TAGLINE_DEFAULT
+
+
+def product_byline():
+    """The brief's trust footer 「由 [产品名] AI 团队生成 · 每个数字可溯源」, used
+    verbatim on the PDF, the web footer and delivery messages. A name that
+    already ends in "AI" (e.g. "Tangent AI") drops the extra "AI" so the line
+    never reads "…AI AI 团队…"."""
+    name = product_name()
+    team = "%s 团队" % name if name.strip().upper().endswith("AI") else "%s AI 团队" % name
+    return "由 %s生成 · 每个数字可溯源" % team
 
 
 # The 生成报告 page composes the /api/run goal from these per report type, so the
@@ -889,6 +903,10 @@ AGENTS = [
         "model": OPUS,
         "effort": "high",
         "tools": ["web_search"],  # can fact-check and pull current context while writing
+        # The full report body PLUS the mandatory SOURCES_JSON trail (30+ rows on a
+        # rich dataset) does not fit the 8000-token default — a clipped array is what
+        # produced the 「本次未能生成数据溯源表」 banner on real runs (2026-06-11).
+        "max_tokens": 16000,
         "system_prompt": (
             "You are an executive Report Writer. You take the analysts' findings and write "
             "a clear, well-structured report for a busy decision-maker. You lead with a short "

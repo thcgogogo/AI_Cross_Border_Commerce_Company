@@ -535,14 +535,22 @@ class Orchestrator:
             "'SOURCES_JSON:', copy that entire line verbatim as the very last line of your output — "
             "do not translate, reformat, renumber, or drop it."
         )
-        return self.llm.complete(
+        final = self.llm.complete(
             system_prompt=self.ceo_cfg["system_prompt"],
             user_content=prompt,
             model=config.effective_model("ceo"),  # honour the UI model picker
             effort=self.ceo_cfg.get("effort", "high"),
-            max_tokens=8000,
+            # Must fit the whole assembled report PLUS the writer's SOURCES_JSON
+            # line copied verbatim — 8000 clipped the array on real runs.
+            max_tokens=16000,
             budget=config.AGENT_TEAM_BUDGET,
         )
+        if getattr(self.llm, "last_stop_reason", None) == "max_tokens":
+            # The SOURCES_JSON line rides at the very END, so it is the first
+            # casualty of a cut — the salvage in _apply_verification_trail kicks in.
+            self.memory.log("ceo", "最终汇总输出达到长度上限，结尾可能被截断。",
+                            type="warning")
+        return final
 
     # ----------------------------------------------------------------------
     # Verification trail (Phase 6) — split off the machine SOURCES_JSON block,
@@ -554,7 +562,12 @@ class Orchestrator:
         PREPEND a 人工确认 warning if any number can't be backed by the system's
         known figures. Returns the report body the USER should see (machine block
         stripped, warning prepended if needed). Never raises — verification must
-        never block delivery."""
+        never block delivery.
+
+        When the strict parse fails on a report that clearly carries anchors,
+        _salvage_sources() recovers the rows the writer ACTUALLY wrote (from the
+        truncated tail and/or the writer's own draft artifact) instead of
+        dropping the whole trust table."""
         try:
             body, sources, status = verification.split_report_and_sources(final)
         except Exception:
@@ -562,7 +575,11 @@ class Orchestrator:
             self.memory.set_sources([], "malformed")
             return final
 
-        self.memory.set_sources(sources or [], status)
+        recovered = False
+        if status != "ok":
+            body, sources, status, recovered = self._salvage_sources(final, body, status)
+
+        self.memory.set_sources(sources or [], status, recovered=recovered)
         if status == "ok":
             self.memory.log("ceo",
                             f"已解析数据溯源表（{len(sources)} 条来源）。", type="success")
@@ -586,6 +603,42 @@ class Orchestrator:
             warning = ""
 
         return (warning + body) if warning else body
+
+    def _salvage_sources(self, final, body, status):
+        """The SOURCES_JSON block is contracted to be the LAST thing in the
+        output, so an output-token cut destroys it first (job onboard-26c4746a00:
+        clipped mid-row 47 of 75). Recover the complete rows that were ACTUALLY
+        written — from the truncated tail of the final output, or from the Report
+        Writer's own draft artifact (which the CEO may also have dropped or
+        re-clipped while copying). Never invents a row: the trail is the trust
+        feature, so a row the writer didn't author must not appear. No-op for
+        deliverables without anchors (e.g. a poem or a slide outline).
+
+        Returns (body, sources, status, recovered) — unchanged input (with
+        recovered=False) when nothing can be salvaged."""
+        if not verification.report_has_anchors(body):
+            return body, None, status, False
+
+        candidates = []
+        rows = verification.recover_sources(final)
+        if rows:
+            candidates.append((rows, "最终汇总的截断块"))
+        draft = self.memory.get_artifact("report_writer") or ""
+        rows = verification.recover_sources(draft)
+        if rows:
+            candidates.append((rows, "报告撰写人的草稿"))
+        if not candidates:
+            return body, None, status, False
+
+        # The draft can only have MORE complete rows than a re-clipped copy —
+        # prefer whichever source preserved the most.
+        rows, origin = max(candidates, key=lambda c: len(c[0]))
+        self.memory.log(
+            "ceo",
+            f"SOURCES_JSON 块缺失或被截断，已从{origin}恢复 {len(rows)} 条来源"
+            f"（正文共 {verification.count_anchors(body)} 个锚点）。",
+            type="warning")
+        return body, rows, "ok", True
 
     def _known_numbers(self):
         """The set of numbers the system can actually back up: every metric value

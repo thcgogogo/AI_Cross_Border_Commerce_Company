@@ -399,8 +399,12 @@ def build_report_pdf(*, out_path, markdown_text, company_name,
     _append_sources_section(story, styles, brand, sources, sources_status,
                             markdown_text or "")
 
-    # Marketing footer (Phase 6): "由 [产品名] AI 团队生成 · 每个数字可溯源 [· 域名]".
-    footer_bits = ["由 %s AI 团队生成" % product_name, "每个数字可溯源"]
+    # Marketing footer: the brief's byline (config.product_byline handles names
+    # that already end in "AI", e.g. "Tangent AI") + the optional domain.
+    if product_name == config.product_name():
+        footer_bits = [config.product_byline()]
+    else:  # explicit product_name override keeps the literal template
+        footer_bits = ["由 %s AI 团队生成" % product_name, "每个数字可溯源"]
     if (product_domain or "").strip():
         footer_bits.append(product_domain.strip())
     footer_text = " · ".join(footer_bits) + " · 第 {n} / {total} 页"

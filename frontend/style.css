@@ -379,6 +379,100 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 .landing-trust { text-align: center; color: var(--muted); font-size: 13px; padding: 26px 20px 56px; }
 @media (max-width: 720px) { .steps3 { grid-template-columns: 1fr; } }
 
+/* ---- Phase 3: full 营销首页 sections ---------------------------------------- */
+.lsec { max-width: 1080px; margin: 0 auto; padding: 56px 24px 8px; }
+.lsec-alt {
+  max-width: none; background: var(--card); border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line); margin-top: 48px; padding: 56px 24px;
+}
+.lsec-alt > * { max-width: 1032px; margin-left: auto; margin-right: auto; }
+.lsec-h2 { font-size: clamp(22px, 3.4vw, 30px); font-weight: 900; letter-spacing: -.01em; text-align: center; }
+.lsec-lead { color: var(--muted); font-size: 15px; text-align: center; max-width: 58ch; margin: 10px auto 28px; }
+
+/* 示例报告 showcase — scroll-snap strip of real PDF pages */
+.sample-strip {
+  display: flex; gap: 16px; overflow-x: auto; padding: 6px 2px 14px;
+  scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch;
+}
+.sample-page {
+  flex: none; width: min(380px, 78vw); scroll-snap-align: center;
+  border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden;
+  background: #fff; box-shadow: var(--shadow); transition: transform .16s ease;
+}
+.sample-page:hover { transform: translateY(-3px); }
+.sample-page img { display: block; width: 100%; height: auto; }
+.sample-note { text-align: center; color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+/* 数字可溯源 */
+.trace-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 36px; align-items: center; }
+.trace-grid .lsec-h2 { text-align: left; }
+.trace-points { list-style: none; margin: 18px 0 0; padding: 0; }
+.trace-points li { position: relative; padding-left: 26px; margin: 12px 0; font-size: 14.5px; color: var(--muted); }
+.trace-points li::before { content: "✓"; position: absolute; left: 0; top: 0; color: var(--green); font-weight: 800; }
+.trace-points strong { color: var(--ink); }
+.trace-foot { margin-top: 18px; font-size: 13.5px; color: var(--ink); font-weight: 600; }
+.trace-figure img {
+  width: 100%; height: auto; display: block;
+  border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+@media (max-width: 860px) { .trace-grid { grid-template-columns: 1fr; } .trace-grid .lsec-h2 { text-align: center; } }
+
+/* 行业模板 chips */
+.chip-row { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+.chip {
+  font-size: 13.5px; font-weight: 700; color: var(--ink);
+  background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 8px 18px;
+}
+.chip-soon { color: var(--muted); border-style: dashed; font-weight: 600; }
+
+/* 企业大脑 trio */
+.brain3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.brain3 .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+@media (max-width: 860px) { .brain3 { grid-template-columns: 1fr; } }
+
+/* 定价 */
+.pricing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; align-items: stretch; }
+.plan-flag {
+  position: absolute; top: -11px; left: 50%; transform: translateX(-50%);
+  background: var(--accent); color: #fff; font-size: 11.5px; font-weight: 700;
+  border-radius: 999px; padding: 3px 12px; white-space: nowrap;
+}
+.pricing-grid .plan-card { position: relative; }
+.plan-per { font-size: 13px; color: var(--muted); font-weight: 600; }
+.plan-sub { font-size: 13px; color: var(--muted); min-height: 2.6em; }
+.plan-points li { margin: 5px 0; }
+.plan-cta { margin-top: auto; }
+.pricing-note { text-align: center; color: var(--muted); font-size: 13.5px; margin-top: 18px; }
+
+/* 安全与隐私 */
+.sec-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.sec-item {
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px; font-size: 13.5px; font-weight: 600;
+}
+.lsec:not(.lsec-alt) .sec-item { background: var(--card); }
+
+/* FAQ */
+.faq { max-width: 720px; margin: 0 auto; }
+.faq-item {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 0 18px; margin-bottom: 10px;
+}
+.faq-item summary {
+  cursor: pointer; list-style: none; font-weight: 700; font-size: 14.5px; padding: 14px 0;
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+}
+.faq-item summary::-webkit-details-marker { display: none; }
+.faq-item summary::after { content: "+"; color: var(--muted); font-weight: 600; font-size: 18px; flex: none; }
+.faq-item[open] summary::after { content: "−"; }
+.faq-item p { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
+
+/* final CTA */
+.cta-final { text-align: center; max-width: 640px; margin: 0 auto; padding: 64px 24px 72px; }
+.cta-final h2 { font-size: clamp(22px, 3.4vw, 30px); font-weight: 900; }
+.cta-final p { color: var(--muted); margin: 12px 0 4px; }
+.cta-final .run-btn { max-width: 320px; margin: 18px auto 0; }
+
 /* ===========================================================================
    FOOTER
    =========================================================================== */
