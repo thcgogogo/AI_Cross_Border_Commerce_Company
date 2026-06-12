@@ -26,9 +26,7 @@ from email.message import EmailMessage
 from urllib.parse import urlparse
 
 from . import config, crypto, metrics_store, pdf_report
-from .models import DELIVERY_FAILED, DELIVERY_SENT, DELIVERY_SKIPPED
-
-INSUFFICIENT_BALANCE_MSG = "余额不足，本次周报未生成"
+from .models import DELIVERY_FAILED, DELIVERY_SENT
 
 
 def valid_wechat_webhook(url):
@@ -249,34 +247,7 @@ def deliver_report(*, company_id, run_id, channels, pdf_path, report_markdown,
     return results
 
 
-def notify_insufficient_balance(*, company_id, job_id, channels,
-                                recipient_email=None, log=None):
-    """A scheduled fire produced nothing because the ¥ balance was too low. Send
-    the "余额不足" notice over the configured channels (best-effort) and ALWAYS
-    record a skipped delivery row per channel so the miss is auditable.
-    Returns the list of recorded delivery ids."""
-    msg = INSUFFICIENT_BALANCE_MSG
-    chans = [c for c in (channels or []) if (c or "").strip()] or ["system"]
-    recorded = []
-    for raw_ch in chans:
-        ch = (raw_ch or "").strip().lower()
-        try:
-            if ch == "email" and recipient_email:
-                settings = email_settings_from_env()
-                if settings:
-                    send_email(recipient_email, "经营周报未生成：余额不足", msg,
-                               settings=settings)
-            elif ch == "wechat":
-                webhook = metrics_store.get_branding(company_id).get("wechat_webhook")
-                if webhook:
-                    send_wechat_webhook(webhook, "⚠️ %s" % msg)
-        except Exception:
-            pass  # the notice is best-effort; the audit row below is what matters
-        recorded.append(metrics_store.record_delivery(
-            ch or "system", DELIVERY_SKIPPED, job_id=job_id, error=msg))
-    if log:
-        try:
-            log(msg)
-        except Exception:
-            pass
-    return recorded
+# Phase 10 A6 — notify_insufficient_balance (the "余额不足，本次周报未生成"
+# customer notice) was retired here: post-B8 customers have no visible ¥
+# balance, so the copy was machinery, and post-D3 the branch that called it
+# became unreachable. Skips are still recorded via mark_job_run in app.py.

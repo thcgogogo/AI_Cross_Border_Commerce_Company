@@ -2233,10 +2233,10 @@ def record_onboarding_event(account_id, step, event):
 def onboarding_state(account_id):
     """The wizard's RESUMABLE state for one account, derived from the event log.
 
-    Returns {"started": bool, "steps": {"1".."5": None|"completed"|"skipped"},
+    Returns {"started": bool, "steps": {"1".."6": None|"completed"|"skipped"},
     "done": bool, "next_step": int}. The latest action per step wins (so a step
     skipped then later completed reads completed); the wizard counts as done once
-    step 5 has any action — every step is individually skippable."""
+    the last step (6) has any action — every step is individually skippable."""
     steps = {n: None for n in ONBOARDING_STEPS if n != 0}
     started = False
     if account_id:

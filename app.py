@@ -442,16 +442,20 @@ def _save_model_overrides():
         pass
 
 
-def _agents_payload():
-    """The org chart for the UI. `model` is the EFFECTIVE model (UI pick wins).
-    `name_cn` is the customer-facing Chinese role name (redesign B1) — the
-    restyled live feed shows it instead of the English title."""
-    return [
-        {"id": a["id"], "name": a["name"], "title": a["title"],
-         "name_cn": a.get("name_cn", ""),
-         "reports_to": a["reports_to"], "model": config.effective_model(a["id"])}
-        for a in config.AGENTS
-    ]
+def _agents_payload(admin=False):
+    """The org chart for the UI. `name_cn` is the customer-facing Chinese role
+    name (redesign B1) — the restyled live feed shows it instead of the English
+    title. `model` (the EFFECTIVE model — UI pick wins) is machinery: the raw
+    "claude-..." ids ride along only for a founder session (Phase 8 A2
+    follow-up); the customer feed needs the rest of the row, never the model."""
+    rows = []
+    for a in config.AGENTS:
+        row = {"id": a["id"], "name": a["name"], "title": a["title"],
+               "name_cn": a.get("name_cn", ""), "reports_to": a["reports_to"]}
+        if admin:
+            row["model"] = config.effective_model(a["id"])
+        rows.append(row)
+    return rows
 
 
 _load_model_overrides()
@@ -504,15 +508,33 @@ def healthz():
 # ---------------------------------------------------------------------------
 # Pages & static files
 # ---------------------------------------------------------------------------
+def _spa_shell():
+    """The SPA shell with the brand substituted server-side (Phase 10 B5).
+
+    index.html carries __PRODUCT_NAME__/__PRODUCT_TAGLINE__/__BASE_URL__
+    placeholders for the <title> and the OG/Twitter link-preview tags — the
+    scraper a 企业微信 forward triggers never runs JS, so the brand and an
+    ABSOLUTE og:image URL must already be in the HTML. Brand comes from
+    config (env-overridable) and the file is re-read per request, so .env
+    edits apply without a restart (same policy as /api/meta)."""
+    path = os.path.join(app.static_folder, "index.html")
+    with open(path, encoding="utf-8") as f:
+        html = f.read()
+    html = (html.replace("__PRODUCT_NAME__", config.product_name())
+                .replace("__PRODUCT_TAGLINE__", config.product_tagline())
+                .replace("__BASE_URL__", request.url_root))
+    return Response(html, mimetype="text/html")
+
+
 @app.route("/")
 def home():
-    return send_from_directory("frontend", "index.html")
+    return _spa_shell()
 
 
 @app.route("/login")
 def login_page():
     """SPA entry that pops the login modal — the target of the /company-brain guard."""
-    return send_from_directory("frontend", "index.html")
+    return _spa_shell()
 
 
 @app.route("/company-brain")
@@ -522,7 +544,7 @@ def company_brain_page():
     router normalizes this legacy path to /brain)."""
     if not _current_customer():
         return redirect("/login")
-    return send_from_directory("frontend", "index.html")
+    return _spa_shell()
 
 
 # UI redesign Phase 2 — the SPA path router (plan §5). Every customer page is a
@@ -542,19 +564,23 @@ FOUNDER_SPA_PAGES = ("team", "costs", "models", "fusion", "api")
 @app.route("/founder/<founder_page>")
 def spa_page(run_id=None, founder_page=None):
     """Serve the SPA shell for the redesigned customer pages (and the founder
-    machinery views — their is_admin gating is in the UI; the sensitive /admin*
-    pages keep their own server-side checks)."""
+    machinery views — only the SHELL is UI-gated: the machinery DATA endpoints
+    below are founder-gated server-side, and the sensitive /admin* pages keep
+    their own server-side checks)."""
     if founder_page is not None and founder_page not in FOUNDER_SPA_PAGES:
         return jsonify({"error": "not found"}), 404
     if not _current_customer():
         return redirect("/login")
-    return send_from_directory("frontend", "index.html")
+    return _spa_shell()
 
 
 @app.route("/api/agents")
 def agents():
-    """The org chart, used by the UI to draw the team."""
-    return jsonify(_agents_payload())
+    """The org chart, used by the UI to draw the team. Reachable by every
+    session — the customer report feed needs id/name/title/name_cn/reports_to
+    to label the live feed — but the per-agent model ids are machinery and are
+    stripped for everyone but the founder (Phase 8 A2 follow-up)."""
+    return jsonify(_agents_payload(admin=_is_admin(_current_customer())))
 
 
 @app.route("/api/models")
@@ -566,6 +592,11 @@ def models_list():
     configured in .env right now?) so the dashboard editor can show a live/needs-key
     dot for every model — not just the ones already on a key."""
     load_dotenv(override=True)  # so `available` reflects keys you may have just added
+    # Phase 8 A2 follow-up — server-side founder gate: the catalog is machinery
+    # (raw model ids, provider names, per-1M-token ¥ pricing) and only founder
+    # views consume it; until now only the client's isAdmin() hid it.
+    if not _is_admin(_current_customer()):
+        return jsonify({"error": "仅限管理员操作。"}), 403
     out = []
     for row in config.MODEL_CHOICES:
         m = dict(row)
@@ -613,7 +644,11 @@ def meta():
 @app.route("/api/providers")
 def providers_list():
     """The model providers (id + display label), so the UI can group models by
-    company on the Models and the unified-API store pages. Config-driven."""
+    company on the Models and the unified-API store pages. Config-driven.
+    Founder-only (A2 follow-up) — provider names are machinery and only the
+    founder catalog (state.js loadFounderCatalog) loads this."""
+    if not _is_admin(_current_customer()):
+        return jsonify({"error": "仅限管理员操作。"}), 403
     return jsonify([{"id": pid, "label": p.get("label", pid)}
                     for pid, p in config.PROVIDERS.items()])
 
@@ -628,7 +663,12 @@ def industries():
 
 @app.route("/api/agents/model", methods=["POST"])
 def set_agent_model():
-    """Assign one agent to a specific model. Persists and returns the updated team."""
+    """Assign one agent to a specific model. Persists and returns the updated team.
+    Founder-only server-side (A2 follow-up) — this WRITE reassigns the whole
+    team's models and was reachable by any caller while only the founder Team
+    page linked it."""
+    if not _is_admin(_current_customer()):
+        return jsonify({"error": "仅限管理员操作。"}), 403
     data = request.get_json(silent=True) or {}
     agent_id = (data.get("agent_id") or "").strip()
     model = (data.get("model") or "").strip()
@@ -637,7 +677,7 @@ def set_agent_model():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     _save_model_overrides()
-    return jsonify(_agents_payload())
+    return jsonify(_agents_payload(admin=True))
 
 
 # ---------------------------------------------------------------------------
@@ -990,11 +1030,11 @@ def _execute_scheduled_job(job, llm=None):
     in production, or directly by a test with an injected `llm` (so no real API
     call is made). `job` is a dict from metrics_store.
 
-    Flow: resolve the account → PLAN GATE (B8: locked/quota skip recorded as
-    skipped_plan_limit; a free account's spent cost cap keeps the skip +
-    "余额不足" notice) → gather source files → open a run + build shared memory →
-    run the team headlessly (the branded PDF is rendered inside the
-    orchestrator's _finish_run) → deliver over the job's channels → stamp
+    Flow: resolve the account → PLAN GATE (B8: locked/quota/cap skips recorded
+    with their own last_status, nothing delivered — Phase 10 A6 retired the old
+    "余额不足" customer notice) → gather source files → open a run + build
+    shared memory → run the team headlessly (the branded PDF is rendered inside
+    the orchestrator's _finish_run) → deliver over the job's channels → stamp
     last_status. Returns a small dict for tests."""
     job_id = job.get("id")
     company_id = job.get("company_id")
@@ -1025,21 +1065,23 @@ def _execute_scheduled_job(job, llm=None):
 
     # B8 BILLING GATE — one decision: locked / free-balance / quota. A
     # subscriber with a spent demo balance RUNS (flat plan — the old blanket
-    # balance gate skipped exactly those customers' Monday reports); the
-    # skip+notify pattern is kept for the free trial's invisible cost cap, and
-    # a locked or quota-exhausted plan skips with its own last_status
+    # balance gate skipped exactly those customers' Monday reports); a locked,
+    # cap-spent or quota-exhausted plan skips with its own last_status
     # (recorded, never silent).
+    #
+    # Phase 10 A6 — the old no_balance branch DELIVERED "余额不足，本次周报未
+    # 生成" to the customer's 企业微信/邮箱: machinery copy (customers have no
+    # visible ¥ balance to top up). Post-B8/D3 the branch is unreachable —
+    # free accounts (the only no_balance source) never pass the
+    # scheduled_delivery feature gate above — but gate order has changed once
+    # already, so the skip is kept distinct and auditable while the customer
+    # notification is retired outright.
     plan_ok, _plan_msg, gate_code = _plan_gate(customer)
     if not plan_ok:
-        if gate_code == "no_balance":
-            delivery.notify_insufficient_balance(
-                company_id=company_id, job_id=job_id, channels=channels,
-                recipient_email=recipient_email)
-            metrics_store.mark_job_run(job_id, "skipped_no_balance")
-            result["status"] = "skipped_no_balance"
-        else:
-            metrics_store.mark_job_run(job_id, "skipped_plan_limit")
-            result["status"] = "skipped_plan_limit"
+        status = ("skipped_no_balance" if gate_code == "no_balance"
+                  else "skipped_plan_limit")
+        metrics_store.mark_job_run(job_id, status)
+        result["status"] = status
         return result
 
     # Gather this fire's input files (latest upload batch, or the pinned list).
@@ -1270,15 +1312,23 @@ def download_file(job_id, filename):
 
 
 # ---------------------------------------------------------------------------
-# Token Manager (the "CFO") — the side menu reads and configures these.
+# Token Manager (the "CFO") — the founder cost console reads and configures
+# these. All five are founder-gated server-side (Phase 8 A2 follow-up): the
+# status read is raw platform COGS (¥ budget/used/remaining) and the POSTs
+# MUTATE the shared platform spend cap — yet none of them had any auth; only
+# the client's isAdmin() kept them out of the customer UI.
 # ---------------------------------------------------------------------------
 @app.route("/api/tokens")
 def tokens_status():
+    if not _is_admin(_current_customer()):
+        return jsonify({"error": "仅限管理员操作。"}), 403
     return jsonify(TOKENS.status())
 
 
 @app.route("/api/tokens/total", methods=["POST"])
 def tokens_set_total():
+    if not _is_admin(_current_customer()):
+        return jsonify({"error": "仅限管理员操作。"}), 403
     data = request.get_json(silent=True) or {}
     try:
         TOKENS.set_total_budget(data.get("limit"))
@@ -1289,6 +1339,8 @@ def tokens_set_total():
 
 @app.route("/api/tokens/budget", methods=["POST"])
 def tokens_set_budget():
+    if not _is_admin(_current_customer()):
+        return jsonify({"error": "仅限管理员操作。"}), 403
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     if not name:
@@ -1302,6 +1354,8 @@ def tokens_set_budget():
 
 @app.route("/api/tokens/budget/remove", methods=["POST"])
 def tokens_remove_budget():
+    if not _is_admin(_current_customer()):
+        return jsonify({"error": "仅限管理员操作。"}), 403
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     if not name:
@@ -1312,6 +1366,8 @@ def tokens_remove_budget():
 
 @app.route("/api/tokens/reset", methods=["POST"])
 def tokens_reset():
+    if not _is_admin(_current_customer()):
+        return jsonify({"error": "仅限管理员操作。"}), 403
     TOKENS.reset_usage()
     return jsonify(TOKENS.status())
 
@@ -1359,10 +1415,16 @@ def _account_view(customer):
         for field in ("balance", "spent", "requests", "usage",
                       "key_prefix", "key_last4"):
             view.pop(field, None)
-        for m in view["models"]:
-            for field in ("input_per_mtok", "output_per_mtok",
-                          "price", "price_unit"):
-                m.pop(field, None)
+        # Phase 10 A5 — the per-model rows are machinery end to end: besides
+        # the per-MTok pricing, the raw model id / label / provider / tier /
+        # context size must not ride along either. Inert today (customers keep
+        # models == []), but one future set_models call away from a devtools
+        # leak — so keep only the harmless display-kind fields.
+        view["models"] = [
+            {k: v for k, v in m.items()
+             if k in ("kind", "kind_label", "approx", "available")}
+            for m in view["models"]
+        ]
     return view
 
 
@@ -4312,6 +4374,12 @@ def fusion():
     customer = _current_customer()
     if not customer:
         return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    # Phase 8 A2 follow-up — server-side founder gate. Fusion is a /founder/*
+    # view (the customer UI never links it) and its response carries machinery
+    # (per-call ¥ cost, account balance, per-model token counts); until now only
+    # the client's isAdmin() hid it, leaving the endpoint open to any session.
+    if not _is_admin(customer):
+        return jsonify({"error": "仅限管理员操作。"}), 403
     plan_ok, plan_msg, _gate_code = _plan_gate(customer)
     if not plan_ok:
         return jsonify({"error": plan_msg}), 402

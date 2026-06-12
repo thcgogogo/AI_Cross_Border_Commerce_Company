@@ -11,6 +11,15 @@ Part A — carryover hardening:
       balance / key fragments / spent / requests / usage log / per-model
       pricing; the founder keeps the full view; the model-picker WRITE is
       refused 403 server-side for non-admins (it was client-gated only).
+      Follow-up: /api/fusion (a /founder/* view whose response carries
+      cost/balance/token counts) gets the same server-side 403 gate.
+  A3. The machinery DATA endpoints get the same server-side gate: the
+      /api/tokens family (raw platform ¥ COGS status + the spend-cap WRITES),
+      /api/models (catalog with per-1M-token ¥ pricing), /api/providers and
+      the /api/agents/model write all 403 non-founders — they had NO auth at
+      all, only the client's isAdmin() hid them. /api/agents stays reachable
+      (the customer feed needs the org chart) but serves it WITHOUT the
+      per-agent model ids for non-founder sessions.
 
 Part B — the six-step wizard backend:
   B1. Numbering: /api/onboarding/skip accepts 1..6 (7 is invalid), the state
@@ -38,11 +47,12 @@ if ROOT not in sys.path:
 
 import app  # noqa: E402 — module-level boot is one-time & idempotent
 from admin import queries  # noqa: E402
-from agent_team import config, db, metrics_store  # noqa: E402
+from agent_team import config, db, metrics_store, providers  # noqa: E402
 from agent_team.customers import CustomerStore  # noqa: E402
 from agent_team.models import (  # noqa: E402
     RUN_KIND_IMPORT, RUN_SUCCEEDED, Account)
-from agent_team.token_manager import BudgetExceededError  # noqa: E402
+from agent_team.token_manager import (  # noqa: E402
+    BudgetExceededError, TokenManager)
 
 OWNER = "owner@corp.com"
 
@@ -244,15 +254,22 @@ def test_api_me_strips_machinery_for_customer_sessions(env):
     assert me["is_admin"] is False
     for field in MACHINERY_FIELDS:
         assert field not in me, field
+    # Phase 10 A5 — beyond pricing, the model identity fields (raw model id,
+    # label, provider, tier, context size) are stripped too; only display-kind
+    # fields may survive on a customer session.
     for m in me["models"]:
-        for field in MODEL_PRICING_FIELDS:
+        for field in MODEL_PRICING_FIELDS + ("id", "label", "provider",
+                                              "tier", "context"):
             assert field not in m, field
+        assert set(m) <= {"kind", "kind_label", "approx", "available"}
     # What the customer UI legitimately needs survives.
     assert me["email"] == OWNER
     assert me["report_credits"] == 0
-    # Belt-and-braces: the raw body (what devtools shows) names none of it.
+    # Belt-and-braces: the raw body (what devtools shows) names none of it —
+    # neither the field names nor the values (model id / provider name).
     raw = client.get("/api/me").get_data(as_text=True)
-    for needle in MACHINERY_FIELDS + MODEL_PRICING_FIELDS:
+    for needle in MACHINERY_FIELDS + MODEL_PRICING_FIELDS + (
+            config.HAIKU, "anthropic", "Haiku", '"provider"', '"tier"'):
         assert needle not in raw, needle
 
 
@@ -293,6 +310,167 @@ def test_model_picker_write_is_founder_only(env, monkeypatch):
     resp = client.post("/api/account/models", json={"models": [config.HAIKU]})
     assert resp.status_code == 200
     assert env["store"].get_by_id(acc_id)["models"] == [config.HAIKU]
+
+
+def test_fusion_endpoint_is_founder_only(env, monkeypatch):
+    # The verified A2 gap: /api/fusion is a /founder/* view whose response
+    # carries machinery (per-call ¥ cost, account balance, per-answer token
+    # counts), yet a customer session whose /api/me was correctly stripped
+    # still got {"balance": ..., "cost": ...} straight from this endpoint.
+    calls = []
+
+    def fake_gateway_chat(model_id, messages, max_tokens=1024):
+        calls.append(model_id)
+        # Token counts big enough that the to-the-fen debit is non-zero.
+        return {"text": "fused answer", "input_tokens": 100_000,
+                "output_tokens": 20_000, "model": model_id,
+                "provider": "anthropic"}
+
+    monkeypatch.setattr(providers, "gateway_chat", fake_gateway_chat)
+    client = _client_for(env["store"], OWNER)
+    payload = {"prompt": "1+1?", "models": [config.HAIKU]}
+
+    resp = client.post("/api/fusion", json=payload)
+    assert resp.status_code == 403
+    raw = resp.get_data(as_text=True)
+    for needle in ("balance", "cost", "input_tokens", "output_tokens"):
+        assert needle not in raw, needle
+    assert calls == []   # refused before any model ran — nothing billed
+    assert env["store"].find_by_email(OWNER)["balance"] == 1000.0
+
+    # The founder keeps the working page, full billing view included.
+    monkeypatch.setenv("ADMIN_EMAILS", OWNER)
+    resp = client.post("/api/fusion", json=payload)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["fused"]["text"] == "fused answer"
+    assert body["cost"] > 0
+    assert body["balance"] < 1000.0   # the founder's own account was billed
+
+
+# ===========================================================================
+# Part A3 — the machinery DATA endpoints get the same server-side gate
+# ===========================================================================
+# Every founder-console endpoint that until now relied on the customer UI's
+# isAdmin() alone: the /api/tokens family is the raw platform ¥ COGS (and its
+# POSTs MUTATE the shared spend cap), /api/models + /api/providers are the
+# catalog (raw model ids, provider names, per-1M-token ¥ pricing), and the
+# /api/agents/model write reassigns the whole team. (method, path, body).
+MACHINERY_ENDPOINTS = (
+    ("GET", "/api/tokens", None),
+    ("POST", "/api/tokens/total", {"limit": 9999}),
+    ("POST", "/api/tokens/budget", {"name": "intruder", "limit": 1}),
+    ("POST", "/api/tokens/budget/remove", {"name": "research"}),
+    ("POST", "/api/tokens/reset", None),
+    ("GET", "/api/models", None),
+    ("GET", "/api/providers", None),
+    ("POST", "/api/agents/model", {"agent_id": "ceo", "model": config.HAIKU}),
+)
+
+
+@pytest.fixture
+def machinery(env, tmp_path, monkeypatch):
+    """Hermetic machinery state: app.TOKENS is a module-level singleton that
+    persists to memory_store/tokens.json (built before `env` redirects
+    MEMORY_DIR), and the /api/agents/model write lands in config.MODEL_OVERRIDES
+    + MODEL_OVERRIDES_PATH — swap all three for throwaways so neither a test
+    mutation nor a regressed gate can touch the repo's real files."""
+    tm = TokenManager(store_path=str(tmp_path / "tokens.json"),
+                      total_budget=500.0, task_budgets={"research": 50.0})
+    monkeypatch.setattr(app, "TOKENS", tm)
+    monkeypatch.setattr(app, "MODEL_OVERRIDES_PATH",
+                        str(tmp_path / "model_overrides.json"))
+    monkeypatch.setattr(config, "MODEL_OVERRIDES", {})
+    return tm
+
+
+def _fire(client, method, path, body):
+    return client.get(path) if method == "GET" else client.post(path, json=body)
+
+
+def _assert_all_refused(client, tokens):
+    tokens.record_cost("research", 7.5)            # so a leaked reset is visible
+    for method, path, body in MACHINERY_ENDPOINTS:
+        resp = _fire(client, method, path, body)
+        assert resp.status_code == 403, path
+        raw = resp.get_data(as_text=True)
+        for needle in ("limit", "used", "remaining", "per_mtok", "price",
+                       "anthropic", config.HAIKU):
+            assert needle not in raw, (path, needle)
+    # ...and none of the refused WRITES landed.
+    st = tokens.status()
+    assert st["total"]["limit"] == 500.0           # /total didn't raise the cap
+    assert st["total"]["used"] == 7.5              # /reset didn't zero the spend
+    assert [b["name"] for b in st["budgets"]] == ["research"]  # add/remove inert
+    assert config.MODEL_OVERRIDES == {}            # the ceo reassignment refused
+
+
+def test_machinery_endpoints_refuse_anonymous_callers(machinery):
+    # The verified exposure: NONE of these had auth — an anonymous request
+    # could read the platform's ¥ COGS and reset/raise its spend cap.
+    _assert_all_refused(app.app.test_client(), machinery)
+
+
+def test_machinery_endpoints_refuse_customer_sessions(env, machinery):
+    _assert_all_refused(_client_for(env["store"], OWNER), machinery)
+
+
+def test_machinery_endpoints_serve_the_founder(env, machinery, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", OWNER)
+    client = _client_for(env["store"], OWNER)
+
+    st = client.get("/api/tokens").get_json()      # the raw ¥ COGS view
+    assert st["total"]["limit"] == 500.0
+    assert [b["name"] for b in st["budgets"]] == ["research"]
+
+    models = client.get("/api/models").get_json()  # full catalog, ¥ pricing on
+    haiku = next(m for m in models if m["id"] == config.HAIKU)
+    assert haiku["provider"] == "anthropic"
+    assert haiku["input_per_mtok_cny"] > 0
+
+    providers_rows = client.get("/api/providers").get_json()
+    assert "anthropic" in [p["id"] for p in providers_rows]
+
+    # The budget writes work — and actually land in the manager.
+    assert client.post("/api/tokens/total",
+                       json={"limit": 800}).get_json()["total"]["limit"] == 800.0
+    assert machinery.status()["total"]["limit"] == 800.0
+    assert client.post("/api/tokens/budget",
+                       json={"name": "video", "limit": 30}).status_code == 200
+    assert client.post("/api/tokens/budget/remove",
+                       json={"name": "video"}).status_code == 200
+    machinery.record_cost("research", 7.5)
+    assert client.post("/api/tokens/reset").get_json()["total"]["used"] == 0.0
+
+    # The team write works and returns the founder view (models included).
+    team = client.post("/api/agents/model",
+                       json={"agent_id": "ceo", "model": config.HAIKU}).get_json()
+    assert {a["id"]: a["model"] for a in team}["ceo"] == config.HAIKU
+    assert config.MODEL_OVERRIDES == {"ceo": config.HAIKU}
+
+
+def test_api_agents_keeps_the_feed_fields_but_strips_model(env):
+    # /api/agents stays reachable — the report feed (report_new.js /
+    # onboarding.js → loadAgents) needs the org chart to label the live feed
+    # 报告撰写人 instead of raw agent ids — but the per-agent model ids are
+    # machinery and are stripped for anonymous and customer sessions alike.
+    for client in (app.app.test_client(), _client_for(env["store"], OWNER)):
+        resp = client.get("/api/agents")
+        assert resp.status_code == 200
+        rows = resp.get_json()
+        assert {r["id"] for r in rows} == {a["id"] for a in config.AGENTS}
+        for row in rows:
+            assert set(row) == {"id", "name", "title", "name_cn", "reports_to"}
+        raw = resp.get_data(as_text=True)
+        for a in config.AGENTS:                    # no effective model id leaks
+            assert config.effective_model(a["id"]) not in raw
+
+
+def test_api_agents_keeps_model_for_founder(env, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", OWNER)
+    rows = _client_for(env["store"], OWNER).get("/api/agents").get_json()
+    assert {r["id"]: r["model"] for r in rows} == {
+        a["id"]: config.effective_model(a["id"]) for a in config.AGENTS}
 
 
 # ===========================================================================

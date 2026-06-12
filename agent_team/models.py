@@ -84,7 +84,7 @@ SOURCE_MODES = (SOURCE_LATEST_UPLOAD, SOURCE_FIXED_FILES)
 # The outcome of a single delivery attempt (one row per channel per run).
 DELIVERY_SENT = "sent"
 DELIVERY_FAILED = "failed"
-DELIVERY_SKIPPED = "skipped"             # e.g. balance too low — nothing was generated
+DELIVERY_SKIPPED = "skipped"             # a gated fire — nothing was generated
 DELIVERY_STATUSES = (DELIVERY_SENT, DELIVERY_FAILED, DELIVERY_SKIPPED)
 
 # A reader's reaction to one report section (Phase 6 feedback loop).
@@ -592,7 +592,7 @@ class OnboardingEvent(Base):
 
     id = Column(Integer, primary_key=True)
     account_id = Column(String(32), nullable=False, index=True)   # loose ref accounts.id
-    step = Column(Integer, nullable=False, index=True)            # 0 (wizard) … 5
+    step = Column(Integer, nullable=False, index=True)            # 0 (wizard) … 6
     event = Column(Enum(*ONBOARDING_EVENT_KINDS, name="onboarding_event_kind"),
                    nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
