@@ -3,7 +3,23 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>你的 AI 经营分析团队</title>
+  <!-- __PRODUCT_NAME__ / __BASE_URL__ are filled by the server from config
+       (app.py _spa_shell) — scrapers reading a forwarded /reports/<id> link
+       never run JS, so the brand must already be in the HTML (Phase 10 B5). -->
+  <title>__PRODUCT_NAME__ · __PRODUCT_TAGLINE__</title>
+  <meta name="description" content="把杂乱的 Excel 交给你的 AI 经营分析团队：每周一 08:00，一页可转发的经营报告准时送到企业微信和邮箱。不用配置，不写提示词，每个数字可溯源。" />
+  <meta name="theme-color" content="#1f5eff" />
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="__PRODUCT_NAME__" />
+  <meta property="og:title" content="__PRODUCT_NAME__ · __PRODUCT_TAGLINE__" />
+  <meta property="og:description" content="周一早上，报告自己到。AI 团队把你的经营数据变成一页可转发的报告，每个数字可溯源。" />
+  <meta property="og:image" content="__BASE_URL__assets/og-card.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="__PRODUCT_NAME__ · __PRODUCT_TAGLINE__" />
+  <meta name="twitter:description" content="周一早上，报告自己到。AI 团队把你的经营数据变成一页可转发的报告，每个数字可溯源。" />
+  <meta name="twitter:image" content="__BASE_URL__assets/og-card.png" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>

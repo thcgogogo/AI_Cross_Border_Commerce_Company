@@ -631,6 +631,9 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 
 /* ---- 生成报告: report-type cards ------------------------------------------ */
 .rn-type-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 4px; }
+/* Phase 10 B6 — inside the 760px column, three across is cramped on tablets:
+   step to two between the phone and desktop breakpoints. */
+@media (max-width: 880px) { .rn-type-grid { grid-template-columns: repeat(2, 1fr); } }
 .rn-type {
   display: flex; flex-direction: column; gap: 4px; text-align: left; cursor: pointer;
   border: 1.5px solid var(--line); border-radius: 11px; padding: 13px 14px;
@@ -1339,4 +1342,66 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 @media (max-width: 640px) {
   .sch-job-acts { margin-left: 0; width: 100%; justify-content: flex-end; }
   .wb-hero .run-btn { width: 100%; }
+}
+
+/* ===========================================================================
+   Phase 10 B3 — loading skeletons (the shimmer behind components.skeleton())
+   =========================================================================== */
+.skeleton { padding: 2px 0; }
+.skel {
+  position: relative; overflow: hidden; background: var(--inset);
+  border-radius: 7px; height: 13px; margin: 9px 0;
+}
+.skel-title { height: 19px; width: 45%; margin: 4px 0 14px; }
+.skel::after {
+  content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.7), transparent);
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skel-shimmer { to { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .skel::after { animation: none; } }
+
+/* ===========================================================================
+   Phase 10 B7 — keyboard focus. Inputs already show focus; everything else
+   clickable gets one shared, visible ring (only for keyboard focus).
+   =========================================================================== */
+:is(button, a, [role="link"], [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ===========================================================================
+   Phase 10 B4 — print. The web report is the artifact bosses forward; on
+   paper the app chrome goes away and the document expands to the page.
+   (report_view.js force-opens the sources <details> on beforeprint — CSS
+   cannot reveal closed <details> content.)
+   =========================================================================== */
+@media print {
+  .topbar, .support-fab, .support-pop, .footer, .nav-sheet, .sheet-backdrop,
+  .report-toc, .report-actions, .forward-hint, .fb-bar, .confirm-banner,
+  .brandbar-dl, .bsheet, .bsheet-backdrop { display: none !important; }
+  body { background: #fff; }
+  .view { min-height: 0; }
+  .page.report-page { max-width: none; padding: 0; }
+  .report-frame { border: none; box-shadow: none; border-radius: 0; }
+  /* Most printers drop CSS backgrounds: white-on-brand text (title + the
+     date pill) would vanish into the paper. Flip the brand bar to ink on
+     white and keep the brand as a rule under it; ask for exact colors where
+     the browser honours it so the logo block still reads. */
+  .report-brandbar {
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+    background: #fff; color: #000; border-bottom: 3px solid var(--brand);
+    padding: 0 0 12px;
+  }
+  .report-date { color: #000; opacity: .85; }
+  .report-date .pill { background: none; color: #000; border: 1px solid #999; }
+  .report-inner { padding: 16px 0 0; }
+  /* black ink for anchors + links — no interactive affordances on paper */
+  .report-body a, .anchor-chip, .sources-table .src-anchor {
+    color: #000 !important; background: none !important; text-decoration: none;
+  }
+  /* keep bounded blocks whole; long sections may break naturally */
+  .audit-banner, .md-table-wrap tr, .sources-table tr { break-inside: avoid-page; }
+  .sources-block summary::after { content: ""; }
+  .report-foot { background: none; }
 }

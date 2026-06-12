@@ -12,7 +12,8 @@
 // ===========================================================================
 import * as api from "../api.js";
 import { state, isAdmin } from "../state.js";
-import { esc, fmtBytes, pageHead } from "../components.js";
+import { esc, fmtBytes, pageHead, skeleton, skeletonCard } from "../components.js";
+import { renderErrorState } from "../errors.js";
 
 // Weekdays are composed as NAMES (mon…sun), never numbers: APScheduler's
 // from_crontab numbers day_of_week 0=Monday (not the crontab-standard
@@ -60,12 +61,26 @@ const channelLabel = (c) => ({ email: "邮箱", wechat: "企业微信", service_
 export async function mount(el, ctx) {
   el.innerHTML = `<div class="page page-narrow">
     ${pageHead("定时与送达", "设定「每周一 08:00」，报告自动生成并送到企业微信和邮箱 — 你什么都不用做。")}
-    <div id="schBody"><div class="card"><p class="muted">正在载入…</p></div></div>
+    <div id="schBody">${skeletonCard({ lines: 4, title: true })}</div>
   </div>`;
-  const body = el.querySelector("#schBody");
+  return loadGate(el.querySelector("#schBody"), ctx);
+}
 
+async function loadGate(body, ctx) {
   let plansData = null;
-  try { plansData = await api.getPlans(); } catch (e) { /* render as gated below */ }
+  try {
+    plansData = await api.getPlans();
+  } catch (e) {
+    // B1 — a failed /api/plans is NOT "free plan": a transient error must
+    // never show the upgrade pitch to a paying 企业版 customer. The shared
+    // catalogue renders retry / login / quota states instead.
+    if (!body.isConnected) return;
+    renderErrorState(body, e, () => {
+      body.innerHTML = skeletonCard({ lines: 4, title: true });
+      loadGate(body, ctx);
+    });
+    return;
+  }
   if (!body.isConnected) return;
   const cur = (plansData && plansData.current) || {};
   // `current` carries only plan_code — join it against plans[] for the features.
@@ -110,8 +125,8 @@ async function renderEditors(body, ctx) {
 
   body.innerHTML = `
     <div class="card" id="schJobsCard">
-      <h3 class="card-title">⏰ 定时任务</h3>
-      <div id="schJobs"><p class="muted">正在载入…</p></div>
+      <h3 class="card-title"><span aria-hidden="true">⏰</span> 定时任务</h3>
+      <div id="schJobs">${skeleton({ lines: 2 })}</div>
       <h3 class="card-title" style="margin-top:20px;">新建定时任务</h3>
       <label class="field-label" for="schName">任务名称</label>
       <input id="schName" class="field-input" type="text" value="每周经营周报">
@@ -168,7 +183,7 @@ async function renderEditors(body, ctx) {
     </div>
 
     <div class="card">
-      <h3 class="card-title">📮 送达渠道</h3>
+      <h3 class="card-title"><span aria-hidden="true">📮</span> 送达渠道</h3>
       <div class="chan-row">
         <div class="chan-head">
           <span class="chan-name">邮箱</span>
@@ -196,7 +211,7 @@ async function renderEditors(body, ctx) {
     </div>
 
     <div class="card">
-      <h3 class="card-title">📂 数据收件箱</h3>
+      <h3 class="card-title"><span aria-hidden="true">📂</span> 数据收件箱</h3>
       <p class="muted" style="margin:4px 0 0;">下次报告将使用这些文件。</p>
       <ul class="file-list" id="inboxFiles"></ul>
       <div class="drop-zone" id="inboxDrop" tabindex="0" style="margin-top:12px;">
@@ -261,12 +276,27 @@ async function renderEditors(body, ctx) {
       : `<p class="muted" style="margin:6px 0 0;">还没有定时任务 — 用下面的表单创建一个，默认就是「每周一 08:00」。</p>`;
   }
 
+  // A failed list fetch is NOT "no jobs yet" (B1) — offer a retry instead of
+  // the empty-state copy, which would invite re-creating existing jobs.
   let jobs = [];
-  try {
-    jobs = (await api.getScheduledJobs()).jobs || [];
-  } catch (e) { /* card shows the empty state */ }
-  if (!body.isConnected) return;
-  renderJobs(jobs);
+  async function loadJobs() {
+    try {
+      jobs = (await api.getScheduledJobs()).jobs || [];
+    } catch (e) {
+      const box = $("schJobs");
+      if (!box || !body.isConnected) return;
+      box.innerHTML = `<p class="muted" style="margin:6px 0 0;">列表暂时加载不出来，可能是网络波动。
+        <button type="button" class="link-btn" id="schJobsRetry">重试</button></p>`;
+      box.querySelector("#schJobsRetry").addEventListener("click", () => {
+        box.innerHTML = skeleton({ lines: 2 });
+        loadJobs();
+      });
+      return;
+    }
+    if (!body.isConnected) return;
+    renderJobs(jobs);
+  }
+  await loadJobs();
 
   $("schJobs").addEventListener("click", async (e) => {
     const row = e.target.closest(".sch-job");

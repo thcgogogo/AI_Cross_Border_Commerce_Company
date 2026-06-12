@@ -7,7 +7,8 @@
 // ===========================================================================
 import * as api from "../api.js";
 import { state } from "../state.js";
-import { esc, pageHead, statusPillHTML } from "../components.js";
+import { esc, pageHead, skeletonCard, statusPillHTML } from "../components.js";
+import { renderErrorState } from "../errors.js";
 
 function typeBadge(r) {
   const templates = (state.meta && state.meta.report_goal_templates) || [];
@@ -50,7 +51,7 @@ function rowHTML(r) {
 export async function mount(el, ctx) {
   el.innerHTML = `<div class="page page-narrow">
     ${pageHead("历史报告", "每一份报告都按月份归档：在线查看、下载 PDF、转发到企业微信。")}
-    <div id="repList"><div class="card"><p class="muted">正在载入…</p></div></div>
+    <div id="repList">${skeletonCard({ lines: 4 })}</div>
   </div>`;
   const list = el.querySelector("#repList");
 
@@ -58,9 +59,12 @@ export async function mount(el, ctx) {
   try {
     reports = (await api.getReports()).reports || [];
   } catch (e) {
-    list.innerHTML = `<div class="card"><p class="form-error">${esc(e.message)}</p></div>`;
+    // Error catalogue (B2): 401 → login modal, offline → 重试, else error+重试
+    // — a raw "请先登录" paragraph stranded the user here before.
+    renderErrorState(list, e, () => mount(el, ctx));
     return;
   }
+  if (!list.isConnected) return;
 
   if (!reports.length) {
     list.innerHTML = `<div class="empty">

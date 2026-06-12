@@ -8,6 +8,7 @@
 import * as api from "../api.js";
 import { state, loadAgents, loadIndustries } from "../state.js";
 import { esc, fmtBytes, pageHead, quotaMeter, statusPillHTML, renderMarkdown } from "../components.js";
+import { isQuotaError, upgradeCardHTML } from "../errors.js";
 import { startRunFeed } from "../run_feed.js";
 
 // A generic boss-report goal for a 自定义分析 left without 补充说明 — the page
@@ -53,6 +54,7 @@ export function mount(el, ctx) {
         <ul class="file-list" id="rnFiles"></ul>
         <div id="rnQuota" class="rn-quota"></div>
         <p class="form-error" id="rnErr" hidden></p>
+        <div id="rnGate" hidden></div>
         <button type="button" class="run-btn" id="rnStart">开始生成</button>
       </div>
     </div>
@@ -165,11 +167,10 @@ export function mount(el, ctx) {
   });
 
   // ---- start the run ------------------------------------------------------------
-  function showError(msg, { upsell = false } = {}) {
+  function showError(msg) {
     const p = $("rnErr");
     p.hidden = false;
-    p.innerHTML = esc(msg) + (upsell
-      ? ` <a href="/account" data-nav>查看套餐与升级 →</a>` : "");
+    p.textContent = msg;
   }
 
   function composedGoal() {
@@ -184,6 +185,7 @@ export function mount(el, ctx) {
   $("rnStart").addEventListener("click", async () => {
     if (running) return;
     $("rnErr").hidden = true;
+    $("rnGate").hidden = true;
     if (!files.length) { showError("请先添加至少一个数据文件（Excel 或 CSV）。"); return; }
     const btn = $("rnStart");
     btn.disabled = true; btn.textContent = "启动中…";
@@ -197,8 +199,11 @@ export function mount(el, ctx) {
       jobId = (await api.startRun(fd)).job_id;
     } catch (e) {
       btn.disabled = false; btn.textContent = "开始生成";
-      if (e.status === 402) {
-        showError(e.message || "报告额度已用完。升级套餐后即可继续生成。", { upsell: true });
+      if (isQuotaError(e)) {
+        // B2 — the shared upgrade card (the server's copy sells the next step).
+        const gate = $("rnGate");
+        gate.hidden = false;
+        gate.innerHTML = upgradeCardHTML(e.message);
       } else {
         showError(e.message || "启动失败，请稍后重试。");
       }
@@ -219,7 +224,7 @@ export function mount(el, ctx) {
         const box = $("rnResult");
         if (box) {
           box.innerHTML = `<div class="card">
-            <h3 class="card-title">✅ 报告已生成</h3>
+            <h3 class="card-title"><span aria-hidden="true">✅</span> 报告已生成</h3>
             <div class="report-body">${renderMarkdown(snap.final_report || "")}</div>
           </div>`;
         }

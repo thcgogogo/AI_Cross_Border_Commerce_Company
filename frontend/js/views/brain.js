@@ -16,7 +16,7 @@
 // ===========================================================================
 import * as api from "../api.js";
 import { state, loadIndustries } from "../state.js";
-import { esc, fmtNum, pageHead, statTile, sparklineSVG, tabsHTML } from "../components.js";
+import { esc, fmtNum, pageHead, skeleton, skeletonCard, statTile, sparklineSVG, tabsHTML } from "../components.js";
 import { mountImportFlow } from "../import_flow.js";
 
 const TABS = [
@@ -40,10 +40,10 @@ function stopImportPoll() {
 export function mount(el, ctx) {
   el.innerHTML = `<div class="page page-narrow">
     ${pageHead("企业大脑", "这是只属于你公司的经营记忆，每份报告都会让它更聪明。")}
-    <div id="brainHero"><div class="card"><p class="muted">正在载入…</p></div></div>
+    <div id="brainHero">${skeletonCard({ lines: 3, title: true })}</div>
     <div class="card" style="margin-top:14px;">
       <div id="brainTabs">${tabsHTML(TABS, "profile")}</div>
-      <div id="brainPanel" class="brain-panel"><p class="muted">正在载入…</p></div>
+      <div id="brainPanel" class="brain-panel">${skeleton({ lines: 3 })}</div>
     </div>
   </div>`;
 
@@ -68,7 +68,7 @@ export function mount(el, ctx) {
   });
 
   function renderPanel() {
-    panel.innerHTML = `<p class="muted">正在载入…</p>`;
+    panel.innerHTML = skeleton({ lines: 3 });
     const render = {
       profile: renderProfileTab,
       kpi: renderKpiTab,
@@ -104,7 +104,7 @@ async function refreshHero(hero, ctx) {
       </div></div>`;
     const retry = hero.querySelector("#brainRetry");
     if (retry) retry.addEventListener("click", () => {
-      hero.innerHTML = `<div class="card"><p class="muted">正在载入…</p></div>`;
+      hero.innerHTML = skeletonCard({ lines: 3, title: true });
       refreshHero(hero, ctx);
     });
     return;

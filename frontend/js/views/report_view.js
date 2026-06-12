@@ -8,7 +8,7 @@
 // ===========================================================================
 import * as api from "../api.js";
 import { state } from "../state.js";
-import { esc, renderMarkdown, statusPillHTML } from "../components.js";
+import { esc, renderMarkdown, skeleton, statusPillHTML } from "../components.js";
 
 const fbKey = (runId, section) => `tangent-fb-${runId}-${section || "报告开头"}`;
 const termsKey = (runId) => `tangent-terms-${runId}`;
@@ -66,8 +66,8 @@ function feedbackBarHTML(runId, title) {
   }
   return `<div class="fb-bar" data-section="${esc(section)}">
       <span class="fb-q">这一节有用吗？</span>
-      <button type="button" class="fb-vote" data-vote="up" title="有用">👍</button>
-      <button type="button" class="fb-vote" data-vote="down" title="需要改进">👎</button>
+      <button type="button" class="fb-vote" data-vote="up" title="有用" aria-label="有用">👍</button>
+      <button type="button" class="fb-vote" data-vote="down" title="需要改进" aria-label="需要改进">👎</button>
       <input type="text" class="fb-comment" placeholder="可选：补充说明，例如「以后把退款放第一节」">
       <button type="button" class="fb-submit">提交</button>
       <span class="fb-msg" hidden></span>
@@ -141,7 +141,7 @@ function unavailableHTML(runId, message, downloadUrl) {
 // ---- the view -------------------------------------------------------------------
 export async function mount(el, ctx) {
   const runId = ctx.params.runId;
-  el.innerHTML = `<div class="page page-narrow"><div class="card"><p class="muted">正在打开报告…</p></div></div>`;
+  el.innerHTML = `<div class="page page-narrow"><div class="card">${skeleton({ title: true, lines: 6 })}</div></div>`;
 
   let report;
   try {
@@ -391,8 +391,14 @@ export async function mount(el, ctx) {
   const onKey = (e) => { if (e.key === "Escape") closeSheet(); };
   document.addEventListener("keydown", onKey);
 
+  // Print (Phase 10 B4): CSS cannot reveal a closed <details>, so the sources
+  // appendix opens itself when printing starts (mobile loads it collapsed).
+  const onBeforePrint = () => { const d = $("rvSources"); if (d) d.open = true; };
+  window.addEventListener("beforeprint", onBeforePrint);
+
   return () => {
     if (onScroll) window.removeEventListener("scroll", onScroll);
     document.removeEventListener("keydown", onKey);
+    window.removeEventListener("beforeprint", onBeforePrint);
   };
 }

@@ -12,7 +12,7 @@
 // ===========================================================================
 import * as api from "../api.js";
 import { state } from "../state.js";
-import { esc, cny, pageHead, quotaMeter, planCard, singleReportCard } from "../components.js";
+import { esc, cny, pageHead, quotaMeter, planCard, singleReportCard, skeleton, skeletonCard } from "../components.js";
 import { openPayPanel, stopPayPoll } from "../pay.js";
 
 const ORDER_STATE_CN = { created: "待支付", paid: "已支付", failed: "失败", refunded: "已退款" };
@@ -25,17 +25,17 @@ export async function mount(el) {
       <h3 class="card-title">当前账户</h3>
       <p class="muted" style="margin:4px 0 0;">${esc(c.name || "")}${c.email ? ` · ${esc(c.email)}` : ""}${c.company ? ` · ${esc(c.company)}` : ""}</p>
     </div>
-    <div id="acctPlanBox" style="margin-top:14px;"><div class="card"><p class="muted">正在载入…</p></div></div>
+    <div id="acctPlanBox" style="margin-top:14px;">${skeletonCard({ lines: 3 })}</div>
     <div class="card" style="margin-top:14px;">
-      <h3 class="card-title">💳 套餐与购买</h3>
-      <div class="pricing-grid acct-plans" id="acctPlans" style="margin-top:14px;"><p class="muted">正在载入…</p></div>
+      <h3 class="card-title"><span aria-hidden="true">💳</span> 套餐与购买</h3>
+      <div class="pricing-grid acct-plans" id="acctPlans" style="margin-top:14px;">${skeleton({ lines: 3 })}</div>
       <p class="pricing-note">支付宝 / 微信支付 · 可开发票</p>
       <div id="acctPayPanel" class="pay-panel" hidden></div>
       <p id="acctPayMsg" class="form-msg" hidden></p>
     </div>
     <div class="card" style="margin-top:14px;">
-      <h3 class="card-title">📄 订单与发票</h3>
-      <div id="acctOrders"><p class="muted">正在载入…</p></div>
+      <h3 class="card-title"><span aria-hidden="true">📄</span> 订单与发票</h3>
+      <div id="acctOrders">${skeleton({ lines: 2 })}</div>
       <div id="fapiaoBox" class="fapiao-form" hidden></div>
       <p id="fapiaoMsg" class="form-msg" hidden></p>
     </div>
@@ -46,7 +46,7 @@ export async function mount(el) {
         随时取消，服务保留到当期结束，不扣后续费用。</p>
     </div>
     <div class="card" style="margin-top:14px;">
-      <h3 class="card-title">🔐 安全设置</h3>
+      <h3 class="card-title"><span aria-hidden="true">🔐</span> 安全设置</h3>
       <div class="acct-security">
         <div>
           <h4 class="acct-sub-h">修改密码</h4>

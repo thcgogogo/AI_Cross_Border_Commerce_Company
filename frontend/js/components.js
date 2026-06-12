@@ -187,6 +187,24 @@ export function comingSoon({ icon = "🛠️", title, lead, points = [], cta = n
     </div>`;
 }
 
+// ---- loading skeleton (Phase 10 B3) ------------------------------------------------
+// Shimmering placeholder lines, so content settles into the page instead of
+// popping in after a "正在载入…" string. Width pattern repeats but staggers,
+// so a stack of lines reads as text. `title` adds a wider, taller first bar.
+export function skeleton({ lines = 3, title = false } = {}) {
+  const widths = [92, 64, 78, 55, 84];
+  return `<div class="skeleton" aria-hidden="true">
+      ${title ? '<div class="skel skel-title"></div>' : ""}
+      ${Array.from({ length: lines }, (_, i) =>
+        `<div class="skel skel-line" style="width:${widths[i % widths.length]}%"></div>`).join("")}
+    </div>`;
+}
+
+// A whole placeholder card (the common case for page-level loads).
+export function skeletonCard(opts = {}) {
+  return `<div class="card">${skeleton(opts)}</div>`;
+}
+
 // ---- stat tile + quota meter (design-system atoms, used from Phase 5 on) ----------
 export function statTile({ value, delta = null, label }) {
   let deltaHTML = "";

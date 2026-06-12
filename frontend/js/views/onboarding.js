@@ -15,7 +15,7 @@
 // ===========================================================================
 import * as api from "../api.js";
 import { state, loadAgents, loadIndustries } from "../state.js";
-import { esc, renderMarkdown } from "../components.js";
+import { esc, renderMarkdown, skeleton } from "../components.js";
 import { feedHTML, startRunFeed } from "../run_feed.js";
 import { mountImportFlow } from "../import_flow.js";
 import { navigate } from "../main.js";
@@ -329,7 +329,7 @@ function obStep6HTML() {
   if (!obPlanInfo) {
     return `
       <h2 class="ob-h">第 6 步 · 设置每周定时 + 交付方式</h2>
-      <div class="ob-card"><p class="ob-sub">正在载入…</p></div>`;
+      <div class="ob-card">${skeleton({ lines: 3 })}</div>`;
   }
   if (!obPlanInfo.canSchedule) {
     return `

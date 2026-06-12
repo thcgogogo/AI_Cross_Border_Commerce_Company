@@ -6,7 +6,7 @@
 // lives in founder mode only (D4).
 // ===========================================================================
 import * as api from "../api.js";
-import { state, setAccount, loadChangelogState } from "../state.js";
+import { state, setAccount, loadChangelogState, bus } from "../state.js";
 import { esc } from "../components.js";
 
 const $ = (id) => document.getElementById(id);
@@ -29,6 +29,13 @@ export function init(hooks = {}) {
     if (!$("signupModal").hidden) return closeSignupModal();
     if (!$("resetModal").hidden) return closeResetModal();
     if (!$("loginModal").hidden) return closeLoginModal();
+  });
+  // Error catalogue (Phase 10 B2): any view hitting a 401 asks for the login
+  // modal over the bus — the expired session also drops the stale account so
+  // the shell chrome flips to logged-out at the same moment.
+  bus.addEventListener("auth-required", () => {
+    if (state.account) setAccount(null);
+    openLoginModal();
   });
 }
 
