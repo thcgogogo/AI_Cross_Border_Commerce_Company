@@ -151,9 +151,10 @@ ONBOARDING_COMPLETED = "completed"
 ONBOARDING_SKIPPED = "skipped"
 ONBOARDING_EVENT_KINDS = (ONBOARDING_STARTED, ONBOARDING_COMPLETED, ONBOARDING_SKIPPED)
 # The wizard's steps, so every module agrees on the numbering. 0 is the wizard
-# itself opening; 1–5 are the five spec steps (公司信息 → 数据 → KPI → 首份报告 → 定时).
-ONBOARDING_STEPS = (0, 1, 2, 3, 4, 5)
-ONBOARDING_LAST_STEP = 5
+# itself opening; 1–6 are the six spec steps (公司信息 → 数据 → KPI →
+# 历史导入 → 首份报告 → 定时; plan §3.10, Phase 8).
+ONBOARDING_STEPS = (0, 1, 2, 3, 4, 5, 6)
+ONBOARDING_LAST_STEP = 6
 
 # Phase 10 — lifecycle email kinds (the dedup marks in lifecycle_events).
 LIFECYCLE_WELCOME = "welcome"

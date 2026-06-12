@@ -85,6 +85,7 @@ from agent_team.models import (
     ORDER_TOPUP,
     RUN_FAILED,
     RUN_KIND_IMPORT,
+    RUN_KIND_REPORT,
     RUN_STOPPED_BUDGET,
     RUN_SUCCEEDED,
     SOURCE_FIXED_FILES,
@@ -666,8 +667,18 @@ def _plan_gate(customer):
         return False, ("订阅已逾期，功能已锁定（仅可导出已有数据）。"
                        "请续费后继续使用。"), "locked"
     p = config.plan(plan_code)
-    if plan_code == "free" and not CUSTOMERS.has_balance(customer):
-        return False, "免费体验额度已用完，升级套餐后可继续生成报告。", "no_balance"
+    # Phase 8 A1 — gate order matters: a FREE account holding purchased 单次
+    # 报告 credits is about to run on the customer's own money, not the demo
+    # cap, so the invisible-balance gate must not fire first (it used to refuse
+    # the run as "升级套餐" while the customer held a paid, unredeemable
+    # credit). Credit holders fall through to the quota check, where credits
+    # raise the effective ceiling.
+    if (plan_code == "free" and int(customer.get("report_credits") or 0) <= 0
+            and not CUSTOMERS.has_balance(customer)):
+        # The refusal copy offers BOTH paid paths: with A1 a purchased 单次
+        # credit is redeemable even on a spent trial cap, so it belongs here.
+        return False, ("免费体验额度已用完，升级套餐后可继续生成报告，"
+                       "或单次购买一份。"), "no_balance"
     quota = int(p.get("monthly_report_quota") or 0)
     if quota:
         # B4 — purchased 单次报告 credits RAISE the effective ceiling; the run
@@ -821,7 +832,38 @@ def run():
     return jsonify({"job_id": job_id})
 
 
-def _make_biller(customer_id):
+def _free_run_rides_credit(customer_id):
+    """Phase 8 A1 — True when the FREE account's report run now starting is
+    funded by a purchased 单次报告 credit rather than the demo balance: the
+    account holds a credit AND either the invisible trial balance is already
+    spent (the credit is the only funding source) or the run lands beyond the
+    base quota (finish_run will consume a credit for it). The run row is opened
+    BEFORE the biller is built on every run path, so `used` includes this run —
+    "beyond the base quota" is used > quota, mirroring
+    consume_report_credit_if_over_quota. Best-effort: any lookup failure
+    answers False (keep charging — the conservative choice)."""
+    try:
+        customer = CUSTOMERS.get_by_id(customer_id)
+        if not customer or int(customer.get("report_credits") or 0) <= 0:
+            return False
+        if not CUSTOMERS.has_balance(customer):
+            return True
+        p = config.plan("free")
+        quota = int(p.get("monthly_report_quota") or 0)
+        if not quota:
+            return False
+        company_id = metrics_store.get_or_create_company(
+            customer.get("email"),
+            company_name=customer.get("company") or customer.get("name"))
+        used = (metrics_store.count_runs_total(company_id)
+                if p.get("lifetime_quota")
+                else metrics_store.count_runs_this_month(company_id))
+        return used > quota
+    except Exception:
+        return False
+
+
+def _make_biller(customer_id, run_kind=RUN_KIND_REPORT):
     """A cost_listener that meters each model call to the account. Returns None
     if there's no account to bill.
 
@@ -832,7 +874,14 @@ def _make_biller(customer_id):
     and never cuts a run off, while cost still lands in spent_yuan /
     platform_spend / the usage log for COGS tracking. On a DB hiccup we default
     to charging — the conservative choice (cost protection must not silently
-    un-gate)."""
+    un-gate).
+
+    Phase 8 A1: a credit-funded FREE report run (see _free_run_rides_credit) is
+    billed like a subscriber run — fully metered, balance untouched — so the
+    ¥ demo cap only ever meters genuine free-trial runs and can never cut off
+    a run the customer paid ¥29 for. Only quota-metered REPORT runs can ride a
+    credit: an import back-fill (run_kind="import") keeps the free trial's
+    balance cap, which is what bounds an import's spend."""
     if not customer_id:
         return None
     try:
@@ -840,6 +889,9 @@ def _make_biller(customer_id):
     except Exception:
         plan_code = "free"
     charge_balance = (plan_code == "free")
+    if (charge_balance and run_kind == RUN_KIND_REPORT
+            and _free_run_rides_credit(customer_id)):
+        charge_balance = False
 
     def bill(model, input_tokens, output_tokens):
         billed = CUSTOMERS.record_usage(customer_id, model, input_tokens, output_tokens,
@@ -1112,6 +1164,11 @@ _MACHINERY_INFO_PREFIXES = (
     "Received COMPANY MEMORY",
     "Received KPI MAPPING",
     "Received INDUSTRY PACK",
+    # Phase 8 — the metric-extraction bookkeeping family ("… reply hit the
+    # output-token limit", "… LLM call failed on attempt N", "… stored N
+    # metric(s)"). The history-import step makes long extraction replies (and
+    # so these lines) routine; caught live by the Phase 8 machinery sweep.
+    "metric extraction ",
 )
 _BUDGET_REACHED_PREFIX = "Token budget reached"
 _FRIENDLY_BUDGET_LINE = "已达本次生成上限，本次报告到此为止。"
@@ -1286,11 +1343,26 @@ def _account_view(customer):
     """public_view enriched with a per-model `available` flag (live vs. waiting on a key)
     and the founder-mode flag (redesign B2): is_admin marks the account's email as
     being on the $ADMIN_EMAILS allow-list. UI gating only — every /admin* route
-    keeps its own server-side authorization check."""
+    keeps its own server-side authorization check.
+
+    Phase 8 A2 — the machinery fields are founder-only in the PAYLOAD, not just
+    unrendered: ¥ balance, gateway-key fragments, spend/request metering, the
+    per-call usage log and per-model ¥ pricing never leave the server for a
+    customer session (devtools is a customer-visible surface). The founder
+    storefront keeps the full view."""
     view = CUSTOMERS.public_view(customer)
     for m in view["models"]:
         m["available"] = providers.model_available(m["id"])
-    view["is_admin"] = (customer.get("email") or "").strip().lower() in _admin_emails()
+    is_admin = (customer.get("email") or "").strip().lower() in _admin_emails()
+    view["is_admin"] = is_admin
+    if not is_admin:
+        for field in ("balance", "spent", "requests", "usage",
+                      "key_prefix", "key_last4"):
+            view.pop(field, None)
+        for m in view["models"]:
+            for field in ("input_per_mtok", "output_per_mtok",
+                          "price", "price_unit"):
+                m.pop(field, None)
     return view
 
 
@@ -1405,6 +1477,11 @@ def account_set_models():
     customer = _current_customer()
     if not customer:
         return jsonify({"error": "Please log in to choose your models."}), 401
+    # Phase 8 A2 — server-side founder gate. The model picker is machinery
+    # (plan §3.8 removed it from the customer UI); until now only the client's
+    # requireAdmin hid it, leaving the WRITE open to any logged-in session.
+    if not _is_admin(customer):
+        return jsonify({"error": "仅限管理员操作。"}), 403
     data = request.get_json(silent=True) or {}
     models = data.get("models")
     if not isinstance(models, list):
@@ -3284,7 +3361,7 @@ def onboarding_start():
 
 @app.route("/api/onboarding/skip", methods=["POST"])
 def onboarding_skip():
-    """Skip one step (every step is skippable; skipping step 5 ends the wizard)."""
+    """Skip one step (every step is skippable; skipping step 6 ends the wizard)."""
     customer, company_id = _onboarding_ctx()
     if not customer:
         return jsonify({"error": "请先登录。"}), 401
@@ -3396,13 +3473,13 @@ def onboarding_kpi_confirm():
 
 
 def _run_wizard_team(memory, customer_id, company_id, run_id, industry_key):
-    """The step-4 background runner: the normal team run, then — only on a
-    SUCCEEDED run — the step-4 funnel event (the wow moment actually happened)."""
+    """The step-5 background runner: the normal team run, then — only on a
+    SUCCEEDED run — the step-5 funnel event (the wow moment actually happened)."""
     _run_team(memory, customer_id, company_id, run_id, industry_key)
     try:
         run = metrics_store.get_run(run_id) if run_id else None
         if run and run.get("status") == RUN_SUCCEEDED:
-            metrics_store.record_onboarding_event(customer_id, 4,
+            metrics_store.record_onboarding_event(customer_id, 5,
                                                   ONBOARDING_COMPLETED)
     except Exception:
         pass
@@ -3411,7 +3488,7 @@ def _run_wizard_team(memory, customer_id, company_id, run_id, industry_key):
 @app.route("/api/onboarding/generate", methods=["POST"])
 @limiter.limit(config.run_rate_limit, key_func=_run_rate_key)
 def onboarding_generate():
-    """Step 4 自动生成第一份报告 — run the team over the latest staged data batch
+    """Step 5 自动生成第一份报告 — run the team over the latest staged data batch
     through the SAME gates + billing as any interactive run. Returns {job_id};
     the wizard polls /api/status/<job_id> for the live agent feed."""
     load_dotenv(override=True)
@@ -3468,7 +3545,7 @@ def onboarding_generate():
 
 @app.route("/api/onboarding/schedule", methods=["POST"])
 def onboarding_schedule():
-    """Step 5 设置每周定时 — ONE click creates (or re-points) the standing
+    """Step 6 开启每周自动送达 — ONE click creates (or re-points) the standing
     Monday-08:00 weekly job with the chosen delivery channels. Plan-gated per
     D3: a non-企业版 account gets the structured 402 the wizard renders as the
     upgrade explainer (it used to silently create the job)."""
@@ -3505,7 +3582,7 @@ def onboarding_schedule():
             active=True,
         )
     SCHEDULER.reload()
-    metrics_store.record_onboarding_event(customer["id"], 5, ONBOARDING_COMPLETED)
+    metrics_store.record_onboarding_event(customer["id"], 6, ONBOARDING_COMPLETED)
     state = _onboarding_state_payload(customer, company_id)
     state["job_id"] = job_id
     state["channels"] = channels
@@ -3989,6 +4066,12 @@ def brain_import_start():
         return jsonify({"error": str(e)}), 400
     if not parsed:
         return jsonify({"error": "请上传至少一个文件。"}), 400
+    # Phase 8 — the wizard's step ④ 导入历史数据 reuses this endpoint and marks
+    # itself with onboarding=1, so ONLY wizard-context imports write the step-4
+    # funnel event (mirroring _run_wizard_team vs _run_team: a later import
+    # from the 企业大脑 page must not create funnel rows — that would put
+    # never-onboarded accounts into the funnel's denominator).
+    onboarding_step = bool((request.form.get("onboarding") or "").strip())
     job_id = uuid.uuid4().hex[:12]
     job = {
         "job_id": job_id,
@@ -4003,7 +4086,8 @@ def brain_import_start():
     IMPORT_JOBS[job_id] = job
     thread = threading.Thread(
         target=_run_import_job,
-        args=(job, customer["id"], company_id, parsed), daemon=True)
+        args=(job, customer["id"], company_id, parsed),
+        kwargs={"onboarding_step": onboarding_step}, daemon=True)
     thread.start()
     return jsonify({"job_id": job_id})
 
@@ -4028,14 +4112,22 @@ def brain_import_status(job_id):
     return jsonify(out)
 
 
-def _run_import_job(job, customer_id, company_id, files, llm=None):
+def _run_import_job(job, customer_id, company_id, files, llm=None,
+                    onboarding_step=False):
     """Back-fill worker: for each parsed (name, text), run ONLY the cheap
     metric-extraction path (Haiku + extract_metrics_to_db) and store the numbers in
     the company brain — NOT the full report pipeline. Every model call is billed to
     the account through the SAME path as a normal run, and the job stops cleanly the
     moment the balance is spent (BudgetExceededError). `llm` is an injection seam for
-    tests; production builds the real wired router."""
-    base_bill = _make_biller(customer_id)
+    tests; production builds the real wired router.
+
+    `onboarding_step` marks a wizard-context import (step ④ 导入历史数据,
+    Phase 8): when the job actually finishes SUCCEEDED, the step-4 funnel event
+    is recorded — succeeded-only, like the generate step, for funnel honesty
+    (the skip path is the wizard's existing /api/onboarding/skip)."""
+    # run_kind="import": a back-fill never rides a 单次报告 credit (Phase 8 A1),
+    # so the free trial's balance cap keeps bounding what an import may spend.
+    base_bill = _make_biller(customer_id, run_kind=RUN_KIND_IMPORT)
 
     def biller(model, input_tokens, output_tokens):
         # Tally ¥ for the live per-job progress display, then bill for real.
@@ -4084,6 +4176,13 @@ def _run_import_job(job, customer_id, company_id, files, llm=None):
                                      total_cost_yuan=round(job["cost"], 4))
     except Exception:
         pass
+
+    if onboarding_step and final_status == RUN_SUCCEEDED:
+        try:
+            metrics_store.record_onboarding_event(customer_id, 4,
+                                                  ONBOARDING_COMPLETED)
+        except Exception:
+            pass
 
     if job["status"] == "running":
         job["status"] = "done"

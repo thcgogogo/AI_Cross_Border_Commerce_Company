@@ -4,8 +4,10 @@ The five checks mirror the Phase 10 spec's acceptance criteria, in order:
 
   1. A FRESH account reaches a finished first report through the wizard using
      the bundled demo data — without uploading anything (e2e over HTTP: start →
-     公司信息 → 用示例数据体验 → KPI 确认 → 生成 (live run, billed) → 每周定时,
-     ending with the Monday-08:00 job and a rendered PDF on disk).
+     公司信息 → 用示例数据体验 → KPI 确认 → 导入历史数据 skipped (the Phase 8
+     step ④; its import-event coverage lives in test_redesign_phase8) → 生成
+     (live run, billed) → 每周定时, ending with the Monday-08:00 job and a
+     rendered PDF on disk). Step numbering is the Phase 8 six-step layout.
   2. onboarding_events records each step, and the admin funnel reports the
      correct percentages on seeded data (unit-tested against hand-computed
      values, and visible on the rendered /admin page).
@@ -157,7 +159,13 @@ def test_wizard_demo_data_reaches_finished_first_report_e2e(
     company_id = metrics_store.company_id_for_email("wizard@corp.com")
     assert len(metrics_store.get_kpi_mappings(company_id)) == len(data["kpi_guesses"])
 
-    # Step 4 — the wow moment: a real (faked-LLM) run with a live feed.
+    # Step 4 — 导入历史数据 (Phase 8) is skippable; this e2e takes the skip
+    # path, exactly like a fresh account with no history spreadsheets.
+    r = _post_json(client, "/api/onboarding/skip", {"step": 4})
+    assert r.status_code == 200
+    assert r.get_json()["next_step"] == 5
+
+    # Step 5 — the wow moment: a real (faked-LLM) run with a live feed.
     r = _post_json(client, "/api/onboarding/generate")
     assert r.status_code == 200
     job_id = r.get_json()["job_id"]
@@ -172,7 +180,7 @@ def test_wizard_demo_data_reaches_finished_first_report_e2e(
     assert (snap.get("activity") or []), "the live agent feed must have events"
 
     # The run row finished SUCCEEDED, the branded PDF exists, the account was
-    # billed through the real path, and the step-4 event landed (written by the
+    # billed through the real path, and the step-5 event landed (written by the
     # background thread right after the run closes — give it a moment).
     run_id = pdf = None
     state = {}
@@ -182,11 +190,12 @@ def test_wizard_demo_data_reaches_finished_first_report_e2e(
         if runs and runs[0]["status"] == RUN_SUCCEEDED:
             run_id = runs[0]["id"]
             pdf = metrics_store.report_pdf_path(company_id, run_id)
-            if os.path.isfile(pdf) and state["steps"]["4"] == "completed":
+            if os.path.isfile(pdf) and state["steps"]["5"] == "completed":
                 break
         time.sleep(0.1)
     assert run_id and os.path.isfile(pdf) and os.path.getsize(pdf) > 0
-    assert state["steps"]["4"] == "completed"
+    assert state["steps"]["5"] == "completed"
+    assert state["steps"]["4"] == "skipped"   # the import step's skip stuck
     # B8 (redesign Phase 7) — deliberately updated: this account is a PRO
     # subscriber (subscribed above for D3), so the flat plan leaves its
     # invisible ¥ balance untouched; the run's cost is still metered.
@@ -194,7 +203,7 @@ def test_wizard_demo_data_reaches_finished_first_report_e2e(
     assert acct["balance"] == start_balance
     assert acct["spent"] > 0
 
-    # Step 5 — ONE click creates the Monday-08:00 weekly job.
+    # Step 6 — ONE click creates the Monday-08:00 weekly job.
     r = _post_json(client, "/api/onboarding/schedule", {"channels": ["email"]})
     assert r.status_code == 200
     final_state = r.get_json()
@@ -220,9 +229,10 @@ def test_onboarding_events_and_admin_funnel_percentages(
         fresh_db, tmp_path, monkeypatch):
     store = _store(tmp_path, **{"founder@corp.com": "password1"})
 
-    # Seeded funnel: A completed everything; B completed 1, skipped 2; C only
-    # opened the wizard. Started accounts (denominator) = 3.
-    for step in range(0, 6):
+    # Seeded funnel (Phase 8 six-step layout): A completed everything — all
+    # SIX steps including ④ 导入历史数据 and ⑥ 每周定时; B completed 1, skipped
+    # 2; C only opened the wizard. Started accounts (denominator) = 3.
+    for step in range(0, 7):
         metrics_store.record_onboarding_event(
             "cus_a", step, "started" if step == 0 else "completed")
     metrics_store.record_onboarding_event("cus_b", 0, "started")
@@ -233,15 +243,20 @@ def test_onboarding_events_and_admin_funnel_percentages(
     funnel = queries.onboarding_funnel()
     assert funnel["accounts_started"] == 3
     by_step = {s["step"]: s for s in funnel["steps"]}
+    assert [s["step"] for s in funnel["steps"]] == [1, 2, 3, 4, 5, 6]
     assert by_step[1] == {"step": 1, "label": "公司信息", "completed": 2, "pct": 66.7}
     assert by_step[2]["completed"] == 1 and by_step[2]["pct"] == 33.3  # skip ≠ completed
-    for n in (3, 4, 5):
+    for n in (3, 4, 5, 6):
         assert by_step[n]["completed"] == 1 and by_step[n]["pct"] == 33.3
+    # The Phase 8 labels: ④ is the new import step; 首份报告/每周定时 shifted.
+    assert by_step[4]["label"] == "导入历史数据"
+    assert by_step[5]["label"] == "首份报告"
+    assert by_step[6]["label"] == "每周定时"
 
     # Every step is individually recorded (the raw event log).
     events_a = [(e["step"], e["event"])
                 for e in metrics_store.list_onboarding_events("cus_a")]
-    assert events_a == [(0, "started")] + [(n, "completed") for n in range(1, 6)]
+    assert events_a == [(0, "started")] + [(n, "completed") for n in range(1, 7)]
 
     # …and the /admin page renders those exact percentages.
     monkeypatch.setenv("ADMIN_EMAILS", "founder@corp.com")
@@ -250,6 +265,7 @@ def test_onboarding_events_and_admin_funnel_percentages(
     assert page.status_code == 200
     html = page.get_data(as_text=True)
     assert "66.7%" in html and "33.3%" in html and "新手引导漏斗" in html
+    assert "导入历史数据" in html   # the Phase 8 step ④ row reaches the chart
 
 
 # ---------------------------------------------------------------------------

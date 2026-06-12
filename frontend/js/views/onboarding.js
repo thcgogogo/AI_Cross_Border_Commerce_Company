@@ -1,24 +1,34 @@
 // ===========================================================================
-// onboarding.js — 新手引导 wizard (5 steps, skippable & resumable). A direct
-// port of the old app.js wizard into the new shell: same endpoints, same
-// funnel events, light theme. The step list itself is reworked in Phase 8
-// (history-import step + plan-gated finale).
+// onboarding.js — 新手引导 wizard (6 steps, skippable & resumable; plan §3.10,
+// Phase 8). Same endpoints + funnel events as the old app.js wizard, light
+// theme. The Phase 8 rework inserted step ④ 导入历史数据 — the Moat-1
+// front-loading step (product brief: history at signup, so the company brain
+// exists in week one) — shifting 生成报告→⑤ and 每周定时→⑥.
 //
-// Phase 4: step 4's live feed runs through the shared customer filter
-// (run_feed.js — no machinery lines), and 查看完整报告 closes the wizard and
-// opens the branded report view at /reports/<run_id>. The inline preview
-// survives only as the fallback for runs without a run id.
+// Step ⑤'s live feed runs through the shared run_feed.js (startRunFeed — no
+// machinery lines for customers), and 查看完整报告 closes the wizard and opens
+// the branded report view at /reports/<run_id>. The inline preview survives
+// only as the fallback for runs without a run id. Step ④ reuses the shared
+// import_flow.js (the 企业大脑 import tab is the same module); its poll stops
+// on every repaint/close. Step ⑥ is plan-gated per D3: free/基础版 sees the
+// Monday-ritual preview + upgrade CTA, 企业版 one-clicks the weekly job.
 // ===========================================================================
 import * as api from "../api.js";
 import { state, loadAgents, loadIndustries } from "../state.js";
 import { esc, renderMarkdown } from "../components.js";
-import { feedHTML } from "../run_feed.js";
+import { feedHTML, startRunFeed } from "../run_feed.js";
+import { mountImportFlow } from "../import_flow.js";
 import { navigate } from "../main.js";
 import { openLoginModal } from "./auth.js";
 
 const $ = (id) => document.getElementById(id);
 
-const OB_STEP_TITLES = { 1: "公司信息", 2: "上传数据", 3: "KPI 确认", 4: "生成首份报告", 5: "每周定时" };
+const OB_STEP_TITLES = {
+  1: "公司信息", 2: "上传数据", 3: "KPI 确认",
+  4: "导入历史数据", 5: "生成首份报告", 6: "每周定时",
+};
+// Mirrors models.ONBOARDING_LAST_STEP (the backend's numbering authority).
+const OB_LAST_STEP = 6;
 
 let obOpen = false;
 let obState = null;       // last /api/onboarding/* state payload
@@ -26,14 +36,23 @@ let obStep = 1;
 let obBusy = false;
 let obError = "";
 let obData = null;        // step-2 result {file_name, headers, kpi_guesses}
-let obJobId = null;       // step-4 run id (polls /api/status)
-let obSnap = null;        // step-4 live snapshot
-let obPollTimer = null;
+let obJobId = null;       // step-5 run id (startRunFeed polls /api/status)
+let obSnap = null;        // step-5 live snapshot
+let obFeedStop = null;    // step-5 startRunFeed stop()
+let obImportStop = null;  // step-4 import_flow stop()
 let obScheduleDone = null;
-let obShowReport = false; // Phase-2: inline report preview on step 4
-let obPlanInfo = null;    // step-5 D3 branch: {canSchedule, proLabel} (lazy)
+let obShowReport = false; // inline report preview on step 5 (no-run-id fallback)
+let obPlanInfo = null;    // step-6 D3 branch: {canSchedule, proLabel} (lazy)
 
-// Step 5 is plan-gated per D3 — fetch the plan lazily for the wizard (state.js
+function obStopFeed() {
+  if (obFeedStop) { obFeedStop(); obFeedStop = null; }
+}
+
+function obStopImport() {
+  if (obImportStop) { obImportStop(); obImportStop = null; }
+}
+
+// Step 6 is plan-gated per D3 — fetch the plan lazily for the wizard (state.js
 // doesn't hold plans). Failure defaults to the upgrade preview; the backend
 // enforces the real gate with a structured 402 either way.
 async function obLoadPlanInfo() {
@@ -49,7 +68,7 @@ async function obLoadPlanInfo() {
   } catch (e) {
     obPlanInfo = { canSchedule: false, proLabel: "企业版" };
   }
-  if (obOpen && obStep === 5) renderOnboard();
+  if (obOpen && obStep === OB_LAST_STEP) renderOnboard();
 }
 
 export function init() {
@@ -69,7 +88,7 @@ export function init() {
 }
 
 // A per-account, per-browser “don't auto-open again” mark (the × button). The
-// wizard stays reachable from the workbench; skipping step 5 ends it for real.
+// wizard stays reachable from the workbench; skipping step 6 ends it for real.
 function obDismissKey() {
   return "ob-dismissed-" + ((state.account && state.account.id) || "anon");
 }
@@ -90,7 +109,7 @@ export async function openOnboarding(opts) {
   if (!state.account) { openLoginModal(); return; }
   obError = ""; obBusy = false; obShowReport = false;
   // Industry packs feed step 1; agent names feed the live feed; the plan
-  // decides step 5's branch (D3). All best-effort.
+  // decides step 6's branch (D3). All best-effort.
   loadIndustries();
   loadAgents();
   obPlanInfo = null;
@@ -115,7 +134,8 @@ export function closeOnboarding() {
   const v = $("onboardView");
   if (v) { v.classList.remove("open"); v.setAttribute("aria-hidden", "true"); }
   obOpen = false;
-  if (obPollTimer) { clearInterval(obPollTimer); obPollTimer = null; }
+  obStopFeed();
+  obStopImport();
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +143,7 @@ export function closeOnboarding() {
 // ---------------------------------------------------------------------------
 function obStepsBarHTML() {
   const st = (obState && obState.steps) || {};
-  return [1, 2, 3, 4, 5].map((n) => {
+  return [1, 2, 3, 4, 5, 6].map((n) => {
     const done = st[String(n)] === "completed" || st[String(n)] === "skipped";
     const cls = n === obStep ? "active" : (done ? "done" : "");
     return `<span class="ob-step ${cls}">${n}. ${OB_STEP_TITLES[n]}${done ? " ✓" : ""}</span>`;
@@ -131,13 +151,19 @@ function obStepsBarHTML() {
 }
 
 function renderOnboard() {
+  // A repaint replaces the whole body — stop any import poll painting into it
+  // (step ④ re-mounts a fresh flow below; the run feed keeps its own element
+  // check, so it survives only until its captured list leaves the DOM).
+  obStopImport();
   const bar = $("obSteps");
   if (bar) bar.innerHTML = obStepsBarHTML();
   const body = $("onboardBody");
   if (!body) return;
-  const builders = { 1: obStep1HTML, 2: obStep2HTML, 3: obStep3HTML, 4: obStep4HTML, 5: obStep5HTML };
+  const builders = { 1: obStep1HTML, 2: obStep2HTML, 3: obStep3HTML,
+                     4: obStep4HTML, 5: obStep5HTML, 6: obStep6HTML };
   body.innerHTML = (builders[obStep] || obStep1HTML)();
   wireOnboardBody(body);
+  if (obStep === 4) obMountImport(body);
   body.scrollTop = 0;
 }
 
@@ -221,10 +247,29 @@ function obStep3HTML() {
     </div>`;
 }
 
+// Step ④ 导入历史数据 (NEW in Phase 8) — front-load the company brain so the
+// FIRST report already compares against history (Moat 1). The flow itself is
+// the shared import_flow.js; this shell adds the wizard chrome + skip/next.
 function obStep4HTML() {
+  return `
+    <h2 class="ob-h">第 4 步 · 导入历史数据</h2>
+    <p class="ob-sub">导入过去 6–12 个月的表格，第一份报告就带趋势对比。没有历史表格也没关系 — 随时可以跳过，之后在「企业大脑」里补导。</p>
+    <div class="ob-card">
+      <div id="obImportHost"></div>
+      ${obErrHTML()}
+      <div class="ob-actions">
+        <button id="obImportNext" class="run-btn" type="button" hidden>下一步：生成第一份报告 →</button>
+        ${obSkipBtnHTML("跳过，直接生成报告")}
+      </div>
+    </div>`;
+}
+
+function obStep5HTML() {
   const status = obSnap ? obSnap.status : null;
   const acts = feedHTML((obSnap && obSnap.activity) || []);
-  const feed = acts ? `<ul class="ob-feed" id="obFeed">${acts}</ul>` : "";
+  // While a job runs, the (possibly still empty) list must exist — the shared
+  // run feed paints into it between repaints.
+  const feed = (obJobId || acts) ? `<ul class="ob-feed" id="obFeed">${acts}</ul>` : "";
   let action;
   if (status === "done") {
     // With a run id the full branded report view exists — link there. The
@@ -235,7 +280,7 @@ function obStep4HTML() {
     action = `<p class="ob-ok">✅ 第一份报告已生成！</p>
       <div class="ob-actions">
         <button id="obViewReport" class="run-btn" type="button">${!hasRunId && obShowReport ? "收起报告" : "查看完整报告"}</button>
-        <button id="obNext4" class="run-btn" type="button">下一步：设置每周定时 →</button>
+        <button id="obNext5" class="run-btn" type="button">下一步：设置每周定时 →</button>
       </div>
       ${report}`;
   } else if (status === "error") {
@@ -255,7 +300,7 @@ function obStep4HTML() {
       <p class="ob-file-note">将使用你最近一次上传/示例的数据。免费体验包含 2 份完整报告。</p>`;
   }
   return `
-    <h2 class="ob-h">第 4 步 · 自动生成第一份报告</h2>
+    <h2 class="ob-h">第 5 步 · 自动生成第一份报告</h2>
     <p class="ob-sub">这是见证时刻：AI 团队规划任务、读取数据、撰写成稿 — 全程直播。</p>
     <div class="ob-card">
       ${action}
@@ -263,7 +308,7 @@ function obStep4HTML() {
     </div>`;
 }
 
-function obStep5HTML() {
+function obStep6HTML() {
   if (obScheduleDone) {
     const channelLabel = (c) => ({ email: "邮件", wechat: "企业微信", service_account: "服务号" }[c] || c);
     return `
@@ -283,12 +328,12 @@ function obStep5HTML() {
   // dead-ends — 跳过 stays available either way).
   if (!obPlanInfo) {
     return `
-      <h2 class="ob-h">第 5 步 · 设置每周定时 + 交付方式</h2>
+      <h2 class="ob-h">第 6 步 · 设置每周定时 + 交付方式</h2>
       <div class="ob-card"><p class="ob-sub">正在载入…</p></div>`;
   }
   if (!obPlanInfo.canSchedule) {
     return `
-      <h2 class="ob-h">第 5 步 · 周一早上，报告自己到</h2>
+      <h2 class="ob-h">第 6 步 · 周一早上，报告自己到</h2>
       <p class="ob-sub">${esc(obPlanInfo.proLabel)}专属：设定一次，之后每周一早上 8 点，经营周报自动生成并送达 — 你什么都不用做。</p>
       <div class="ob-card">
         <div class="ritual-preview" aria-hidden="true">
@@ -304,7 +349,7 @@ function obStep5HTML() {
       </div>`;
   }
   return `
-    <h2 class="ob-h">第 5 步 · 设置每周定时 + 交付方式</h2>
+    <h2 class="ob-h">第 6 步 · 设置每周定时 + 交付方式</h2>
     <p class="ob-sub">一键创建「每周一早上 8 点」自动生成任务，用最近上传的数据出报告并自动送达。</p>
     <div class="ob-card">
       <label class="ob-check"><input type="checkbox" id="obChEmail" checked> 邮箱（账号邮箱）</label>
@@ -328,6 +373,7 @@ function wireOnboardBody(body) {
   on("obDemoBtn", obDemoData);
   on("obNext2", () => { obStep = 3; obError = ""; renderOnboard(); });
   on("obKpiBtn", obConfirmKpi);
+  on("obImportNext", () => { obStep = 5; obError = ""; renderOnboard(); });
   on("obGenBtn", obGenerate);
   on("obViewReport", () => {
     if (obSnap && obSnap.run_id != null && obSnap.run_id !== "") {
@@ -338,12 +384,41 @@ function wireOnboardBody(body) {
     obShowReport = !obShowReport; // fallback: inline preview (no run id)
     renderOnboard();
   });
-  on("obNext4", () => { obStep = 5; obError = ""; renderOnboard(); });
+  on("obNext5", () => { obStep = 6; obError = ""; renderOnboard(); });
   on("obSchedBtn", obSchedule);
   on("obUpgradeBtn", () => { closeOnboarding(); navigate("/account"); });
   on("obFinish", closeOnboarding);
   const skip = body.querySelector("#obSkipBtn");
   if (skip) skip.addEventListener("click", obSkipStep);
+}
+
+// Mount the shared import flow into step ④'s host. onboarding:true marks the
+// start request so the backend records the step-4 funnel event when the job
+// actually finishes (succeeded-only — funnel honesty, like step ⑤'s event).
+function obMountImport(body) {
+  const host = body.querySelector("#obImportHost");
+  if (!host) return;
+  obImportStop = mountImportFlow(host, {
+    lead: "导入过去 6–12 个月的表格，第一份报告就带趋势对比。",
+    onboarding: true,
+    onFinished: obImportFinished,
+  });
+}
+
+async function obImportFinished() {
+  // The backend wrote the step-4 event as the job closed — refresh the
+  // resumable state so the steps bar ticks, then reveal 下一步 WITHOUT a full
+  // re-render (that would clobber the import progress panel).
+  try { obState = await api.onboardingState(); } catch (e) { /* fine */ }
+  if (!obOpen) return;
+  const bar = $("obSteps");
+  if (bar) bar.innerHTML = obStepsBarHTML();
+  if (obStep !== 4) return;
+  const body = $("onboardBody");
+  const next = body && body.querySelector("#obImportNext");
+  if (next) next.hidden = false;
+  const skip = body && body.querySelector("#obSkipBtn");
+  if (skip) skip.hidden = true;   // imported — don't offer to record a skip
 }
 
 async function obSkipStep() {
@@ -352,7 +427,7 @@ async function obSkipStep() {
     obState = await api.onboardingSkip(step);
   } catch (e) { /* even if the event write fails, let the user move on */ }
   obError = "";
-  if (step >= 5) { closeOnboarding(); return; }
+  if (step >= OB_LAST_STEP) { closeOnboarding(); return; }
   obStep = step + 1;
   renderOnboard();
 }
@@ -422,7 +497,7 @@ async function obConfirmKpi() {
   renderOnboard();
   try {
     obState = await api.onboardingKpiConfirm(mappings);
-    obStep = 4;
+    obStep = 4;               // → the NEW 导入历史数据 step
   } catch (e) {
     obError = e.message;
   }
@@ -431,43 +506,35 @@ async function obConfirmKpi() {
 }
 
 async function obGenerate() {
-  obError = ""; obBusy = true; obSnap = null; obShowReport = false; renderOnboard();
+  obError = ""; obBusy = true; obSnap = null; obShowReport = false;
+  obStopFeed();
+  renderOnboard();
   await loadAgents(); // Chinese role names for the live feed
   try {
     const data = await api.onboardingGenerate();
     obJobId = data.job_id;
     obBusy = false;
     renderOnboard();
-    obPollTimer = setInterval(obPollJob, 900);
-    obPollJob();
+    // C4 — the shared run feed replaces the wizard's bespoke poll: it owns
+    // #obFeed repaints (filtered — no machinery lines) and stops itself on a
+    // terminal status; obSnap mirrors each snapshot so re-renders stay correct.
+    obFeedStop = startRunFeed(obJobId, {
+      listEl: $("obFeed"),
+      onUpdate: (snap) => { obSnap = snap; },
+      onDone: async () => {
+        obFeedStop = null;
+        try { obState = await api.onboardingState(); } catch (e) { /* fine */ }
+        if (obOpen && obStep === 5) renderOnboard();
+      },
+      onError: (message, snap) => {
+        obFeedStop = null;
+        if (snap) { obSnap = snap; } else { obError = message; obJobId = null; }
+        if (obOpen && obStep === 5) renderOnboard();
+      },
+    });
   } catch (e) {
     obError = e.message;
     obBusy = false;
-    renderOnboard();
-  }
-}
-
-async function obPollJob() {
-  if (!obJobId) return;
-  try {
-    const snap = await api.getJobStatus(obJobId);
-    const before = obSnap ? ((obSnap.activity || []).length + obSnap.status) : "";
-    obSnap = snap;
-    if (snap.status === "done" || snap.status === "error") {
-      clearInterval(obPollTimer); obPollTimer = null;
-      try { obState = await api.onboardingState(); } catch (e) { /* fine */ }
-      renderOnboard();
-      return;
-    }
-    const after = (snap.activity || []).length + snap.status;
-    if (obOpen && obStep === 4 && before !== after) {
-      renderOnboard();
-      const feed = $("obFeed");
-      if (feed) feed.scrollTop = feed.scrollHeight; // follow the live feed
-    }
-  } catch (e) {
-    clearInterval(obPollTimer); obPollTimer = null;
-    obError = e.message; obJobId = null;
     renderOnboard();
   }
 }

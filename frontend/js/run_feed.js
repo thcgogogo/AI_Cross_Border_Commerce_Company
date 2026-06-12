@@ -14,6 +14,9 @@ const MACHINERY_INFO_PREFIXES = [
   "Received COMPANY MEMORY",
   "Received KPI MAPPING",
   "Received INDUSTRY PACK",
+  // Phase 8 — metric-extraction bookkeeping ("… output-token limit", "… LLM
+  // call failed"); routine once history import fattens the extraction reply.
+  "metric extraction ",
 ];
 
 // The raw budget warning is machinery; customers see a friendly line instead.

@@ -45,14 +45,17 @@ from sqlalchemy import text
 
 from agent_team import config, db
 
-# How many wizard steps the funnel reports on (steps 1–5; step 0 = wizard open).
-FUNNEL_STEPS = (1, 2, 3, 4, 5)
+# How many wizard steps the funnel reports on (steps 1–6; step 0 = wizard open).
+# Phase 8 inserted ④ 导入历史数据 — the Moat-1 front-loading step — shifting
+# 首份报告/每周定时 to 5/6 (plan §3.10; numbering authority: models.ONBOARDING_STEPS).
+FUNNEL_STEPS = (1, 2, 3, 4, 5, 6)
 FUNNEL_STEP_LABELS = {
     1: "公司信息",
     2: "上传/示例数据",
     3: "KPI 确认",
-    4: "首份报告",
-    5: "每周定时",
+    4: "导入历史数据",
+    5: "首份报告",
+    6: "每周定时",
 }
 # Economics flag threshold, per the spec: cost > 60% of revenue.
 ECONOMICS_FLAG_RATIO = 0.6
@@ -302,7 +305,7 @@ def onboarding_funnel():
     """Step completion percentages for the wizard.
 
     Denominator = DISTINCT accounts with ANY onboarding event (they opened the
-    wizard at least once). Per step 1–5, numerator = DISTINCT accounts with a
+    wizard at least once). Per step 1–6, numerator = DISTINCT accounts with a
     `completed` event at that step; skips don't count as completion. Returns
     {"accounts_started": n, "steps": [{"step", "label", "completed", "pct"}]}
     with pct as a 0–100 float (one decimal), 0.0 when nobody has started."""
@@ -312,7 +315,7 @@ def onboarding_funnel():
         )).scalar() or 0)
         rows = dict(s.execute(text(
             "SELECT step, COUNT(DISTINCT account_id) FROM onboarding_events "
-            "WHERE event = 'completed' AND step BETWEEN 1 AND 5 "
+            "WHERE event = 'completed' AND step BETWEEN 1 AND 6 "
             "GROUP BY step")).fetchall())
     steps = []
     for n in FUNNEL_STEPS:
