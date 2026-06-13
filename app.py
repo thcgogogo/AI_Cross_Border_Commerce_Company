@@ -616,9 +616,15 @@ def models_list():
 
 @app.route("/api/meta")
 def meta():
-    """Currency + model-function metadata so the UI can format ¥ and build the
-    function tabs / modality lines without hard-coding any of it."""
-    return jsonify({
+    """Product identity + the copy knobs every customer surface needs.
+
+    Phase 10 (DoD sweep) — the model-function catalog metadata (kinds with
+    their "per 1M tokens" unit labels, kind_order), the US$→¥ conversion rate
+    and the trial's internal cost cap (START_BALANCE_CNY — the brief says
+    "never displayed") are machinery: only the founder 模型与定价 page reads
+    them (state.js kindMeta/kindLabel + founder/models.js), so they ride along
+    for founder sessions only and never reach a customer's devtools."""
+    payload = {
         # Redesign B1 — product identity + the zero-prompt report templates, so
         # every customer-facing surface brands and composes goals from config.
         "product_name": config.product_name(),
@@ -629,16 +635,20 @@ def meta():
         "single_report_price_yuan": config.SINGLE_REPORT_PRICE_YUAN,
         "currency": config.CURRENCY,
         "currency_symbol": config.CURRENCY_SYMBOL,
-        "usd_to_cny": config.USD_TO_CNY,
-        "start_balance_cny": config.START_BALANCE_CNY,
-        "kinds": config.KINDS,
-        "kind_order": config.KIND_ORDER,
         # So the sign-up/reset UI knows whether to ask for a phone + SMS code.
         "phone_verification": config.phone_verification_required(),
         # Phase 10 — the 联系支持 popup's contact targets (both may be "").
         "support_email": config.support_email(),
         "support_qr_url": config.support_wechat_qr_url(),
-    })
+    }
+    if _is_admin(_current_customer()):
+        payload.update({
+            "usd_to_cny": config.USD_TO_CNY,
+            "start_balance_cny": config.START_BALANCE_CNY,
+            "kinds": config.KINDS,
+            "kind_order": config.KIND_ORDER,
+        })
+    return jsonify(payload)
 
 
 @app.route("/api/providers")
@@ -1216,9 +1226,17 @@ _BUDGET_REACHED_PREFIX = "Token budget reached"
 _FRIENDLY_BUDGET_LINE = "已达本次生成上限，本次报告到此为止。"
 
 
+# Phase 10 (DoD sweep) — a failed run's raw error is machinery end to end
+# ("LLMError: Claude API error … overloaded_error … request_id"): provider
+# names and upstream plumbing must never reach a customer surface. Customers
+# get one friendly, actionable line; the founder keeps the raw error.
+_FRIENDLY_RUN_ERROR = "生成过程中遇到临时问题，本次未扣减额度 — 请稍后点击重试。"
+
+
 def _customer_safe_activity(activity):
     """The activity feed with machinery entries removed (and the token-budget
-    warning replaced by a friendly Chinese line a customer can understand)."""
+    warning / raw error lines replaced by friendly Chinese lines a customer
+    can understand)."""
     out = []
     for a in activity or []:
         if not isinstance(a, dict):
@@ -1234,6 +1252,12 @@ def _customer_safe_activity(activity):
             friendly = dict(a)
             friendly["agent"] = "system"
             friendly["message"] = _FRIENDLY_BUDGET_LINE
+            out.append(friendly)
+            continue
+        if a.get("type") == "error":
+            friendly = dict(a)
+            friendly["agent"] = "system"
+            friendly["message"] = _FRIENDLY_RUN_ERROR
             out.append(friendly)
             continue
         out.append(a)
@@ -1281,8 +1305,12 @@ def status(job_id):
             return refusal, code
     # Phase 5 (A1) — non-admin sessions get the customer-filtered feed; what is
     # LOGGED is unchanged (founder/is_admin keeps the raw machinery lines).
+    # Phase 10 — the snapshot's top-level error gets the same treatment: the
+    # raw string names the provider and upstream error types.
     if not _is_admin(customer):
         snap["activity"] = _customer_safe_activity(snap.get("activity"))
+        if snap.get("error"):
+            snap["error"] = _FRIENDLY_RUN_ERROR
     return jsonify(snap)
 
 

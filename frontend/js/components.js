@@ -249,10 +249,12 @@ export function sparklineSVG(values, { width = 120, height = 34, stroke = "var(-
 
 // ---- flat pricing cards (Phase 7 D2 — shared by landing §3.1⑦ + account §3.8②)
 // Per-plan marketing blurbs; labels/prices/quotas always come from /api/plans.
+// (planCard already renders the quota as the first point — pitches must not
+// repeat it, Phase 10 polish.)
 export const PLAN_PITCH = {
-  free:  { sub: "先看两份自己的报告再决定", points: ["2 份完整报告（含 PDF）", "手机号注册即可，无需绑卡", "历史数据导入体验"] },
-  basic: { sub: "每周一报，覆盖全月经营", points: ["每月约 20 份报告", "1 个使用账号", "企业大脑：记住指标与口径", "邮件送达 + 网页查看"] },
-  pro:   { sub: "整个团队的 AI 经营分析部", points: ["大额度报告量", "5 个使用账号", "每周一 08:00 定时自动送达", "企业微信群直达", "合同审查（每月 3 份）", "优先生成通道"] },
+  free:  { sub: "先看两份自己的报告再决定", points: ["完整报告体验（含品牌 PDF）", "手机号注册即可，无需绑卡", "历史数据导入体验"] },
+  basic: { sub: "每周一报，覆盖全月经营", points: ["1 个使用账号", "企业大脑：记住指标与口径", "邮件送达 + 网页查看"] },
+  pro:   { sub: "整个团队的 AI 经营分析部", points: ["5 个使用账号", "每周一 08:00 定时自动送达", "企业微信群直达", "合同审查（每月 3 份）", "优先生成通道"] },
 };
 
 // One flat plan card. `p` is an /api/plans row; opts:

@@ -30,6 +30,7 @@ if ROOT not in sys.path:
 import app  # noqa: E402 — module-level boot is one-time & idempotent
 from agent_team import db, delivery, metrics_store  # noqa: E402
 from agent_team.customers import CustomerStore  # noqa: E402
+from agent_team.memory import SharedMemory  # noqa: E402
 from agent_team.models import SUB_ACTIVE, Subscription  # noqa: E402
 
 OWNER = "owner@corp.com"
@@ -49,7 +50,8 @@ def env(tmp_path, monkeypatch):
                           email=OWNER, password="password1")
     monkeypatch.setattr(app, "CUSTOMERS", store)
     company_id = metrics_store.get_or_create_company(OWNER, company_name="OwnerCo")
-    return {"store": store, "company_id": company_id}
+    return {"store": store, "company_id": company_id,
+            "mem_dir": str(tmp_path / "mem")}
 
 
 def _subscribe(account_id, plan_code):
@@ -119,3 +121,83 @@ def test_insufficient_balance_machinery_is_gone_from_delivery():
     # only way "余额不足" could reach a customer again is by re-adding code.
     assert not hasattr(delivery, "INSUFFICIENT_BALANCE_MSG")
     assert not hasattr(delivery, "notify_insufficient_balance")
+
+
+# ===========================================================================
+# DoD sweep — /api/meta machinery is founder-only
+# ===========================================================================
+def _client_for(store, email):
+    client = app.app.test_client()
+    with client.session_transaction() as sess:
+        sess["customer_id"] = store.find_by_email(email)["id"]
+    return client
+
+
+def test_api_meta_strips_catalog_machinery_for_customers(env):
+    # The DoD grep sweep (§11: no "token"/"/1M" in any customer payload)
+    # caught /api/meta serving the model-function catalog ("per 1M tokens"
+    # unit labels), the US$→¥ rate, and START_BALANCE_CNY — the trial's
+    # internal cost cap the brief says is NEVER displayed. Only the founder
+    # 模型与定价 page consumes them.
+    for client in (app.app.test_client(),                 # anonymous
+                   _client_for(env["store"], OWNER)):     # customer session
+        resp = client.get("/api/meta")
+        meta = resp.get_json()
+        for field in ("kinds", "kind_order", "usd_to_cny", "start_balance_cny"):
+            assert field not in meta, field
+        raw = resp.get_data(as_text=True)
+        for needle in ("token", "1M", "start_balance"):
+            assert needle not in raw, needle
+        # What every surface legitimately needs survives.
+        assert meta["product_name"]
+        assert meta["currency_symbol"]
+        assert meta["report_goal_templates"]
+
+
+def test_api_meta_keeps_catalog_for_founder(env, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", OWNER)
+    meta = _client_for(env["store"], OWNER).get("/api/meta").get_json()
+    for field in ("kinds", "kind_order", "usd_to_cny", "start_balance_cny"):
+        assert field in meta, field
+    assert meta["kinds"]["text"]["callable"] is True
+
+
+# ===========================================================================
+# DoD sweep — a failed run's raw provider error never reaches a customer
+# ===========================================================================
+RAW_ERROR = ("LLMError: Claude API error (200): {'type': 'error', 'error': "
+             "{'type': 'overloaded_error', 'message': 'Overloaded'}, "
+             "'request_id': 'req_011Cxxxx'}")
+
+
+def _failed_job(env, job_id="job10err"):
+    memory = SharedMemory(job_id, store_dir=env["mem_dir"], goal="生成上周经营周报")
+    memory.set_company_id(env["company_id"])
+    memory.log("system", "Job created. Goal logged. 1 file(s) attached.", type="info")
+    memory.log("report_writer", "Hit an error: %s" % RAW_ERROR, type="error")
+    memory.set_error(RAW_ERROR)
+    return memory
+
+
+def test_run_error_is_friendly_for_customers_raw_for_founder(env, monkeypatch):
+    # Found live in the Phase-10 DoD run: a transient upstream overload put
+    # "LLMError: Claude API error … overloaded_error … request_id" straight
+    # into the customer's 生成出错 banner — provider machinery on a customer
+    # surface. Customers now get one friendly line; the founder keeps the raw.
+    _failed_job(env)
+    client = _client_for(env["store"], OWNER)
+
+    monkeypatch.delenv("ADMIN_EMAILS", raising=False)
+    resp = client.get("/api/status/job10err")
+    snap = resp.get_json()
+    raw = resp.get_data(as_text=True)
+    assert snap["status"] == "error"
+    assert "请稍后" in snap["error"]                      # friendly + actionable
+    for needle in ("Claude", "LLMError", "overloaded", "request_id", "API"):
+        assert needle not in raw, needle                 # devtools-clean
+    assert any("临时问题" in a["message"] for a in snap["activity"])
+
+    monkeypatch.setenv("ADMIN_EMAILS", OWNER)
+    snap = client.get("/api/status/job10err").get_json()
+    assert snap["error"] == RAW_ERROR                    # founder debugs with the raw
+    assert any("Claude API error" in a["message"] for a in snap["activity"])
