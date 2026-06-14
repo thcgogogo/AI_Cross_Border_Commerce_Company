@@ -1405,3 +1405,99 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
   .sources-block summary::after { content: ""; }
   .report-foot { background: none; }
 }
+
+/* ===========================================================================
+   Public Fusion chat (views/fusion.js) — the landing. Light theme, scoped under
+   .fusion-page so it never touches the dark founder Fusion view.
+   =========================================================================== */
+.fusion-page { max-width: 860px; margin: 0 auto; padding: 8px 16px 28px; }
+.fusion-hero { text-align: center; padding: 22px 0 16px; }
+.fusion-hero h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.5px; }
+.fusion-hero p { color: var(--muted); max-width: 580px; margin: 0 auto; font-size: 14.5px; }
+
+.fusion-controls {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 12px;
+}
+.fusion-presets { display: flex; gap: 8px; }
+.fusion-preset {
+  border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  border-radius: 999px; padding: 5px 14px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.fusion-preset:hover { border-color: var(--accent); color: var(--accent); }
+.fusion-preset.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.fusion-models { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.fusion-chip {
+  display: inline-flex; align-items: center; gap: 6px; background: var(--inset);
+  border: 1px solid var(--line); border-radius: 9px; padding: 5px 6px 5px 11px; font-size: 13px; font-weight: 600;
+}
+.fusion-chip.unavail { opacity: .6; border-style: dashed; }
+.fusion-chip .fc-rm {
+  border: none; background: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px;
+}
+.fusion-chip .fc-rm:hover { color: var(--red, #d23); }
+.fusion-add, .fusion-fuser {
+  border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 9px;
+  padding: 6px 10px; font: inherit; font-size: 13px; cursor: pointer;
+}
+.fusion-addfull { font-size: 12.5px; color: var(--muted); }
+.fusion-fuse-row { display: flex; align-items: center; gap: 10px; }
+.fusion-fuse-label { font-size: 13px; color: var(--muted); font-weight: 600; }
+
+.fusion-thread { margin: 20px 0; display: flex; flex-direction: column; gap: 16px; }
+.fusion-empty { text-align: center; color: var(--muted); padding: 40px 0; }
+.fusion-empty-icon { font-size: 30px; color: var(--accent); margin-bottom: 8px; }
+.ft-turn { display: flex; flex-direction: column; }
+.ft-turn.user { align-items: flex-end; }
+.ft-turn.assistant { align-items: stretch; }
+.ft-bubble { max-width: 88%; border-radius: 14px; padding: 12px 16px; }
+.ft-turn.user .ft-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; white-space: pre-wrap; }
+.ft-bubble.ft-assistant { background: var(--card); border: 1px solid var(--line); max-width: 100%; }
+.ft-bubble.ft-assistant .report-body { font-size: 15px; }
+.ft-bubble.ft-thinking { background: var(--inset); color: var(--muted); display: inline-flex; align-items: center; gap: 9px; font-size: 14px; }
+.ft-detail { margin-top: 8px; }
+.ft-detail > summary {
+  cursor: pointer; font-size: 12.5px; color: var(--muted); font-weight: 600; list-style: none; padding: 4px 0;
+}
+.ft-detail > summary:hover { color: var(--accent); }
+.fusion-answers { display: grid; gap: 10px; margin-top: 8px; }
+.fusion-answer { border: 1px solid var(--line); border-radius: 10px; padding: 10px 13px; background: var(--inset); }
+.fusion-answer.failed { opacity: .75; }
+.fa-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.fa-label { font-weight: 700; font-size: 13px; }
+.fa-state { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 1px 8px; }
+.fa-state.ok { color: var(--green, #18794e); background: rgba(24,121,78,.1); }
+.fa-state.bad { color: var(--red, #d23); background: rgba(210,51,51,.1); }
+.fr-text { font-size: 14px; }
+.fr-error { color: var(--red, #d23); font-size: 13.5px; }
+.fusion-error {
+  background: rgba(210,51,51,.08); border: 1px solid rgba(210,51,51,.25); color: var(--red, #d23);
+  border-radius: 10px; padding: 10px 14px; font-size: 13.5px;
+}
+
+.fusion-composer {
+  position: sticky; bottom: 14px; display: flex; gap: 8px; align-items: flex-end;
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+  padding: 10px 10px 10px 16px; box-shadow: var(--shadow);
+}
+.fusion-input {
+  flex: 1; border: none; outline: none; resize: none; background: none; color: var(--ink);
+  font: inherit; font-size: 15px; line-height: 1.5; max-height: 200px;
+}
+.fusion-send {
+  flex: none; width: 38px; height: 38px; border-radius: 11px; border: none; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 18px; font-weight: 700;
+}
+.fusion-send:hover:not(:disabled) { background: var(--accent-2); }
+.fusion-send:disabled { opacity: .5; cursor: default; }
+.fusion-foot { text-align: center; font-size: 12px; margin: 10px 0 0; }
+
+/* Agents (report-product) sign-in gate */
+.agents-gate { text-align: center; padding: 48px 0; }
+.agents-gate h1 { font-size: 26px; margin: 6px 0 10px; }
+.agents-gate-actions { display: flex; gap: 10px; justify-content: center; margin-top: 22px; }
+.btn-ghost {
+  border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 10px;
+  padding: 11px 22px; font: inherit; font-weight: 700; font-size: 15px; cursor: pointer;
+}
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }

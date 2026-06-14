@@ -72,6 +72,10 @@ export const resetTokens = () => postJSON("/api/tokens/reset");
 export const saveAccountModels = (ids) => postJSON("/api/account/models", { models: ids });
 export const runFusion = (payload) => postJSON("/api/fusion", payload);
 
+// ---- public Fusion chat (the landing page) ------------------------------------
+export const getFusionModels = () => getJSON("/api/fusion/models");
+export const fusionChat = (payload) => postJSON("/api/fusion/chat", payload);
+
 // ---- billing ------------------------------------------------------------------
 export const getPlans = () => getJSON("/api/plans");
 export const getOrders = () => getJSON("/api/orders");

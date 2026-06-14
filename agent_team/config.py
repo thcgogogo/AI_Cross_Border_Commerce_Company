@@ -354,6 +354,45 @@ def trust_proxy_hops():
         return 0
 
 
+def _env_int(name, default):
+    """A non-negative int env var, or `default` if unset/blank/non-numeric."""
+    try:
+        return max(0, int(_env(name)))
+    except (TypeError, ValueError):
+        return default
+
+
+# ---- Public (anonymous) Fusion — cost/abuse ceilings -----------------------
+# The landing-page Fusion chat is anonymous (no login), so the SERVER pays for every
+# model call on its own keys. These caps + the per-IP rate limit + the platform spend
+# breaker are the only things between "free demo" and a runaway bill. Keep them tight.
+def fusion_rate_limit():
+    """Per-IP limit on the public Fusion chat. Tight by default — it spends real
+    money on our keys with no login. (Behind a proxy, set TRUST_PROXY so this keys
+    on the real client, not the proxy.)"""
+    return _env("FUSION_RATE_LIMIT") or "10 per hour"
+
+
+def fusion_anon_max_models():
+    """Max models fused per anonymous run (bounds the fan-out cost)."""
+    return _env_int("FUSION_ANON_MAX_MODELS", 3) or 3
+
+
+def fusion_anon_max_tokens():
+    """Max output tokens per candidate answer for an anonymous run."""
+    return _env_int("FUSION_ANON_MAX_TOKENS", 800) or 800
+
+
+def fusion_anon_max_history_msgs():
+    """Most recent conversation turns forwarded to the models (older are dropped)."""
+    return _env_int("FUSION_ANON_MAX_HISTORY_MSGS", 12) or 12
+
+
+def fusion_anon_max_chars():
+    """Total conversation characters forwarded (bounds input cost on long chats)."""
+    return _env_int("FUSION_ANON_MAX_CHARS", 12000) or 12000
+
+
 # Default gateway requests-per-minute for a key with no explicit accounts.rpm_limit.
 DEFAULT_KEY_RPM = 60
 

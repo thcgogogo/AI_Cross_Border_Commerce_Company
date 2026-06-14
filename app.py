@@ -556,6 +556,14 @@ def login_page():
     return _spa_shell()
 
 
+@app.route("/agents")
+def agents_page():
+    """The Agents (report-product) section landing. Served to EVERYONE — the SPA
+    shows a concise sign-in intro to logged-out visitors and the 工作台 to members
+    (the report DATA endpoints stay login-gated server-side, so the shell is safe)."""
+    return _spa_shell()
+
+
 @app.route("/company-brain")
 def company_brain_page():
     """The "企业大脑" page. Logged-out visitors are redirected to /login (302); the
@@ -4546,6 +4554,138 @@ def _fuse_answers(prompt, answers, fuser):
         a = ok[0]  # fusion failed — fall back to the first successful answer
         return {"text": a["text"], "by": a["model"], "by_label": a["label"],
                 "note": "The fuser was unavailable, so the first model's answer is shown."}
+
+
+# ---------------------------------------------------------------------------
+# PUBLIC Fusion chat — the landing page. Anonymous, multi-turn, server-paid.
+# ---------------------------------------------------------------------------
+# Unlike /api/fusion above (founder-only, billed to the account, single-shot), this
+# is the customer-facing chatbot: no login, conversation history, and the server pays
+# on its own provider keys. With no account to bill or rate-limit, the ONLY cost
+# guards are the per-IP rate limit, the platform spend circuit breaker, and the hard
+# per-run caps in config (models / output tokens / history). Model NAMES are shown by
+# design here (the picker), but per-¥ cost is never returned to the public.
+@app.route("/api/fusion/models", methods=["GET"])
+def fusion_models():
+    """Public model list for the Fusion picker — names only, NO ¥ pricing (that stays
+    founder-gated on /api/models). Text models only (the only kind that can be fused)."""
+    out = [{"id": m["id"], "label": m["label"], "provider": m["provider"],
+            "provider_label": config.PROVIDERS.get(m["provider"], {}).get("label", m["provider"]),
+            "tier": m.get("tier", ""),
+            # Whether this model can actually run now (its provider key is set). Lets
+            # the picker default to working models + mark the rest — operational, not
+            # pricing, so it stays out of the founder-only ¥ machinery.
+            "available": providers.model_available(m["id"])}
+           for m in config.MODEL_CHOICES if m.get("kind", "text") == "text"]
+    return jsonify({"models": out})
+
+
+def _clamp_messages_chars(messages, max_chars):
+    """Drop oldest turns until total content is under max_chars (cost guard for long
+    anonymous chats). Always keeps the final (latest user) turn."""
+    total = sum(len(m["content"]) for m in messages)
+    i = 0
+    while total > max_chars and i < len(messages) - 1:
+        total -= len(messages[i]["content"])
+        i += 1
+    return messages[i:]
+
+
+def _record_anonymous_fusion_spend(answers, fused):
+    """Feed the platform spend breaker for a server-paid (anonymous) fusion run.
+    Billed to NO account — just metered in ¥ so the global hourly/daily caps can trip.
+    Best-effort: a metering hiccup must never fail the response."""
+    try:
+        for a in answers:
+            if a.get("ok"):
+                cost = config.cost_cny(a["model"], a.get("input_tokens", 0), a.get("output_tokens", 0))
+                platform_guard.record_spend(a.get("provider") or config.provider_for(a["model"]),
+                                            cost, account_id=None)
+        if fused and fused.get("input_tokens") is not None:
+            cost = config.cost_cny(fused["by"], fused.get("input_tokens", 0), fused.get("output_tokens", 0))
+            platform_guard.record_spend(config.provider_for(fused["by"]), cost, account_id=None)
+    except Exception:
+        pass
+
+
+@app.route("/api/fusion/chat", methods=["POST"])
+@limiter.limit(config.fusion_rate_limit, key_func=get_remote_address)
+def fusion_chat():
+    """PUBLIC, anonymous, multi-turn Fusion chat (the landing page calls this).
+
+    Body: {"messages": [{"role": "user"|"assistant", "content": "..."}], "models": [...],
+    "fuser": "auto"|"<id>"}. Each model answers the FULL (clamped) conversation; a fuser
+    reconciles them into one reply. No login, no per-account billing, no ¥ in the response."""
+    load_dotenv(override=True)  # pick up any provider keys added since startup
+
+    # Global spend breaker (anonymous → no per-account cap). The server is paying.
+    allowed, reason = platform_guard.check()
+    if not allowed:
+        return jsonify({"error": reason}), 503
+
+    data = request.get_json(silent=True) or {}
+    raw_messages = data.get("messages")
+    models = data.get("models")
+    fuser = (data.get("fuser") or "auto").strip()
+
+    # Sanitize the conversation: only {role,content} with safe roles + non-empty text.
+    if not isinstance(raw_messages, list) or not raw_messages:
+        return jsonify({"error": "Type a question to start."}), 400
+    messages = []
+    for m in raw_messages:
+        if not isinstance(m, dict):
+            continue
+        role, content = m.get("role"), m.get("content")
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            messages.append({"role": role, "content": content.strip()})
+    if not messages or messages[-1]["role"] != "user":
+        return jsonify({"error": "Type a question to start."}), 400
+    # History clamp (cost): most-recent turns, then a total-character bound.
+    messages = messages[-config.fusion_anon_max_history_msgs():]
+    messages = _clamp_messages_chars(messages, config.fusion_anon_max_chars())
+
+    # Text models only, dedup, cap the fan-out.
+    if not isinstance(models, list) or not models:
+        return jsonify({"error": "Pick at least one model."}), 400
+    picked, seen = [], set()
+    for mid in models:
+        if mid in seen:
+            continue
+        if config.get_model(mid) and config.is_text_model(mid):
+            seen.add(mid)
+            picked.append(mid)
+    if not picked:
+        return jsonify({"error": "Pick at least one text model."}), 400
+    picked = picked[:config.fusion_anon_max_models()]
+
+    max_tokens = config.fusion_anon_max_tokens()
+
+    def run_one(mid):
+        label = (config.get_model(mid) or {}).get("label", mid)
+        try:
+            r = providers.gateway_chat(mid, messages, max_tokens=max_tokens)
+            return {"model": mid, "label": label, "ok": True, "text": r["text"],
+                    "provider": r["provider"], "input_tokens": r["input_tokens"],
+                    "output_tokens": r["output_tokens"]}
+        except (providers.ProviderKeyMissing, providers.LLMError) as e:
+            return {"model": mid, "label": label, "ok": False, "error": str(e)}
+
+    with ThreadPoolExecutor(max_workers=min(len(picked), 5)) as pool:
+        answers = list(pool.map(run_one, picked))
+
+    # The fuser reconciles the candidates against the latest user prompt (reuses the
+    # founder fusion engine; the candidates already saw the full conversation).
+    fused = _fuse_answers(messages[-1]["content"], answers, fuser)
+
+    _record_anonymous_fusion_spend(answers, fused)
+
+    # Public shape — strip token counts / provider internals are fine to keep (model
+    # names are shown by design) but NEVER a ¥ cost or balance.
+    public_answers = [{k: a[k] for k in ("model", "label", "ok", "text", "error") if k in a}
+                      for a in answers]
+    public_fused = ({k: fused[k] for k in ("text", "by", "by_label", "note") if k in fused}
+                    if fused else None)
+    return jsonify({"answers": public_answers, "fused": public_fused})
 
 
 def _check_api_key():

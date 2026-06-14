@@ -11,7 +11,7 @@ import { esc } from "./components.js";
 import * as api from "./api.js";
 import * as auth from "./views/auth.js";
 import * as onboarding from "./views/onboarding.js";
-import * as landing from "./views/landing.js";
+import * as fusion from "./views/fusion.js";
 import * as workbench from "./views/workbench.js";
 import * as reportNew from "./views/report_new.js";
 import * as reportView from "./views/report_view.js";
@@ -30,24 +30,29 @@ const $ = (id) => document.getElementById(id);
 // ---------------------------------------------------------------------------
 // Navigation model
 // ---------------------------------------------------------------------------
-const CUSTOMER_NAV = [
-  { path: "/", label: "工作台" },
+// The report/analytics product, now grouped under the "Agents" section (its home
+// 工作台 moved from "/" to "/agents", since "/" is the public Fusion chat).
+const AGENTS_NAV = [
+  { path: "/agents", label: "工作台" },
   { path: "/new", label: "生成报告" },
   { path: "/reports", label: "历史报告" },
   { path: "/schedule", label: "定时与送达" },
   { path: "/brain", label: "企业大脑" },
   { path: "/account", label: "账户与套餐" },
 ];
+const AGENTS_PATHS = AGENTS_NAV.map((i) => i.path);
 const FOUNDER_NAV = [
   { path: "/founder/team", label: "团队与模型" },
   { path: "/founder/costs", label: "成本控制台" },
   { path: "/founder/models", label: "模型与定价" },
-  { path: "/founder/fusion", label: "Fusion" },
   { path: "/founder/api", label: "开发者接口" },
 ];
+// Note: Fusion is now the PUBLIC landing ("/"), so it's dropped from 内部工具. The
+// legacy founder /founder/fusion route + /api/fusion endpoint remain for direct access.
 
 const ROUTES = [
-  { pattern: /^\/$/, view: () => (state.account ? workbench : landing) },
+  { pattern: /^\/$/, view: () => fusion },                       // public Fusion chat (the landing)
+  { pattern: /^\/agents$/, view: () => workbench, auth: true },  // the Agents (report product) home
   { pattern: /^\/new$/, view: () => reportNew, auth: true },
   { pattern: /^\/reports$/, view: () => reports, auth: true },
   { pattern: /^\/reports\/(\d+)$/, view: () => reportView, auth: true, params: (m) => ({ runId: m[1] }) },
@@ -109,16 +114,37 @@ async function render() {
   }
 
   if (matched.auth && !state.account) {
-    // Logged-out hit on a logged-in page (client-side nav; the server already
-    // bounces fresh visits to /login): show the landing + the login modal.
-    landing.mount(el);
-    auth.openLoginModal();
+    // Logged-out hit on an Agents (report-product) route: show the section's sign-in
+    // intro. A deep feature route also pops the login modal (they meant to use it);
+    // the /agents section landing lets them read first.
+    mountAgentsGate(el);
+    if (path !== "/agents") auth.openLoginModal();
     return;
   }
 
   const mod = matched.view();
   const ret = await mod.mount(el, { params, navigate });
   if (seq === renderSeq) cleanup = (typeof ret === "function") ? ret : null;
+}
+
+// Logged-out intro for the Agents (report) product. The full report-marketing page
+// was retired when Fusion became the landing; this is the concise sign-in gate.
+function mountAgentsGate(el) {
+  el.innerHTML = `<div class="page page-narrow">
+    <div class="agents-gate">
+      <div class="empty-icon">🤖</div>
+      <h1>AI 经营分析团队</h1>
+      <p class="empty-lead">一支 AI 团队替你把杂乱的 Excel 变成每周一早上自动送达的、每个数字可溯源的经营周报。
+        登录后即可生成报告、导入历史数据、设置定时送达。</p>
+      <div class="agents-gate-actions">
+        <button type="button" class="run-btn" id="agentsSignup">免费体验</button>
+        <button type="button" class="btn-ghost" id="agentsLogin">登录</button>
+      </div>
+      <p class="muted" style="margin-top:18px">想先试试 AI？<a href="/" data-nav>回到 Fusion 对话 →</a></p>
+    </div>
+  </div>`;
+  const s = $("agentsSignup"); if (s) s.addEventListener("click", () => auth.openSignupModal());
+  const l = $("agentsLogin"); if (l) l.addEventListener("click", () => auth.openLoginModal());
 }
 
 // ---------------------------------------------------------------------------
@@ -142,13 +168,19 @@ function navLinkHTML(item, current) {
 function renderNav() {
   const nav = $("mainNav");
   const current = location.pathname;
-  if (!state.account) {
-    nav.innerHTML = "";
-    $("navToggle").hidden = true;
-    renderNavSheet();
-    return;
+  // Fusion is the public home — always shown. Agents is a dropdown of the report
+  // views when logged in, a single link (→ the sign-in gate) when logged out.
+  let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
+  if (state.account) {
+    const open = AGENTS_PATHS.some((p) => (p === "/agents" ? current === "/agents" : current.startsWith(p)));
+    html += `<div class="nav-drop" id="agentsDrop">
+      <button type="button" class="nav-link ${open ? "active" : ""}" id="agentsDropBtn"
+        aria-haspopup="true" aria-expanded="false">Agents <span class="nav-drop-caret">▾</span></button>
+      <div class="nav-drop-menu">${AGENTS_NAV.map((i) => navLinkHTML(i, current)).join("")}</div>
+    </div>`;
+  } else {
+    html += navLinkHTML({ path: "/agents", label: "Agents" }, current);
   }
-  let html = CUSTOMER_NAV.map((i) => navLinkHTML(i, current)).join("");
   if (isAdmin()) {
     const open = current.startsWith("/founder");
     html += `<div class="nav-drop" id="founderDrop">
@@ -161,23 +193,33 @@ function renderNav() {
     </div>`;
   }
   nav.innerHTML = html;
+  // Always available — the top nav (Fusion + Agents) is hidden by CSS at mobile
+  // widths, so the hamburger must work even logged out (CSS hides it on desktop).
   $("navToggle").hidden = false;
-  const drop = $("founderDrop");
-  if (drop) {
-    $("founderDropBtn").addEventListener("click", (e) => {
-      e.stopPropagation();
-      drop.classList.toggle("open");
-      $("founderDropBtn").setAttribute("aria-expanded", drop.classList.contains("open") ? "true" : "false");
-    });
-  }
+  wireDrop("agentsDrop", "agentsDropBtn");
+  wireDrop("founderDrop", "founderDropBtn");
   renderNavSheet();
+}
+
+function wireDrop(dropId, btnId) {
+  const drop = $(dropId);
+  if (!drop) return;
+  $(btnId).addEventListener("click", (e) => {
+    e.stopPropagation();
+    drop.classList.toggle("open");
+    $(btnId).setAttribute("aria-expanded", drop.classList.contains("open") ? "true" : "false");
+  });
 }
 
 function renderNavSheet() {
   const sheet = $("navSheet");
   const current = location.pathname;
-  if (!state.account) { sheet.innerHTML = ""; return; }
-  let html = CUSTOMER_NAV.map((i) => navLinkHTML(i, current)).join("");
+  let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
+  if (state.account) {
+    html += `<div class="nav-sheet-group">Agents</div>` + AGENTS_NAV.map((i) => navLinkHTML(i, current)).join("");
+  } else {
+    html += navLinkHTML({ path: "/agents", label: "Agents" }, current);
+  }
   html += `<div class="nav-sheet-group">帮助</div>
     <a class="nav-link" href="/help">帮助中心</a>
     <a class="nav-link" href="/changelog">更新日志${state.changelogHasNew ? '<span class="menu-badge">新功能</span>' : ""}</a>`;
@@ -305,8 +347,9 @@ async function boot() {
   $("navToggle").addEventListener("click", openNavSheet);
   $("navSheetBackdrop").addEventListener("click", closeNavSheet);
   document.addEventListener("click", (e) => {
-    const drop = $("founderDrop");
-    if (drop && !drop.contains(e.target)) drop.classList.remove("open");
+    document.querySelectorAll(".nav-drop.open").forEach((drop) => {
+      if (!drop.contains(e.target)) drop.classList.remove("open");
+    });
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && $("navSheet").classList.contains("open")) closeNavSheet();

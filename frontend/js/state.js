@@ -13,8 +13,9 @@ export const state = {
   account: null,         // /api/me customer view (or null) — carries is_admin
   agents: [],            // org chart (lazily loaded; name_cn drives the feed)
   industries: [],        // industry packs (wizard step 1)
-  models: [],            // model catalog (founder views only)
+  models: [],            // FULL priced model catalog (founder views only)
   providers: {},         // provider id -> label (founder views only)
+  fusionModels: [],      // PUBLIC model list for the Fusion picker (names, no pricing)
   changelogHasNew: false, // drives the 更新日志 “新功能” badge
 };
 
@@ -69,6 +70,18 @@ export async function loadIndustries() {
   try { state.industries = await api.getIndustries(); } catch (e) { /* optional */ }
   return state.industries;
 }
+
+// Public Fusion picker catalog (names + availability, NO pricing). Separate from the
+// founder catalog so the anonymous landing never needs the founder-gated /api/models.
+export async function loadFusionModels(force = false) {
+  if (state.fusionModels.length && !force) return state.fusionModels;
+  try {
+    const data = await api.getFusionModels();
+    state.fusionModels = (data && data.models) || [];
+  } catch (e) { /* leave empty; the view shows a friendly message */ }
+  return state.fusionModels;
+}
+export const fusionModelById = (id) => state.fusionModels.find((m) => m.id === id) || null;
 
 // Founder views: models + providers + agents together (the old bootstrap set).
 export async function loadFounderCatalog() {

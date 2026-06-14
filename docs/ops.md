@@ -354,6 +354,27 @@ just the why (and what to change if your topology differs):
   load-balancer → nginx = **2**. ⚠️ Leave it **unset** if the app is exposed directly —
   trusting `X-Forwarded-For` with no real proxy lets a client spoof its IP and dodge
   per-IP limits. (It also makes the audit-log client IP accurate.)
+
+### 7.7 The public Fusion chat (cost exposure)
+
+The home page (`/`) is an **anonymous** multi-model Fusion chatbot (`/api/fusion/chat`):
+no login, so **the server pays** for every model call on its own provider keys. Treat
+it as a deliberate, bounded cost. The guards, in order of importance:
+
+- **Set the platform spend caps** (`PLATFORM_HOURLY_CAP_YUAN` / `PLATFORM_DAILY_CAP_YUAN`,
+  §7.1) **before exposing it publicly** — anonymous Fusion spend is metered into the same
+  breaker (billed to no account), so once rolling spend crosses a cap the chat refuses
+  with 503 until you reset. This is the hard kill-switch.
+- **Per-IP rate limit** `FUSION_RATE_LIMIT` (default `10 per hour`) — needs `TRUST_PROXY`
+  set (§7.6) to key on the real client behind nginx.
+- **Per-run ceilings**: `FUSION_ANON_MAX_MODELS` (3), `FUSION_ANON_MAX_TOKENS` (800),
+  and the history clamp (`FUSION_ANON_MAX_HISTORY_MSGS` / `FUSION_ANON_MAX_CHARS`) bound
+  the fan-out, answer length, and long-conversation input cost.
+
+Model NAMES are shown in the picker by design (this is the one surface that exposes the
+"council"), but no ¥ cost is ever returned to the public. The picker defaults to the
+cheap "经济" preset and only the models whose provider keys are set. To gate the priciest
+flagships behind login later, add a per-model `anon_ok` flag (not built yet).
 ```
 
 ## 8. Payments, subscriptions & fapiao (Phase 9)

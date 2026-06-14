@@ -22,6 +22,21 @@ console — the customer-facing promise is 成本透明，绝不超支.
 
 ---
 
+## Two surfaces: Fusion (home) + Agents
+
+The home page (`/`) is **Fusion** — a public, no-login, multi-model chatbot: ask once,
+several models answer, and one fused answer is reconciled from them (when one model is
+wrong, the others catch it). It's the open front door; model names are shown, anonymous
+visitors can try it, and it's bounded by a per-IP rate limit + the platform spend caps
+(see [docs/ops.md](docs/ops.md) §7.7 — **the server pays, so set the caps before going
+public**).
+
+The report/analytics product described below now lives under the **Agents** section
+(sign-in required): the AI team that turns your Excel into a source-verified weekly
+经营周报. Everything in "The build record" and the moats applies to Agents.
+
+---
+
 ## Quick start
 
 **You need:** Python 3.9+ and an Anthropic API key
