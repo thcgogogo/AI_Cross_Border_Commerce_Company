@@ -62,6 +62,17 @@ your cloud load balancer, or add a `443` server block + certs to `nginx.conf`.
 > managed/external Postgres instead, set `DATABASE_URL` explicitly in the `app`
 > and `scheduler` service `environment:` blocks.
 
+> **Running in mainland China (no Anthropic):** set `TEAM_MODEL_PRESET=domestic`
+> and `DEEPSEEK_API_KEY` in `.env` and the whole team — every agent plus the
+> internal metric-extraction and verification-audit calls — runs on DeepSeek V4
+> (`deepseek-v4-flash`); **no `ANTHROPIC_API_KEY` is required** (the router builds
+> its Anthropic client lazily and never touches it). On a reused data volume,
+> clear stale Claude entries in `memory_store/model_overrides.json` so the preset
+> governs (a saved per-agent choice wins over it). Trade-off: DeepSeek can't run
+> the Claude-only file-builder tools or live web search, so the 媒体制作人 produces
+> Markdown briefs instead of `.pptx/.pdf` — expected, and fine for the weekly
+> report. See `docs/launch-checklist.md` §8 for the full switch + the Qwen option.
+
 **Migrating from an old JSON-based deploy?** Accounts now live in the database. The
 app imports a legacy `memory_store/customers.json` automatically on first boot, so
 usually there is nothing to do. To run it explicitly (e.g. seeding a fresh Postgres
@@ -263,10 +274,12 @@ ACCOUNT_DAILY_CAP_YUAN=200           # per-account/day ceiling (per-row override
 ADMIN_EMAILS=you@yourcompany.com     # who gets the alert + can reset the breaker
 ADMIN_ALERT_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...
 
-# Rate limiting — auth per IP, run-start per account. memory:// is correct for ONE
-# process; point at redis for multi-worker gunicorn so the counters are shared.
+# Rate limiting — auth per IP, run-start per account, /v1 gateway per key. memory://
+# is correct for ONE process; point at redis for multi-worker gunicorn so ALL the
+# counters are shared (see §7.6). The compose stack sets both of these for you.
 RATELIMIT_ENABLED=1                  # default on; 0 disables entirely
 RATELIMIT_STORAGE_URI=redis://redis:6379
+TRUST_PROXY=1                        # reverse-proxy hops in front (nginx=1); see §7.6
 AUTH_RATE_LIMIT=5 per minute
 RUN_RATE_LIMIT=10 per hour
 ```
@@ -322,6 +335,25 @@ the value. In dev it warns instead of exiting.
 # breaker + fires one alert + an admin reset restores service, (4) an upload is
 # ciphertext on disk but downloads with the original checksum, (5) audit rows are
 # written for login + topup + download.
+
+### 7.6 Scaling to multiple workers (rate limits behind a proxy)
+
+The prod image runs gunicorn with **4 workers** behind **nginx**. Two settings make
+the abuse/cost limits correct at that shape — the compose stack sets both, so this is
+just the why (and what to change if your topology differs):
+
+- **`RATELIMIT_STORAGE_URI=redis://redis:6379`** — without a shared backend each
+  worker keeps its OWN counters, so every limit (per-IP auth, per-account run-start,
+  the per-key `/v1` gateway RPM) is enforced at ~**4×** the configured value. The
+  compose stack ships a `redis` service for exactly this. A redis blip fails **open**
+  (requests are allowed, never 500'd) — it holds only ephemeral counters, no user data.
+- **`TRUST_PROXY=<hops>`** — the limiter keys on the client IP via `request.remote_addr`.
+  Behind a proxy that is the **proxy's** IP unless the app trusts `X-Forwarded-For`, so
+  without this every client collapses into ONE per-IP bucket. Set it to the number of
+  proxies that prepend `X-Forwarded-For`: **nginx = 1** (the compose default); a cloud
+  load-balancer → nginx = **2**. ⚠️ Leave it **unset** if the app is exposed directly —
+  trusting `X-Forwarded-For` with no real proxy lets a client spoof its IP and dodge
+  per-IP limits. (It also makes the audit-log client IP accurate.)
 ```
 
 ## 8. Payments, subscriptions & fapiao (Phase 9)

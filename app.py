@@ -24,7 +24,6 @@ import shutil
 import threading
 import time
 import uuid
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from html import escape as _h
@@ -35,7 +34,11 @@ from flask import (Flask, Response, g, jsonify, redirect, request, send_file,
                    send_from_directory, session)
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from limits import RateLimitItemPerMinute
+from limits.storage import storage_from_string
+from limits.strategies import MovingWindowRateLimiter
 from sqlalchemy import text
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import safe_join
 
 from admin import queries as admin_queries
@@ -129,6 +132,25 @@ app = Flask(__name__, static_folder="frontend", static_url_path="")
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload cap
 
 
+def _install_proxy_fix(flask_app):
+    """Trust X-Forwarded-* from exactly `TRUST_PROXY` reverse-proxy hops, so behind
+    nginx the real CLIENT ip drives request.remote_addr — and therefore the per-IP
+    rate-limit key and the audit log — instead of the proxy's ip. Returns True if it
+    wrapped. Default 0 (direct exposure) leaves XFF UNtrusted, so a client can't spoof
+    its ip to dodge per-IP limits; the compose stack sets it to 1 (one nginx hop)."""
+    hops = config.trust_proxy_hops()
+    if hops > 0:
+        flask_app.wsgi_app = ProxyFix(
+            flask_app.wsgi_app, x_for=hops, x_proto=hops, x_host=hops, x_port=hops)
+        return True
+    return False
+
+
+# Wrap BEFORE the limiter's key_func / _client_ip run (ProxyFix rewrites the WSGI
+# environ at the outermost layer, so remote_addr is already corrected per request).
+_install_proxy_fix(app)
+
+
 # Website logins are stored in a signed session cookie, which needs a secret key.
 # Prefer an explicit SECRET_KEY / FLASK_SECRET_KEY from the environment; otherwise
 # (dev only) generate one once and persist it to a git-ignored file so existing
@@ -196,6 +218,10 @@ limiter = Limiter(
     storage_uri=config.ratelimit_storage_uri(),
     enabled=config.ratelimit_enabled(),
     headers_enabled=True,
+    # If the shared store (redis) hiccups, ALLOW the request rather than 500 it — a
+    # rate-limit backend blip must never take auth/run endpoints down (availability
+    # over strict limiting; same fail-open stance as the gateway RPM below).
+    swallow_errors=True,
 )
 
 # VERBATIM Chinese refusal reused for the 429 (matches the platform-breaker copy).
@@ -212,32 +238,25 @@ def _too_many_requests(e):
 # ---------------------------------------------------------------------------
 # Phase 8 — per-key gateway requests-per-minute cap. flask-limiter (above) covers
 # auth + run-starts; the gateway needs a PER-KEY rate that honours each account's
-# accounts.rpm_limit (default config.DEFAULT_KEY_RPM). We keep a tiny in-process
-# sliding-window counter — a deque of recent hit timestamps per key — which is
-# enough for a single process / dev. A multi-worker deploy would move this to the
-# shared limiter storage (redis), but this keeps the gateway path self-contained.
+# accounts.rpm_limit (default config.DEFAULT_KEY_RPM). It rides the SAME storage as
+# flask-limiter (config.ratelimit_storage_uri()) via the `limits` lib: a moving 60s
+# window that is in-process for dev (memory://) but GLOBAL across gunicorn workers
+# when pointed at redis — so a 4-worker deploy enforces the per-key RPM once, not 4×.
 # ---------------------------------------------------------------------------
-_RPM_HITS = {}                       # key -> deque[float] of recent request times
-_RPM_LOCK = threading.Lock()
+_RPM_STORAGE = storage_from_string(config.ratelimit_storage_uri())
+_RPM_STRATEGY = MovingWindowRateLimiter(_RPM_STORAGE)
 
 
 def _rpm_check(key, limit):
     """Record a request for `key` and return True while it stays within `limit`
     requests in the trailing 60 seconds, else False (over cap). A limit of 0/None
-    disables the cap. Thread-safe — the gateway is hit from many request threads."""
+    disables the cap. Fail-open: if the shared store hiccups, ALLOW the request — a
+    rate-limit backend blip must never 500 the gateway."""
     if not limit or limit <= 0:
         return True
-    now = time.monotonic()
-    cutoff = now - 60.0
-    with _RPM_LOCK:
-        hits = _RPM_HITS.get(key)
-        if hits is None:
-            hits = _RPM_HITS[key] = deque()
-        while hits and hits[0] < cutoff:
-            hits.popleft()
-        if len(hits) >= limit:
-            return False
-        hits.append(now)
+    try:
+        return _RPM_STRATEGY.hit(RateLimitItemPerMinute(int(limit)), "gw", str(key))
+    except Exception:
         return True
 
 
@@ -4122,7 +4141,7 @@ def brain_import_estimate():
     total, items = 0.0, []
     for name, text in parsed:
         in_tok = max(1, len(text) // 4)
-        c = config.cost_cny(config.HAIKU, in_tok, IMPORT_EST_OUTPUT_TOKENS)
+        c = config.cost_cny(config.extraction_model(), in_tok, IMPORT_EST_OUTPUT_TOKENS)
         total += c
         items.append({"name": name, "chars": len(text), "cost": round(c, 4)})
     out = {"file_count": len(parsed),
@@ -4488,12 +4507,14 @@ def _fuse_answers(prompt, answers, fuser):
         return {"text": a["text"], "by": a["model"], "by_label": a["label"],
                 "note": "Only one model returned an answer, so it's shown as-is."}
 
-    # Choose the fuser. An explicit, live choice wins; "auto" prefers Opus (its
-    # key is verified at startup) and falls back to the first model that answered.
+    # Choose the fuser. An explicit, live choice wins; "auto" prefers the configured
+    # fuser fallback (Opus, or the domestic model under TEAM_MODEL_PRESET) when its
+    # key is present, and falls back to the first model that answered.
+    fallback = config.fuser_fallback_model()
     if fuser and fuser != "auto" and config.get_model(fuser) and providers.model_available(fuser):
         fuser_model = fuser
-    elif providers.model_available(config.OPUS):
-        fuser_model = config.OPUS
+    elif providers.model_available(fallback):
+        fuser_model = fallback
     else:
         fuser_model = ok[0]["model"]
     fuser_label = (config.get_model(fuser_model) or {}).get("label", fuser_model)
@@ -4559,11 +4580,17 @@ if __name__ == "__main__":
     print(f"  Open this in your browser:  http://localhost:{port}")
     print("  Press CONTROL-C here to stop it.")
     print("=" * 60)
-    # Quick, free auth check so a bad key is caught NOW, not mid-run.
-    ok, msg = _check_api_key()
-    print(("  [OK]  " if ok else "  [!!]  ") + msg)
-    if not ok:
-        print("  The server will still start, but runs will fail until the key is fixed.")
+    # Quick, free auth check so a bad key is caught NOW, not mid-run. Skipped when
+    # the team runs on a domestic model (TEAM_MODEL_PRESET=domestic) — Anthropic
+    # isn't used then, so a missing/unreachable key is expected, not an error.
+    if config.team_model_preset() == "domestic":
+        print(f"  [i]  Team runs on the domestic preset ({config.DOMESTIC_MODEL}) — "
+              "ANTHROPIC_API_KEY not required. Set DEEPSEEK_API_KEY for the team to run.")
+    else:
+        ok, msg = _check_api_key()
+        print(("  [OK]  " if ok else "  [!!]  ") + msg)
+        if not ok:
+            print("  The server will still start, but runs will fail until the key is fixed.")
     # Bring the 定时任务 scheduler up so saved weekly/monthly jobs fire on cadence —
     # UNLESS it runs as its own process/container (RUN_SCHEDULER=0 in production,
     # where scheduler.py owns the cron loop and the Postgres advisory lock).

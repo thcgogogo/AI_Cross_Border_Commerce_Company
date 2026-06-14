@@ -21,6 +21,15 @@ OPUS = "claude-opus-4-7"
 SONNET = "claude-sonnet-4-6"
 HAIKU = "claude-haiku-4-5"
 
+# The domestic (mainland-China) model the whole team runs on when the
+# TEAM_MODEL_PRESET=domestic switch is set (see team_model_preset() and
+# effective_model() below). Claude is not reliably reachable from the mainland
+# and a foreign LLM raises 生成式AI 算法备案 compliance issues, so a public
+# Chinese deployment runs on DeepSeek instead. DeepSeek V4 Flash is the value
+# pick: cheapest, fast, 1M context, 384K max output, thinking on by default.
+# Elevate the planner/writer to "deepseek-v4-pro" per-agent if you want more.
+DOMESTIC_MODEL = "deepseek-v4-flash"
+
 # Which models support "adaptive thinking" + the "effort" dial.
 # The LLM wrapper uses this so switching a worker to HAIKU never crashes. These are
 # Anthropic-only features, so the set lists only Claude model ids — other providers
@@ -330,6 +339,21 @@ def ratelimit_enabled():
     return val.lower() in _TRUE
 
 
+def trust_proxy_hops():
+    """How many trusted reverse-proxy hops sit in front of the app (env TRUST_PROXY).
+
+    0 (default) = the app is reached directly, so X-Forwarded-For is NOT trusted —
+    a client can't spoof its IP to dodge per-IP rate limits. Set it to the real
+    number of proxies that prepend X-Forwarded-For (the compose stack = 1 nginx hop;
+    a cloud LB → nginx = 2). When > 0, app.py wraps the WSGI app in werkzeug's
+    ProxyFix so request.remote_addr (and the limiter key) resolve the real client."""
+    raw = _env("TRUST_PROXY")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 # Default gateway requests-per-minute for a key with no explicit accounts.rpm_limit.
 DEFAULT_KEY_RPM = 60
 
@@ -629,13 +653,16 @@ MODEL_CHOICES = [
      "input_per_mtok": 0.30, "output_per_mtok": 0.50, "context": "131K tokens", "approx": True,
      "blurb": "A lightweight, economical Grok for everyday tasks."},
 
-    # ---- DeepSeek ----
-    {"id": "deepseek-chat", "label": "DeepSeek V3", "provider": "deepseek", "tier": "General",
-     "input_per_mtok": 0.27, "output_per_mtok": 1.10, "context": "128K tokens", "approx": True,
-     "blurb": "An open, very low-cost general model with strong coding ability."},
-    {"id": "deepseek-reasoner", "label": "DeepSeek R1", "provider": "deepseek", "tier": "Reasoning",
-     "input_per_mtok": 0.55, "output_per_mtok": 2.19, "context": "128K tokens", "approx": True,
-     "blurb": "DeepSeek's reasoning model — chain-of-thought for hard problems, cheaply."},
+    # ---- DeepSeek (V4 — launched 2026-04-24; the legacy deepseek-chat /
+    #      deepseek-reasoner ids retire 2026-07-24. Both V4 models do thinking,
+    #      JSON, and tool calls; 1M context, 384K max output.) ----
+    {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash", "provider": "deepseek", "tier": "General",
+     "input_per_mtok": 0.14, "output_per_mtok": 0.28, "context": "1M tokens", "approx": True,
+     "blurb": "DeepSeek's fast, very low-cost flagship — the value pick for general and "
+              "high-volume work. 1M context, huge 384K output, thinking on by default."},
+    {"id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro", "provider": "deepseek", "tier": "Reasoning",
+     "input_per_mtok": 0.435, "output_per_mtok": 0.87, "context": "1M tokens", "approx": True,
+     "blurb": "DeepSeek's most capable model — for hard reasoning, coding, and agent workflows."},
 
     # ---- Alibaba Qwen ----
     {"id": "qwen-max", "label": "Qwen Max", "provider": "qwen", "tier": "Flagship",
@@ -1028,9 +1055,55 @@ def clear_model_override(agent_id):
     MODEL_OVERRIDES.pop(agent_id, None)
 
 
+def team_model_preset():
+    """The team's model preset: "domestic" (run on DOMESTIC_MODEL) or "" (off).
+
+    Set TEAM_MODEL_PRESET=domestic in .env for a mainland-China deployment so the
+    whole team — agents AND the internal utility calls (metric extraction, the
+    verification audit, the Fusion fuser) — runs on a domestic model that needs no
+    Anthropic key. Off by default, so local dev stays on Claude unchanged."""
+    return _env("TEAM_MODEL_PRESET").lower()
+
+
+def _preset_default(env_name, claude_default):
+    """Resolve a utility-call model: explicit env override wins, else the domestic
+    model when the domestic preset is on, else the given Claude default."""
+    override = _env(env_name)
+    if override:
+        return override
+    if team_model_preset() == "domestic":
+        return DOMESTIC_MODEL
+    return claude_default
+
+
+def extraction_model():
+    """Model for the cheap metric-extraction call (the company brain / Moat-1).
+    EXTRACTION_MODEL env wins; else domestic when the preset is on; else HAIKU."""
+    return _preset_default("EXTRACTION_MODEL", HAIKU)
+
+
+def audit_model():
+    """Model for the verification auto-audit (the trust layer).
+    AUDIT_MODEL env wins; else domestic when the preset is on; else HAIKU."""
+    return _preset_default("AUDIT_MODEL", HAIKU)
+
+
+def fuser_fallback_model():
+    """Model the Fusion feature falls back to as the fuser.
+    FUSER_MODEL env wins; else domestic when the preset is on; else OPUS."""
+    return _preset_default("FUSER_MODEL", OPUS)
+
+
 def effective_model(agent_id):
-    """The model an agent will actually run on (UI override, else its default)."""
+    """The model an agent will actually run on.
+
+    Precedence: a per-agent UI override (most specific intent) wins; else, under the
+    domestic preset, DOMESTIC_MODEL; else the agent's static default. A fresh prod
+    volume has no overrides, so TEAM_MODEL_PRESET=domestic alone runs the whole team
+    on the domestic model."""
     if agent_id in MODEL_OVERRIDES:
         return MODEL_OVERRIDES[agent_id]
+    if team_model_preset() == "domestic":
+        return DOMESTIC_MODEL
     a = get_agent(agent_id)
     return (a or {}).get("model", OPUS)

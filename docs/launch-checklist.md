@@ -133,6 +133,29 @@ in production if a known secret value ever appears in a served frontend file.
 
 ## 8. Optional extras
 
+- **Run the team on a domestic model (mainland China)** — Claude isn't reliably
+  reachable from the mainland, and a foreign LLM raises 生成式AI 算法备案 compliance
+  issues for a public Chinese service. Put two lines in `.env`:
+
+  | Put in `.env` | What it does |
+  |---|---|
+  | `TEAM_MODEL_PRESET=domestic` | Flips the WHOLE team — every agent **and** the internal calls (metric extraction, the verification audit, the Fusion fuser) — to **DeepSeek V4** (`deepseek-v4-flash`). No Anthropic key needed. |
+  | `DEEPSEEK_API_KEY=sk-…` | Your DeepSeek key (https://platform.deepseek.com) — the only model key the team then needs. |
+
+  **Check:** restart, and the terminal prints `Team runs on the domestic preset
+  (deepseek-v4-flash) — ANTHROPIC_API_KEY not required`. Generate a report; it runs
+  on DeepSeek, metrics still land in 企业大脑, and the 数据来源与核验 audit still runs.
+  - On a **reused** data volume, clear any stale Claude entries in
+    `memory_store/model_overrides.json` (or reassign each agent in 内部工具 →
+    团队与模型) — a saved per-agent choice **wins** over the preset. A fresh volume
+    has none, so the preset alone governs.
+  - Want more quality on planning/writing? Reassign the 首席执行官 and 报告撰写人 to
+    `deepseek-v4-pro` in 团队与模型 (a one-click per-agent override).
+  - DeepSeek can't make real `.pptx/.pdf` files or do live web search (Claude-only):
+    the 媒体制作人 writes Markdown briefs instead — fine for the weekly-report product.
+  - Prefer Qwen? Set `DASHSCOPE_API_KEY` and reassign agents to `qwen-max`/`qwen-plus`;
+    for a cn-region key, edit the Qwen `base_url` in `agent_team/config.py` to
+    `https://dashscope.aliyuncs.com/compatible-mode/v1`.
 - **More model providers** — add any of `OPENAI_API_KEY`, `GEMINI_API_KEY`,
   `DEEPSEEK_API_KEY`, `DASHSCOPE_API_KEY`, … (see the top of `.env.example`);
   those models light up in the catalog automatically.

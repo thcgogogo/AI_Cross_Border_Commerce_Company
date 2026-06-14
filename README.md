@@ -126,12 +126,36 @@ Set the production env (`SECRET_KEY`, `DATABASE_URL`, `ADMIN_EMAILS`, `SMTP_*`,
 `scripts/backup.sh`. The full runbook — deploy, backup/restore, monitoring, and the
 per-phase ops notes — is **[docs/ops.md](docs/ops.md)**.
 
+The compose stack runs **4 gunicorn workers behind nginx, plus a redis service** so
+every rate limit (per-IP auth, per-account runs, per-key API) is counted **once
+globally** instead of ~4× per worker. Set **`TRUST_PROXY`** to the number of proxy
+hops in front (compose nginx = `1`) so per-IP limits and the audit log see the real
+client IP, not the proxy's — both are wired by default in `docker-compose.yml`.
+Leave it unset when the app is directly exposed (see [docs/ops.md](docs/ops.md) §7.6).
+
+---
+
+## Running in mainland China (DeepSeek — no Anthropic key)
+
+The AI team defaults to Claude. For a mainland deployment — where `api.anthropic.com`
+isn't reliably reachable and a foreign LLM raises 生成式AI 算法备案 compliance issues —
+flip the **whole team and its internal calls onto DeepSeek V4** with two lines in `.env`:
+
+```bash
+TEAM_MODEL_PRESET=domestic     # every agent + metric extraction + the audit → deepseek-v4-flash
+DEEPSEEK_API_KEY=sk-...        # the only model key you then need
+```
+
+No `ANTHROPIC_API_KEY` is required — the model router builds its Claude client lazily
+and never touches it. Want Qwen instead, or `deepseek-v4-pro` for the report writer?
+See [docs/launch-checklist.md](docs/launch-checklist.md) §8.
+
 ---
 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q     # 188 passed — acceptance tests for every phase
+.venv/bin/python -m pytest -q     # 209 passed — acceptance tests for every phase
 ```
 
 Each phase ships its own acceptance suite (`tests/test_phase8_security.py`,
@@ -162,6 +186,7 @@ provider.
 |---|---|
 | `No ANTHROPIC_API_KEY found` | Create `.env` from `.env.example` and paste your real key. |
 | `401` invalid key | An old key/redirect in your shell can shadow `.env`: `unset ANTHROPIC_API_KEY`, and note the app auto-ignores a non-Anthropic `ANTHROPIC_BASE_URL`. No quotes/spaces around the key. |
+| Run needs `DEEPSEEK_API_KEY` | You set `TEAM_MODEL_PRESET=domestic` (China mode) but no DeepSeek key — add `DEEPSEEK_API_KEY` to `.env`. In this mode no Anthropic key is needed. |
 | Signup asks for an SMS code | In local dev the code prints in the Terminal (console SMS provider). Set `PHONE_VERIFICATION=0` to disable entirely. |
 | Run "stopped early" | A founder ¥ budget (成本控制台) or the free trial's internal cost cap cut it off — raise the budget, or upgrade the account's plan. |
 | 「报告额度已用完」 | The plan quota (or the free trial's 2 reports) is spent — upgrade in 账户与套餐 or buy a 单次报告 (¥29). |

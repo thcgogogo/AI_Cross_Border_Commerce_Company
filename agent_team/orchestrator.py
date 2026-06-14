@@ -592,7 +592,7 @@ class Orchestrator:
         try:
             unverified = verification.audit_report(
                 body, self._known_numbers(), self.llm,
-                model=config.HAIKU, budget=config.AGENT_TEAM_BUDGET)
+                budget=config.AGENT_TEAM_BUDGET)  # model: audit_model() (HAIKU, or domestic)
             warning = verification.build_audit_warning(unverified)
             if unverified:
                 self.memory.log(

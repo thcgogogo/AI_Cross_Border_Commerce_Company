@@ -175,7 +175,7 @@ def audit_report(report_text, known_numbers, llm, model=None, budget=None):
     the auditor can never fail, block, or truncate a run."""
     if not (report_text and str(report_text).strip() and llm):
         return []
-    model = model or config.HAIKU
+    model = model or config.audit_model()
     budget = budget or config.AGENT_TEAM_BUDGET
 
     known_lines = "\n".join(f"- {k}" for k in _known_list(known_numbers)) or "（无）"

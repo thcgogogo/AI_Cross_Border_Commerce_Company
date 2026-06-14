@@ -207,25 +207,40 @@ class ModelRouter:
     def __init__(self, api_key=None, token_manager=None, cost_listener=None):
         self.token_manager = token_manager
         self.cost_listener = cost_listener  # callback(model, input_tokens, output_tokens)
-        # The Anthropic client is always available (the app validates its key on
-        # startup). Non-Anthropic providers are reached lazily via _openai_chat.
-        self._anthropic = LLMClient(api_key=api_key, token_manager=token_manager,
-                                    cost_listener=cost_listener)
+        # The Anthropic client is built LAZILY — only when a call actually routes to
+        # an Anthropic model. This lets a fully-domestic team (TEAM_MODEL_PRESET=
+        # domestic, every model on DeepSeek/Qwen) run with NO ANTHROPIC_API_KEY: the
+        # router constructs fine and LLMClient (which requires the key) is never
+        # built. We stash the constructor args and memoize the client on first use.
+        self._api_key = api_key
+        self._anthropic_obj = None
         # Mirrors LLMClient.last_stop_reason ("max_tokens" == the answer was cut
         # off at the output ceiling). None on the OpenAI-compatible path, which
         # doesn't surface a finish reason.
         self.last_stop_reason = None
 
+    def _anthropic_client(self):
+        """The native Anthropic LLMClient, built on first use and reused thereafter.
+
+        Raises LLMError (no ANTHROPIC_API_KEY) only if something actually routes to
+        an Anthropic model without a key — never just from constructing the router."""
+        if self._anthropic_obj is None:
+            self._anthropic_obj = LLMClient(
+                api_key=self._api_key, token_manager=self.token_manager,
+                cost_listener=self.cost_listener)
+        return self._anthropic_obj
+
     # -- mirror LLMClient.complete -----------------------------------------
     def complete(self, system_prompt, user_content, model=config.OPUS, effort="high",
                  max_tokens=8000, max_retries=3, budget=None, web_search=False):
         if config.provider_for(model) == "anthropic":
-            text = self._anthropic.complete(
+            anthropic_client = self._anthropic_client()
+            text = anthropic_client.complete(
                 system_prompt, user_content, model=model, effort=effort,
                 max_tokens=max_tokens, max_retries=max_retries, budget=budget,
                 web_search=web_search,
             )
-            self.last_stop_reason = self._anthropic.last_stop_reason
+            self.last_stop_reason = anthropic_client.last_stop_reason
             return text
         # Non-Anthropic path: a single OpenAI-compatible chat call.
         self.last_stop_reason = None
@@ -247,12 +262,13 @@ class ModelRouter:
                             max_retries=3, budget=None, max_iterations=12,
                             web_search=False):
         if config.provider_for(model) == "anthropic":
-            text = self._anthropic.complete_with_tools(
+            anthropic_client = self._anthropic_client()
+            text = anthropic_client.complete_with_tools(
                 system_prompt, user_content, tool_specs, tool_executor, model=model,
                 effort=effort, max_tokens=max_tokens, max_retries=max_retries,
                 budget=budget, max_iterations=max_iterations, web_search=web_search,
             )
-            self.last_stop_reason = self._anthropic.last_stop_reason
+            self.last_stop_reason = anthropic_client.last_stop_reason
             return text
         # File-generation tools and web search are Anthropic-only features. Rather
         # than fake them, run a normal completion on the chosen model and add an

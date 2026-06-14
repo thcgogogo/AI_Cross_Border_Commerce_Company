@@ -271,7 +271,10 @@ def extract_metrics_to_db(analysis_output, company_id, run_id, llm=None, log=Non
             raw = llm.complete(
                 system_prompt=METRIC_EXTRACTION_SYSTEM_PROMPT,
                 user_content=f"ANALYSIS:\n{analysis_output}",
-                model=config.HAIKU,      # cheap, fast, always available
+                # HAIKU by default; the domestic model under TEAM_MODEL_PRESET=domestic
+                # (this is not an agent, so the founder UI can't reassign it — hence the
+                # dedicated EXTRACTION_MODEL knob keeps the company brain off Anthropic).
+                model=config.extraction_model(),
                 effort="low",            # ignored for Haiku, harmless if not
                 max_tokens=METRIC_EXTRACTION_MAX_TOKENS,
                 budget=config.AGENT_TEAM_BUDGET,

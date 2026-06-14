@@ -24,6 +24,19 @@ services:
       timeout: 5s
       retries: 20
 
+  redis:
+    # Shared backend for rate-limit counters so the per-IP (flask-limiter) and
+    # per-key gateway RPM limits are enforced ONCE across all gunicorn workers,
+    # not per-worker (~4× leak). Holds only ephemeral counters — no user data — so
+    # no volume; losing it just resets limits.
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   app:
     build: .
     restart: unless-stopped
@@ -39,8 +52,15 @@ services:
       # gunicorn never hits app.py's __main__, so the in-process scheduler is off
       # structurally — this is belt-and-suspenders for the `python app.py` path.
       RUN_SCHEDULER: "0"
+      # Multi-worker correctness: share rate-limit counters across the 4 gunicorn
+      # workers, and trust exactly ONE proxy hop (nginx) so per-IP limits + the audit
+      # log see the real client ip, not nginx's. (See docs/ops.md "Scaling".)
+      RATELIMIT_STORAGE_URI: redis://redis:6379
+      TRUST_PROXY: "1"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       - appdata:/app/data           # Postgres in prod, but logos/PDFs live here
@@ -65,9 +85,15 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-company}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-company}
       RUN_MIGRATIONS: "0"           # never race the app's `alembic upgrade head`
+      # Uniform with `app`: the scheduler imports the app module (no HTTP / no rate
+      # limiting of its own), so these are harmless but keep the two in lockstep.
+      RATELIMIT_STORAGE_URI: redis://redis:6379
+      TRUST_PROXY: "1"
     command: ["python", "scheduler.py"]
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       app:
         condition: service_started
