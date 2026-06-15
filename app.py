@@ -14,6 +14,7 @@ What it does:
 """
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -688,6 +689,99 @@ def agents():
     to label the live feed — but the per-agent model ids are machinery and are
     stripped for everyone but the founder (Phase 8 A2 follow-up)."""
     return jsonify(_agents_payload(admin=_is_admin(_current_customer())))
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 — the agent CATALOG (the desktop "agent supermarket"). A founder
+# publishes a config.AGENTS dict as a RUNNER-VISIBLE manifest; an account installs
+# agents; a paired device pulls the manifests of what its account installed. The
+# manifest carries BEHAVIOR only — model id, provider routing and per-token ¥ COGS
+# resolve server-side and are NEVER serialized to a device (so this works on a
+# fully-domestic China cloud with no Anthropic key).
+# ---------------------------------------------------------------------------
+# The ONLY config.AGENTS keys ever serialized into a device manifest (the device is
+# a non-admin caller, like _agents_payload's non-admin branch). Built from a WHITELIST
+# — never a dict dump, which would leak `model` and any ¥ rates riding on the dict.
+_RUNNER_VISIBLE_AGENT_KEYS = (
+    "name", "name_cn", "title", "reports_to", "plan_role",
+    "system_prompt", "tools", "effort", "wants_file_types",
+    "deliverable_kinds", "display",
+)
+
+
+def _agent_manifest(agent):
+    """The RUNNER-VISIBLE manifest for one config.AGENTS dict — a whitelist, never a
+    dump. NEVER calls effective_model()/provider_for() and NEVER emits model/provider/¥
+    (works on a domestic cloud with no model keys). Missing keys default gracefully."""
+    m = {"agent_id": agent["id"]}
+    for k in _RUNNER_VISIBLE_AGENT_KEYS:
+        if k == "plan_role":
+            m[k] = agent.get("plan_role") or ("ceo" if agent.get("reports_to") is None else "specialist")
+        elif k in ("tools", "wants_file_types", "deliverable_kinds"):
+            m[k] = list(agent.get(k) or [])
+        elif k == "display":
+            m[k] = dict(agent.get(k) or {})
+        else:
+            m[k] = agent.get(k, "")
+    return m
+
+
+def _agent_content_hash(manifest):
+    """sha256 over canonical JSON of the BEHAVIOR manifest (no manifest_version /
+    content_hash keys), so a no-op republish yields the same hash and never bumps."""
+    canon = json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+@app.route("/api/agents/<agent_id>/publish", methods=["POST"])
+def agent_publish(agent_id):
+    """Founder-only: snapshot a config.AGENTS dict into the catalog (versioned by
+    content_hash — a no-op republish returns changed:false without bumping)."""
+    if not _is_admin(_current_customer()):
+        return jsonify({"error": "仅限管理员操作。"}), 403
+    agent = config.get_agent(agent_id)
+    if not agent:
+        return jsonify({"error": "未知的智能体。"}), 404
+    manifest = _agent_manifest(agent)
+    content_hash = _agent_content_hash(manifest)
+    version, changed = metrics_store.publish_agent(
+        agent_id, agent.get("name_cn"), manifest, content_hash)
+    return jsonify({"agent_id": agent_id, "version": version,
+                    "content_hash": content_hash, "changed": changed})
+
+
+@app.route("/api/agents/<agent_id>/install", methods=["POST"])
+def agent_install(agent_id):
+    """Session-auth: the account installs/uninstalls a catalog agent. active:false is
+    the soft uninstall (the row stays; the catalog query filters on active)."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not config.get_agent(agent_id):
+        return jsonify({"error": "未知的智能体。"}), 404
+    data = request.get_json(silent=True) or {}
+    active = data.get("active", True)
+    pinned = data.get("pinned_version")
+    if pinned is not None:
+        try:
+            pinned = int(pinned)
+        except (TypeError, ValueError):
+            return jsonify({"error": "pinned_version 必须是整数。"}), 400
+    metrics_store.set_agent_install(customer["id"], agent_id, active=bool(active),
+                                    pinned_version=pinned)
+    return jsonify({"installs": metrics_store.list_agent_installs(customer["id"])})
+
+
+@app.route("/api/agents/catalog", methods=["GET"])
+def agents_catalog():
+    """Device-auth: the runner-visible manifests of the agents THIS device's account
+    installed. Reads stored manifest_json verbatim — it NEVER resolves a model /
+    provider / ¥ (the whitelist was applied at publish time), so it serves on a
+    domestic cloud with no Anthropic key."""
+    dev = _current_device()
+    if not dev:
+        return jsonify({"error": "设备未授权。"}), 401
+    return jsonify({"agents": metrics_store.catalog_for_account(dev["account_id"])})
 
 
 @app.route("/api/models")

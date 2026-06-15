@@ -72,6 +72,8 @@ from .models import (
     SUB_STATUSES,
     VOTE_VALUES,
     Account,
+    AgentCatalog,
+    AgentInstall,
     AuditLog,
     ChangelogSeen,
     Company,
@@ -96,6 +98,100 @@ from .models import (
     SupportRequest,
 )
 from .token_manager import BudgetExceededError
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 — the agent catalog (deployable-agent marketplace for the desktop daemon).
+# Pure DB; carries only the RUNNER-VISIBLE manifest (no model id / provider / ¥ — the
+# route layer builds the whitelist). publish_agent versions by content_hash so a
+# no-op republish never inflates the version.
+# ---------------------------------------------------------------------------
+def latest_agent_catalog(agent_id, published_only=True):
+    """The newest catalog row for `agent_id` as a plain dict, or None."""
+    with db.session_scope() as s:
+        q = s.query(AgentCatalog).filter(AgentCatalog.agent_id == agent_id)
+        if published_only:
+            q = q.filter(AgentCatalog.published.is_(True))
+        row = q.order_by(AgentCatalog.version.desc()).first()
+        if not row:
+            return None
+        return {"agent_id": row.agent_id, "version": row.version,
+                "content_hash": row.content_hash, "manifest_json": row.manifest_json}
+
+
+def publish_agent(agent_id, name_cn, manifest, content_hash):
+    """Snapshot a runner-visible `manifest` dict into agent_catalog. Idempotent by
+    content_hash: if the latest row already has this hash, return (its_version, False)
+    without inserting; otherwise insert version = max+1 (stamping manifest_version +
+    content_hash inline) and return (version, True)."""
+    with db.session_scope() as s:
+        latest = (s.query(AgentCatalog).filter(AgentCatalog.agent_id == agent_id)
+                  .order_by(AgentCatalog.version.desc()).first())
+        if latest and latest.content_hash == content_hash:
+            return latest.version, False
+        version = (latest.version if latest else 0) + 1
+        stamped = dict(manifest)
+        stamped["manifest_version"] = version
+        stamped["content_hash"] = content_hash
+        s.add(AgentCatalog(
+            agent_id=agent_id, version=version, name_cn=name_cn,
+            manifest_json=json.dumps(stamped, ensure_ascii=False),
+            content_hash=content_hash, published=True))
+        return version, True
+
+
+def set_agent_install(account_id, agent_id, active=True, pinned_version=None):
+    """Upsert one account's install of `agent_id` (insert, else update active/pin).
+    active=False is the soft uninstall — the row stays for history; the catalog query
+    filters on active."""
+    with db.session_scope() as s:
+        row = (s.query(AgentInstall)
+               .filter(AgentInstall.account_id == account_id,
+                       AgentInstall.agent_id == agent_id).one_or_none())
+        if row is None:
+            s.add(AgentInstall(account_id=account_id, agent_id=agent_id,
+                               active=bool(active), pinned_version=pinned_version))
+        else:
+            row.active = bool(active)
+            row.pinned_version = pinned_version
+
+
+def list_agent_installs(account_id):
+    """This account's installs as plain dicts (newest first)."""
+    with db.session_scope() as s:
+        rows = (s.query(AgentInstall).filter(AgentInstall.account_id == account_id)
+                .order_by(AgentInstall.created_at.desc()).all())
+        return [{"agent_id": r.agent_id, "active": bool(r.active),
+                 "pinned_version": r.pinned_version} for r in rows]
+
+
+def catalog_for_account(account_id):
+    """The resolved runner-visible catalog for a device of this account: for each
+    ACTIVE install, the pinned version (if set) else the latest PUBLISHED version.
+    Installs with no published catalog row are skipped. NEVER resolves a model — it
+    only reads stored manifest_json (whitelisted at publish time)."""
+    out = []
+    with db.session_scope() as s:
+        installs = (s.query(AgentInstall)
+                    .filter(AgentInstall.account_id == account_id,
+                            AgentInstall.active.is_(True)).all())
+        for inst in installs:
+            q = s.query(AgentCatalog).filter(
+                AgentCatalog.agent_id == inst.agent_id,
+                AgentCatalog.published.is_(True))
+            if inst.pinned_version is not None:
+                q = q.filter(AgentCatalog.version == inst.pinned_version)
+            row = q.order_by(AgentCatalog.version.desc()).first()
+            if not row:
+                continue
+            try:
+                manifest = json.loads(row.manifest_json)
+            except Exception:
+                continue
+            out.append({"agent_id": row.agent_id, "version": row.version,
+                        "content_hash": row.content_hash, "manifest": manifest})
+    return out
+
 
 # The Phase 5 on-disk layout, anchored at the project root (same root db.py uses
 # for data/company_brain.db). Kept here so the scheduler + orchestrator wiring
