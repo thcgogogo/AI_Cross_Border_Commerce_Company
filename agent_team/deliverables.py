@@ -141,6 +141,50 @@ TOOL_SPECS = [
             "required": ["svg"],
         },
     },
+    {
+        "name": "create_excel_workbook",
+        "description": (
+            "Create a real Excel (.xlsx) workbook and save it as a downloadable file for "
+            "the user. Use this whenever the user wants a spreadsheet, data table, data "
+            "export, or any tabular results they can open in Excel / Google Sheets and keep "
+            "working with. Provide one or more sheets, each with a header row and data rows. "
+            "Put numeric cells in as real numbers (not strings) so totals and formulas work."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string",
+                             "description": "Base file name, no extension, e.g. 'sales_q4'."},
+                "title": {"type": "string",
+                          "description": "Workbook title; also used for the file name when "
+                                         "'filename' is omitted."},
+                "sheets": {
+                    "type": "array",
+                    "description": "One or more worksheets, in tab order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Sheet / tab name."},
+                            "headers": {"type": "array", "items": {"type": "string"},
+                                        "description": "Column headers for the first row."},
+                            "rows": {
+                                "type": "array",
+                                "description": "Data rows; each row is an array of cell values "
+                                               "aligned to the headers. Use numbers (not strings) "
+                                               "for numeric cells so Excel can sum them.",
+                                "items": {
+                                    "type": "array",
+                                    "items": {"type": ["string", "number", "boolean", "null"]},
+                                },
+                            },
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            "required": ["title", "sheets"],
+        },
+    },
 ]
 
 # name -> (file extension, human kind, builder function)
@@ -286,11 +330,62 @@ def _build_svg(data, path):
         f.write(svg)
 
 
+def _build_xlsx(data, path):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    wb = Workbook()
+    wb.remove(wb.active)  # drop the default empty sheet; we add our own below
+
+    sheets = data.get("sheets") or []
+    if not sheets:  # an empty workbook is invalid — always leave one usable sheet
+        sheets = [{"name": data.get("title") or "Sheet1"}]
+
+    used = set()
+    for i, sheet in enumerate(sheets):
+        ws = wb.create_sheet(title=_safe_sheet_title(sheet.get("name") or f"Sheet{i + 1}", used))
+        headers = [str(h) for h in (sheet.get("headers") or [])]
+        if headers:
+            ws.append(headers)
+            for cell in ws[1]:  # make the header row stand out
+                cell.font = Font(bold=True)
+        for row in (sheet.get("rows") or []):
+            ws.append([_xlsx_cell(v) for v in (row or [])])
+
+    wb.save(path)
+
+
+# Excel forbids these characters in a sheet/tab name, caps it at 31 chars, and
+# requires names to be unique within a workbook — sanitize so a model-supplied
+# name can never make openpyxl raise.
+_XLSX_BAD_TITLE = {ord(c): "_" for c in "[]:*?/\\"}
+
+
+def _safe_sheet_title(name, used):
+    title = (str(name or "").translate(_XLSX_BAD_TITLE).strip() or "Sheet")[:31]
+    base, n = title, 2
+    while title.lower() in used:
+        suffix = f"-{n}"
+        title = base[:31 - len(suffix)] + suffix
+        n += 1
+    used.add(title.lower())
+    return title
+
+
+def _xlsx_cell(value):
+    """Keep numbers/bools numeric so Excel can sum them; stringify anything else
+    (dicts/lists/etc.) so openpyxl never rejects a cell value."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 _BUILDERS = {
     "create_slide_deck": ("pptx", "slide deck", _build_pptx),
     "create_pdf_document": ("pdf", "PDF document", _build_pdf),
     "create_word_document": ("docx", "Word document", _build_docx),
     "create_svg_image": ("svg", "SVG image", _build_svg),
+    "create_excel_workbook": ("xlsx", "Excel workbook", _build_xlsx),
 }
 
 

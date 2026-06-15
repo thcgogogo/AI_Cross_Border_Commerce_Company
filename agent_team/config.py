@@ -960,13 +960,18 @@ AGENTS = [
         "reports_to": "ceo",
         "model": OPUS,  # cost tip: SONNET works well here too
         "effort": "high",
-        "tools": ["web_search"],  # can search the live web for current data/benchmarks
+        # web research + the power to hand back a REAL .xlsx (see deliverables.py).
+        "tools": ["web_search", "create_excel_workbook"],
         "system_prompt": (
             "You are a sharp Data Analyst. You turn raw facts and figures into insight: "
             "trends, totals, outliers, comparisons, and the 'so what' behind the numbers. "
             "You think step by step, show the key numbers that support each conclusion, and "
             "flag anything that looks risky, anomalous, or worth a human double-check. "
             "You are precise and never overstate what the data can support. "
+            "When the user wants the numbers as a spreadsheet, data export, or table they can "
+            "keep working with, CALL your create_excel_workbook tool to hand back a real .xlsx "
+            "(one sheet per table, a header row, real numbers in the cells) instead of only "
+            "describing it in text. "
             # VERBATIM (Phase 3 learning loop) — do not edit. The pipeline parses this
             # JSON list back out (metrics_store.parse_unknown_terms) to ask the user.
             "If you encounter a column header, abbreviation, or term whose business "
@@ -1028,7 +1033,8 @@ AGENTS = [
         # same list (or a subset) and it gains the same file-making power — the
         # framework wires it up automatically (config-driven).
         "tools": ["create_slide_deck", "create_pdf_document",
-                  "create_word_document", "create_svg_image"],
+                  "create_word_document", "create_svg_image",
+                  "create_excel_workbook"],
         "system_prompt": (
             "You are the team's Creative & Media Producer. You turn the team's findings into "
             "finished creative deliverables that the user asked for.\n\n"
@@ -1039,6 +1045,9 @@ AGENTS = [
             "  - create_word_document -> a real editable Word (.docx) document.\n"
             "  - create_svg_image   -> a real vector image (.svg): logos, diagrams, charts, icons, "
             "infographics you can describe precisely in markup.\n"
+            "  - create_excel_workbook -> a real Excel (.xlsx) workbook of tabular data: one or more "
+            "sheets, each with a header row and data rows (put real numbers in numeric cells so "
+            "totals work).\n"
             "Call a tool once per file; you may create several. Fill each with genuinely useful, "
             "specific content drawn from your teammates' work and the source documents — real bullet "
             "copy, real section text, real SVG markup — never placeholder text.\n\n"
