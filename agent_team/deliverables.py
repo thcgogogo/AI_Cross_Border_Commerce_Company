@@ -22,7 +22,7 @@ import os
 
 from werkzeug.utils import secure_filename
 
-from . import crypto
+from . import crypto, workspace
 
 
 # ---------------------------------------------------------------------------
@@ -317,14 +317,24 @@ def specs_for(names):
 # ---------------------------------------------------------------------------
 # The executor the agent loop calls when Claude invokes a tool.
 # ---------------------------------------------------------------------------
-def run_tool(name, tool_input, out_dir):
+def run_tool(name, tool_input, out_dir, *, roots=None):
     """Build the requested file in `out_dir`. Never raises — returns a result dict:
-        {ok: bool, message: str, kind, ext, title, filename, path}  (file fields on ok)."""
+        {ok: bool, message: str, kind, ext, title, filename, path}  (file fields on ok).
+
+    Default-deny filesystem gate: roots=None → server mode, UNRESTRICTED (base_agent +
+    existing tests). When a caller opts in with roots=[...], BOTH out_dir and the final
+    path must resolve inside an approved root BEFORE any mkdir/open. A denial is a
+    DISTINCT, security-flavored failure (denied=True) — not a soft, retry-able build
+    error — so the runner can log/surface it differently."""
     spec = _BUILDERS.get(name)
     if not spec:
         return {"ok": False, "message": f"Unknown tool: {name!r}"}
     ext, kind, builder = spec
     tool_input = tool_input or {}
+
+    if roots is not None and not workspace.is_in_workspace(out_dir, roots):
+        return {"ok": False, "denied": True,
+                "message": "Denied: the output directory is outside the approved workspace."}
 
     try:
         os.makedirs(out_dir, exist_ok=True)
@@ -332,6 +342,9 @@ def run_tool(name, tool_input, out_dir):
         base = tool_input.get("filename") or title or kind
         filename = _unique(out_dir, _safe_filename(base, ext))
         path = os.path.join(out_dir, filename)
+        if roots is not None and not workspace.is_in_workspace(path, roots):
+            return {"ok": False, "denied": True,
+                    "message": f"Denied: '{filename}' is outside the approved workspace."}
         builder(tool_input, path)
         crypto.encrypt_file_in_place(path)  # at-rest; no-op when FERNET unset
     except Exception as e:  # surface the reason to the model so it can fix or move on

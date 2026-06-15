@@ -13,14 +13,25 @@ generous limit and add a VISIBLE "[... truncated ...]" notice so the team
 import json
 import os
 
+from . import workspace
+
 # Cap any single document so one huge file can't blow up the context window.
 # If we cut, we always say so out loud (see _truncate).
 MAX_CHARS_PER_DOC = 60_000
 MAX_PREVIEW_ROWS = 30
 
 
-def parse_file(path):
-    """Parse one file into {name, ext, chars, text, meta}."""
+def parse_file(path, *, roots=None):
+    """Parse one file into {name, ext, chars, text, meta}.
+
+    Default-deny filesystem gate: roots=None → server mode, UNRESTRICTED (every existing
+    caller — server uploads are already written into a server-controlled dir). When a
+    caller opts in with roots=[...] (the local daemon's path-aware run), the path MUST
+    resolve inside an approved root BEFORE we open it. The WorkspaceViolation is raised
+    HERE, outside the reader try/except below, so it propagates to the caller and never
+    degrades into a soft "[Could not read…]" string."""
+    if roots is not None and not workspace.is_in_workspace(path, roots):
+        raise workspace.WorkspaceViolation(f"Denied: '{path}' is outside the approved workspace.")
     name = os.path.basename(path)
     ext = os.path.splitext(name)[1].lower().lstrip(".")
     try:

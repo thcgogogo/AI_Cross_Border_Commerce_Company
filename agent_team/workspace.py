@@ -22,7 +22,15 @@ _roots = []  # list[str]: absolute, realpath-normalized approved directories
 
 
 class WorkspaceError(Exception):
-    """Raised when a path is outside every approved root (or otherwise unsafe)."""
+    """Raised when a path is outside every approved root (or otherwise unsafe).
+
+    A SECURITY signal — deliberately NOT a subclass of the exceptions the file/
+    deliverable layers swallow, so it propagates rather than degrading to a soft
+    'could not read' string."""
+
+
+# Alias for call sites that read as a security check (parse_file / run_tool wiring).
+WorkspaceViolation = WorkspaceError
 
 
 def _norm(path):
@@ -69,12 +77,45 @@ def approved_roots():
 
 def is_within(real_path, root):
     """True iff ``real_path`` equals ``root`` or is nested under it. Uses commonpath
-    so there is no ``/a/b`` vs ``/a/bc`` prefix-string bug; returns False across
-    drives (Windows) or on malformed input."""
+    so there is no ``/a/b`` vs ``/a/bc`` prefix-string bug (NEVER use startswith here);
+    returns False across drives (Windows) or on malformed input."""
     try:
         return os.path.commonpath([root, real_path]) == root
     except ValueError:
         return False
+
+
+def normalize_roots(roots):
+    """Canonicalize approved roots to realpath'd absolute paths (None → []), dropping
+    blanks and de-duping. Cheap; safe to call per-request."""
+    out = []
+    for r in roots or []:
+        if not r:
+            continue
+        nr = _norm(r)
+        if nr not in out:
+            out.append(nr)
+    return out
+
+
+def is_in_workspace(path, roots):
+    """Pure predicate: True iff the realpath of ``path`` is inside one of the realpath'd
+    ``roots``. Empty/None roots → False (default-deny). Never raises for a normal
+    'outside' answer, and does NOT require the path to exist (containment only — so it
+    is usable for a not-yet-created write target)."""
+    norm = normalize_roots(roots)
+    if not norm or not path:
+        return False
+    real = _norm(path)
+    return any(is_within(real, root) for root in norm)
+
+
+def roots_from_env():
+    """Parse TANGENT_WORKSPACE_ROOTS (os.pathsep-separated) into a normalized allowlist.
+    Unset/blank → [] (deny-all). For the local daemon to populate from the folders the
+    user picked; the SERVER never sets this."""
+    raw = os.environ.get("TANGENT_WORKSPACE_ROOTS", "") or ""
+    return normalize_roots([p for p in raw.split(os.pathsep) if p.strip()])
 
 
 def assert_in_workspace(path, roots=None, *, require_file=True, require_exists=True):
