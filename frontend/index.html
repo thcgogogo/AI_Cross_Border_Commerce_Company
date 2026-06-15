@@ -23,6 +23,14 @@
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+  <!-- LOCAL_MODE (desktop daemon): app.py _spa_shell injects the privacy banner and
+       the per-session CSRF token here. On the cloud server these collapse to nothing
+       (banner "", token "", mode false), so this file serves identically there. -->
+  __LOCAL_BANNER__
+  <script>
+    window.__LOCAL_MODE__ = __TANGENT_LOCAL_MODE__;
+    window.__LOCAL_TOKEN__ = "__TANGENT_LOCAL_TOKEN__";
+  </script>
   <!-- =====================================================================
        SHELL (UI redesign Phase 2) — a minimal frame: top bar, <main id="view">,
        modals and the support FAB. Everything inside is rendered by the ES

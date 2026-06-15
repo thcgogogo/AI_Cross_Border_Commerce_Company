@@ -1,0 +1,35 @@
+# pyproject.toml — makes the local desktop daemon ("Tangent Agent") installable as
+# a wheel and registers the `tangent-agent` console script. The SERVER deploy still
+# installs via requirements.txt; this is the power-user / packaging path.
+#
+#   pip install -e .          # dev: editable install, then `tangent-agent`
+#   tangent-agent             # boots app.py on 127.0.0.1, tray icon, opens the SPA
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tangent-agent"
+version = "0.1.0"
+description = "Tangent AI — local desktop agent runner (runs the agent team on your own files)"
+requires-python = ">=3.10"
+dependencies = [
+    "flask",
+    "waitress",     # production WSGI server; fork-free (Windows-friendly), unlike gunicorn
+    "pystray",      # the system-tray icon
+    "pillow",       # pystray needs a PIL.Image for the tray glyph
+]
+
+# The pairing (keyring) and watched-folders (watchdog) workstreams own these; the
+# extra is declared now so `pip install .[desktop]` exists, but this workstream's
+# code never imports them at module top level.
+[project.optional-dependencies]
+desktop = ["keyring", "watchdog"]
+
+[project.scripts]
+tangent-agent = "agent_team.runner:main"
+
+[tool.setuptools]
+# v1 runs from a source checkout (app.py + frontend/ live at the repo root). Ship the
+# agent_team packages; the server still uses requirements.txt for the full app deps.
+packages = ["agent_team", "agent_team.runner"]

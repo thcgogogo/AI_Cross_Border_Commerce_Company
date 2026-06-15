@@ -120,6 +120,26 @@ if _base and "api.anthropic.com" not in _base:
     # Drop the matching proxy bearer token so only your .env key (x-api-key) is used.
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
+# ---------------------------------------------------------------------------
+# LOCAL_MODE — the desktop daemon ("Tangent Agent", agent_team/runner). When set,
+# the SAME app runs as a loopback server on the customer's own machine. Three
+# differences from the cloud server (all inert when LOCAL_MODE is off, so the
+# production server + the full test suite behave identically):
+#   1. founder machinery is fully locked (the desktop user is never an admin),
+#   2. the server-only payment/scheduler surfaces are hidden (404),
+#   3. mutating /api/* calls require a per-session CSRF/origin token, so a
+#      malicious local page can't drive the paired daemon to spend the account.
+# Read once at import; the supervisor sets the env BEFORE importing this module.
+LOCAL_MODE = os.environ.get("LOCAL_MODE", "").strip().lower() in ("1", "true", "yes")
+LOCAL_CSRF_TOKEN = os.environ.get("LOCAL_CSRF_TOKEN", "").strip() or None
+# The privacy posture shown in the desktop UI. Plain and non-overclaiming: file
+# CONTENT still transits to the model via the cloud proxy (same as the web product).
+LOCAL_PRIVACY_NOTICE = (
+    "Tangent Agent 在你的电脑上运行，本地读取你选择的文件。为了分析，所选文件的内容会"
+    "（经加密传输）发送到我们的 AI 服务与模型供应商——与网页版完全相同。文件不会被上传或"
+    "保存到我们的服务器；只有一份运行摘要（不含文件内容）会同步到你的账户。如需完全离线、"
+    "数据不出本机的分析，请启用「本地模型」模式（质量较低、无联网检索）。")
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 MEMORY_DIR = os.path.join(BASE_DIR, "memory_store")
@@ -305,6 +325,46 @@ if not _ACCESS_LOG.handlers:
 def _request_start():
     g.request_id = uuid.uuid4().hex[:12]
     g.request_started = time.perf_counter()
+
+
+# Server-only product surfaces hidden on the desktop build (they should look ABSENT,
+# not forbidden — so 404, not 403). Matched by path prefix.
+_LOCAL_MODE_BLOCKED_PREFIXES = (
+    "/api/pay", "/pay/", "/api/orders", "/api/plans",
+    "/api/subscription", "/api/fapiao", "/api/scheduled-jobs",
+)
+_LOCAL_MUTATING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+
+
+@app.before_request
+def _local_mode_guard():
+    """Loopback hardening for the desktop daemon (LOCAL_MODE). A localhost HTTP
+    server is reachable by any local process or browser tab, so:
+      1. hide the payment/scheduler surfaces (404);
+      2. require a per-session CSRF token on every mutating /api/* call — a
+         cross-origin page can't read the token injected into our loopback HTML
+         (CORS), so it can't forge a valid mutating call to spend the account;
+      3. reject any present cross-origin Origin/Referer (DNS-rebinding defense).
+    Entirely inert when LOCAL_MODE is off — the production server is unaffected."""
+    if not LOCAL_MODE:
+        return None
+    path = request.path or ""
+    if any(path.startswith(pfx) for pfx in _LOCAL_MODE_BLOCKED_PREFIXES):
+        return jsonify({"error": "not found"}), 404
+    if request.method in _LOCAL_MUTATING_METHODS and path.startswith("/api/"):
+        origin = request.headers.get("Origin") or request.headers.get("Referer") or ""
+        if origin:
+            try:
+                netloc = urlparse(origin).netloc
+            except Exception:
+                netloc = ""
+            if netloc and netloc != request.host:
+                return jsonify({"error": "forbidden"}), 403
+        if LOCAL_CSRF_TOKEN:
+            token = request.headers.get("X-Tangent-Local-Token", "")
+            if not secrets.compare_digest(token, LOCAL_CSRF_TOKEN):
+                return jsonify({"error": "forbidden"}), 403
+    return None
 
 
 @app.after_request
@@ -539,9 +599,23 @@ def _spa_shell():
     path = os.path.join(app.static_folder, "index.html")
     with open(path, encoding="utf-8") as f:
         html = f.read()
+    # LOCAL_MODE (desktop daemon): inject the per-session CSRF token the SPA echoes
+    # on mutating /api/* calls, and the plain privacy banner. Both collapse to inert
+    # values on the cloud server (token "", banner "", mode false), so the shared
+    # index.html serves identically there.
+    banner = ("" if not LOCAL_MODE else
+              '<div class="local-privacy-banner" role="note" style="background:#eef3ff;'
+              'border-bottom:1px solid #c9d8ff;color:#1f3a6e;font-size:13px;line-height:1.5;'
+              'padding:8px 16px;text-align:center;">' + _h(LOCAL_PRIVACY_NOTICE) + '</div>')
+    # The VALUE placeholders are distinct from the JS property names
+    # (window.__LOCAL_MODE__ / window.__LOCAL_TOKEN__) so the replace can't clobber
+    # the identifiers themselves.
     html = (html.replace("__PRODUCT_NAME__", config.product_name())
                 .replace("__PRODUCT_TAGLINE__", config.product_tagline())
-                .replace("__BASE_URL__", request.url_root))
+                .replace("__BASE_URL__", request.url_root)
+                .replace("__LOCAL_BANNER__", banner)
+                .replace("__TANGENT_LOCAL_TOKEN__", LOCAL_CSRF_TOKEN or "")
+                .replace("__TANGENT_LOCAL_MODE__", "true" if LOCAL_MODE else "false"))
     return Response(html, mimetype="text/html")
 
 
@@ -906,6 +980,102 @@ def run():
         args=(memory, customer["id"], company_id, run_id, industry_key), daemon=True)
     thread.start()
 
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/run/local", methods=["POST"])
+def run_local():
+    """LOCAL_MODE-only — start a run on the user's OWN local files, passed by PATH
+    (not uploaded bytes). The desktop daemon serves the same SPA, so the signed-in
+    session stands in for the customer. Mirrors /api/run exactly downstream (the
+    cost breaker, the plan gate, per-account billing, the background team, the live
+    feed) — the ONLY differences are: paths instead of multipart, the default-deny
+    workspace chokepoint in front of every open(), and the user's files are read IN
+    PLACE and NEVER mutated/encrypted (they are the user's own documents, not a
+    server-side upload copy). 404 outside LOCAL_MODE so the cloud build never exposes it."""
+    if not LOCAL_MODE:
+        return jsonify({"error": "not found"}), 404
+    load_dotenv(override=True)
+
+    from agent_team import workspace
+    from agent_team.runner import state as runner_state
+
+    if runner_state.is_paused():
+        return jsonify({"error": "已暂停，恢复后再试。"}), 503
+
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再生成报告。"}), 401
+
+    allowed, reason = platform_guard.check(customer["id"], customer.get("daily_cap_yuan"))
+    if not allowed:
+        return jsonify({"error": reason}), 503
+    plan_ok, plan_msg, _gate_code = _plan_gate(customer)
+    if not plan_ok:
+        return jsonify({"error": plan_msg}), 402
+
+    body = request.get_json(silent=True) or {}
+    goal = (body.get("goal") or "").strip()
+    if not goal:
+        return jsonify({"error": "Please describe what you want the team to do."}), 400
+    paths = body.get("paths") or []
+    if not isinstance(paths, list):
+        return jsonify({"error": "paths 必须是文件路径数组。"}), 400
+    if len(paths) > config.MAX_UPLOAD_FILES_PER_RUN:
+        return jsonify({"error": f"一次最多 {config.MAX_UPLOAD_FILES_PER_RUN} 个文件"
+                                 f"（你选择了 {len(paths)} 个）。"}), 400
+    industry_override = body.get("industry")
+
+    # Default-deny path validation BEFORE opening anything, then the same Phase 8
+    # gates as /api/run: magic-byte executable sniff + per-file size cap.
+    max_mb = config.MAX_UPLOAD_BYTES_PER_FILE // (1024 * 1024)
+    real_paths = []
+    for p in paths:
+        try:
+            real = workspace.assert_in_workspace(p)
+        except workspace.WorkspaceError as e:
+            return jsonify({"error": str(e)}), 400
+        try:
+            with open(real, "rb") as fh:
+                head = fh.read(16)
+        except OSError:
+            return jsonify({"error": f"无法读取文件：{p}"}), 400
+        if security.looks_executable(head):
+            return jsonify({"error": f"文件 “{os.path.basename(real)}” 看起来是可执行程序，已拒绝。"}), 400
+        if os.path.getsize(real) > config.MAX_UPLOAD_BYTES_PER_FILE:
+            return jsonify({"error": f"文件 “{os.path.basename(real)}” 超过单个文件 {max_mb} MB 的上限。"}), 400
+        real_paths.append(real)
+
+    job_id = uuid.uuid4().hex[:12]
+    memory = SharedMemory(job_id, store_dir=MEMORY_DIR, goal=goal,
+                          output_dir=os.path.join(OUTPUT_DIR, job_id))
+    JOBS[job_id] = memory
+
+    # Parse the user's files IN PLACE — never copy/encrypt/mutate the originals.
+    for real in real_paths:
+        doc = parse_file(real)
+        memory.add_document(doc)
+        memory.log("system", f"Read local file: {doc['name']} ({doc['chars']:,} chars).",
+                   type="info")
+    memory.log("system",
+               f"Job created. Goal logged. {len(real_paths)} local file(s) attached.",
+               type="info")
+
+    company_id = run_id = None
+    try:
+        company_id = metrics_store.get_or_create_company(
+            customer.get("email"),
+            company_name=customer.get("company") or customer.get("name"))
+        run_id = metrics_store.create_run(company_id, goal)
+    except Exception as e:
+        memory.log("system", f"Company memory unavailable ({e}); running without it.",
+                   type="info")
+
+    industry_key = _resolve_industry(industry_override, company_id)
+    thread = threading.Thread(
+        target=_run_team,
+        args=(memory, customer["id"], company_id, run_id, industry_key), daemon=True)
+    thread.start()
     return jsonify({"job_id": job_id})
 
 
@@ -1522,7 +1692,15 @@ def _admin_emails():
 
 
 def _is_admin(customer):
-    """True only for a logged-in account whose email is in $ADMIN_EMAILS."""
+    """True only for a logged-in account whose email is in $ADMIN_EMAILS.
+
+    LOCAL_MODE (the desktop daemon) is the single chokepoint that locks ALL founder
+    machinery on the customer's machine: every founder route already inlines
+    `if not _is_admin(...): return 403`, so forcing False here keeps the model
+    catalog / ¥ pricing / token manager / fusion / model picker behind a 403 with
+    no per-route edits — the device is "just another non-admin caller"."""
+    if LOCAL_MODE:
+        return False
     if not customer:
         return False
     email = (customer.get("email") or "").strip().lower()

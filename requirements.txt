@@ -46,3 +46,14 @@ cryptography>=42.0.0     # Fernet encryption of uploaded files + report PDFs at 
 flask-limiter>=3.5.0     # rate limiting (auth per-IP, run-start per-account); memory or redis storage
 redis>=4.0.0             # shared rate-limit + gateway-RPM counters across gunicorn workers (RATELIMIT_STORAGE_URI=redis://…); unused on memory://
 bcrypt>=4.1.0            # password hashing (replaces the legacy werkzeug hash; migrates on next login)
+
+# ---------------------------------------------------------------------------
+# Local desktop daemon ("Tangent Agent") — see docs/local-agents/ (Phase 0+).
+# Desktop-only: the cloud/server deploy never imports these. A dev `pip install`
+# here lets `python -m agent_team.runner` (or the `tangent-agent` console script)
+# boot the app on 127.0.0.1 with a tray icon.
+# ---------------------------------------------------------------------------
+waitress>=3.0.0          # fork-free WSGI server the daemon runs app.py under (Windows-friendly)
+pystray>=0.19.0          # system-tray icon (Open/Pair/Watched/Pause/Quit)
+pillow>=10.0.0           # the tray glyph image (pystray needs a PIL.Image)
+# keyring / watchdog belong to the pairing + watched-folders workstreams (pyproject [desktop] extra)

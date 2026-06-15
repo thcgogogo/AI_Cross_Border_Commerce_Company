@@ -13,6 +13,16 @@ export class ApiError extends Error {
 }
 
 async function request(url, opts = {}) {
+  // LOCAL_MODE (desktop daemon): echo the per-session CSRF token the server injected
+  // into our loopback HTML on every mutating call, so the daemon accepts it. A
+  // cross-origin page can't read this token (CORS), so it can't forge such a call.
+  // No-op on the cloud server (window.__LOCAL_TOKEN__ is "").
+  if (window.__LOCAL_TOKEN__) {
+    const method = (opts.method || "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      opts.headers = { ...(opts.headers || {}), "X-Tangent-Local-Token": window.__LOCAL_TOKEN__ };
+    }
+  }
   const res = await fetch(url, opts);
   let data = null;
   try { data = await res.json(); } catch (e) { /* non-JSON body */ }
