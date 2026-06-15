@@ -1096,6 +1096,34 @@ def get_workers():
     return [a for a in AGENTS if a["reports_to"] is not None]
 
 
+# Ids of agents merged in at runtime by the local desktop daemon's registry loader
+# (agent_team/runner/registry.py). Tracked so register_runtime_agents() can prune its
+# OWN entries on a re-sync without ever touching the static built-in agents.
+_REGISTERED_AGENT_IDS = set()
+
+
+def register_runtime_agents(agent_dicts):
+    """Merge externally-provided agent dicts (from the local registry loader) into
+    AGENTS, upserting by id. Static built-in agents are NEVER removed or shadowed by
+    this; only entries previously registered through here are replaced/pruned. Used
+    ONLY by the local daemon (agent_team/runner) — the cloud server never calls it.
+    A registered dict carries BEHAVIOR only (no model/¥); model/provider/¥ still
+    resolve via effective_model() server-side. Idempotent + re-runnable. Returns the
+    agent_ids now present from the registry."""
+    static_ids = {a["id"] for a in AGENTS if a["id"] not in _REGISTERED_AGENT_IDS}
+    incoming = {}
+    for d in (agent_dicts or []):
+        aid = d.get("id")
+        if not aid or aid in static_ids:
+            continue                      # never shadow a built-in agent
+        incoming[aid] = d
+    statics = [a for a in AGENTS if a["id"] not in _REGISTERED_AGENT_IDS]
+    AGENTS[:] = statics + list(incoming.values())   # mutate in place — holders see it
+    _REGISTERED_AGENT_IDS.clear()
+    _REGISTERED_AGENT_IDS.update(incoming.keys())
+    return list(incoming.keys())
+
+
 # ---------------------------------------------------------------------------
 # Per-agent MODEL OVERRIDES (set live from the UI dropdowns)
 # ---------------------------------------------------------------------------

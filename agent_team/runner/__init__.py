@@ -42,6 +42,12 @@ def _default_roots():
     return [c for c in cands if os.path.isdir(c)]
 
 
+def _app_data_dir():
+    """Per-user app-data dir for the daemon's non-secret caches (the agent registry).
+    Holds NO device token and no file bytes — only behavior manifests."""
+    return os.path.join(os.path.expanduser("~"), ".tangent-agent")
+
+
 class Supervisor:
     """Owns the daemon lifecycle: env → load app → serve (waitress, bg thread) →
     open browser → run the tray (main thread) → graceful shutdown."""
@@ -82,6 +88,15 @@ class Supervisor:
         from agent_team import workspace
         roots = self._roots if self._roots is not None else _default_roots()
         workspace.set_roots(roots)
+        # Merge any catalog agents this account installed into config.AGENTS BEFORE any
+        # run builds an Orchestrator. Best-effort: a registry/network failure must never
+        # block boot (the daemon still runs the built-in team).
+        try:
+            from agent_team import config as _config
+            from agent_team.runner import registry
+            registry.bootstrap(_config, cache_dir=_app_data_dir())
+        except Exception as e:
+            print(f"  [i] 智能体目录同步已跳过（{type(e).__name__}: {e}）。")
         return self._app
 
     def _serve(self):
