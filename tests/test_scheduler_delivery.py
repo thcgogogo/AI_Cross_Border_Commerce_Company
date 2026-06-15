@@ -58,6 +58,13 @@ from agent_team.scheduler import ReportScheduler  # noqa: E402
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _enable_report_quota(monkeypatch):
+    # Report-delivery pricing is opt-in since 2026-06-15 (REPORT_QUOTA_ENABLED, default
+    # OFF). The quota-exhausted scheduled-run test asserts the gate, so enable it.
+    monkeypatch.setenv("REPORT_QUOTA_ENABLED", "1")
+
+
 @pytest.fixture
 def fresh_db(tmp_path):
     """Point the company brain at a throwaway SQLite file for this one test."""

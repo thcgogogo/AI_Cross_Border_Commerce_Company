@@ -913,7 +913,15 @@ def _plan_gate(customer):
         runs.total_cost_yuan) for COGS; per-run budgets and the platform
         breaker keep protecting margin.
     Quota metering is best-effort: if the brain DB hiccups we allow the run —
-    a metering outage must not take the product down."""
+    a metering outage must not take the product down.
+
+    NOTE (2026-06-15): report-delivery pricing is DISCARDED for now — the gate below is
+    DORMANT by default (config.report_quota_enabled() is False), so any signed-in account
+    can generate reports. The body is kept intact for later re-enabling via
+    REPORT_QUOTA_ENABLED=1. Auth + the ¥ wallet + platform_guard are orthogonal and still
+    enforced on /api/run. (Device runs never reach this gate — they use create_device_run.)"""
+    if not config.report_quota_enabled():
+        return True, "", None
     plan_code, _sub, locked = metrics_store.effective_plan(customer["id"])
     if locked:
         return False, ("订阅已逾期，功能已锁定（仅可导出已有数据）。"

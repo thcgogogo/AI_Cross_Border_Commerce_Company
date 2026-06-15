@@ -419,6 +419,17 @@ def phone_verification_required():
     return val.lower() in _TRUE
 
 
+def report_quota_enabled():
+    """Whether the report-delivery quota/credit gate (_plan_gate) is ENFORCED.
+
+    DISCARDED for now (2026-06-15 product decision — the product is pivoting to the
+    deployable-agent marketplace): defaults OFF, so any signed-in account can generate
+    reports without a flat-plan quota or ¥29 credit. The PLANS config stays in place and
+    the full gate body stays intact; set REPORT_QUOTA_ENABLED=1 to re-enable it. Auth,
+    the ¥ wallet, per-run budgets and the platform breaker are orthogonal and unaffected."""
+    return _env("REPORT_QUOTA_ENABLED").lower() in _TRUE
+
+
 # ===========================================================================
 # PAYMENTS, SUBSCRIPTIONS & FAPIAO (Phase 9)
 # ===========================================================================

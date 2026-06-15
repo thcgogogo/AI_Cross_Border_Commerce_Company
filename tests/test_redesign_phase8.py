@@ -57,6 +57,13 @@ from agent_team.token_manager import (  # noqa: E402
 OWNER = "owner@corp.com"
 
 
+@pytest.fixture(autouse=True)
+def _enable_report_quota(monkeypatch):
+    # Report-delivery pricing is opt-in since 2026-06-15 (REPORT_QUOTA_ENABLED, default
+    # OFF). This module verifies the quota/credit gate, so enable it for every test.
+    monkeypatch.setenv("REPORT_QUOTA_ENABLED", "1")
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """Fresh DB + customer store + tmp storage dirs; returns shared handles."""

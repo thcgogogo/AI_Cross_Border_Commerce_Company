@@ -31,6 +31,14 @@ from agent_team.customers import CustomerStore  # noqa: E402
 from agent_team.models import RUN_SUCCEEDED, Run  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _enable_report_quota(monkeypatch):
+    # Report-delivery pricing is opt-in since 2026-06-15 (config.report_quota_enabled /
+    # REPORT_QUOTA_ENABLED, default OFF). This module verifies the quota/credit/lock gate,
+    # so enable it for every test here (its pre-removal always-on behavior).
+    monkeypatch.setenv("REPORT_QUOTA_ENABLED", "1")
+
+
 @pytest.fixture
 def fresh_db(tmp_path):
     """A throwaway SQLite file per test — companies and runs start empty."""

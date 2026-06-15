@@ -36,6 +36,13 @@ from agent_team.models import (  # noqa: E402
     SUB_PAST_DUE, Subscription)
 
 
+@pytest.fixture(autouse=True)
+def _enable_report_quota(monkeypatch):
+    # Report-delivery pricing is opt-in since 2026-06-15 (REPORT_QUOTA_ENABLED, default
+    # OFF). The subscription-lifecycle test asserts the past-due lock gate, so enable it.
+    monkeypatch.setenv("REPORT_QUOTA_ENABLED", "1")
+
+
 @pytest.fixture
 def fresh_db(tmp_path):
     """A throwaway SQLite file per test: orders, subscriptions, fapiao requests
