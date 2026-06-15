@@ -62,6 +62,7 @@ from agent_team import (
     trends,
 )
 from agent_team.customers import CustomerStore
+from agent_team.devices import DeviceTokenStore
 from agent_team.file_tools import parse_file
 from agent_team.memory import SharedMemory
 from agent_team.models import (
@@ -413,6 +414,11 @@ TOKENS = TokenManager(
 # The unified-API "storefront" ledger — issues customer gateway keys, tracks each
 # account's chosen models + balance + usage. Persists to memory_store/customers.json.
 CUSTOMERS = CustomerStore(store_path=os.path.join(MEMORY_DIR, "customers.json"))
+
+# Phase 11 — per-device tokens for the desktop "Tangent Agent" daemon. DB-backed
+# (the devices table), same secret discipline as CUSTOMERS (mint once / store sha256
+# / verify by hash). A device token resolves to its OWNING account at /v1 call time.
+DEVICES = DeviceTokenStore()
 
 # The persistent "company brain" — a SQLite DB (data/company_brain.db) that
 # remembers what every PAST run learned (metrics, profile, glossary, report
@@ -1670,6 +1676,57 @@ def _current_customer():
     return customer
 
 
+def _current_device():
+    """The paired desktop device for this runner request, or None (Phase 11).
+
+    Reads the tng-dev-… bearer token (same header path as _bearer_key), verifies it
+    against DEVICES (sha256 lookup, status=='active', bumps last_seen_at), and returns
+    a plain device record (never a live ORM row). A pending/revoked/unknown token
+    fails closed → None. Mirrors _current_customer(): a runner→cloud route starts
+        dev = _current_device(); if not dev: return <401>."""
+    raw = _bearer_key()
+    if not raw or not raw.startswith("tng-dev-"):
+        return None
+    return DEVICES.verify_token(raw)
+
+
+def _device_view(d):
+    """Customer-safe device snapshot for GET /api/devices. Mirrors _account_view's
+    non-admin field-strip: NEVER the raw token, token_hash, pairing code, ¥, or model
+    ids — only the display identity + timestamps."""
+    return {
+        "id": d.get("id"),
+        "name": d.get("name"),
+        "platform": d.get("platform"),
+        "status": d.get("status"),
+        "last_seen_at": d.get("last_seen_at"),
+        "created_at": d.get("created_at"),
+    }
+
+
+def _min_cap(a, b):
+    """The tightest of two optional ¥/day caps. None means unbounded; returns the min
+    of the present values, or None only when BOTH are None."""
+    vals = [v for v in (a, b) if v is not None]
+    return min(vals) if vals else None
+
+
+def _device_daily_cap(account_cap):
+    """A paired device's daily ¥ sub-cap (locked 2026-06-15): the tighter of a
+    fraction of the account's daily cap and a flat ceiling. account_cap None falls
+    back to the platform default. Cheap insurance against a stolen device token
+    draining the whole account wallet."""
+    base = account_cap if account_cap is not None else config.account_daily_cap_yuan()
+    return min(base * config.DEVICE_DAILY_CAP_FRACTION, config.DEVICE_DAILY_CAP_MAX_YUAN)
+
+
+def _device_model_subset(device, customer):
+    """The models a paired device may call, computed at CALL TIME (never frozen).
+    Default: the OWNING account's purchased models, so a device inherits exactly the
+    account's access. A real per-device subset is a later (catalog) workstream."""
+    return customer.get("models") or []
+
+
 def _login_session(customer):
     """Establish a logged-in session for `customer` with session-fixation defense:
     clear any pre-login session contents, then stamp the account id AND its current
@@ -2124,6 +2181,64 @@ def fapiao_request():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     return jsonify({"request": req})
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 — paired-device management (the desktop "Tangent Agent" daemon).
+# The web app mints a one-time pairing code; the daemon redeems it for a per-device
+# token. Three routes are session-gated; /exchange is intentionally unauthenticated
+# (possession of the one-time code IS the proof — the daemon holds no token yet).
+# ---------------------------------------------------------------------------
+@app.route("/api/devices/pair-code", methods=["POST"])
+def device_pair_code():
+    """Mint a one-time pairing code for the logged-in account (shown ONCE)."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再配对设备。"}), 401
+    out = DEVICES.create_pairing_code(customer["id"])
+    return jsonify({"pairing_code": out["pairing_code"], "expires_at": out["expires_at"]})
+
+
+@app.route("/api/devices/exchange", methods=["POST"])
+def device_exchange():
+    """Redeem a pairing code for a device token (the ONLY place a token is returned).
+    Unauthenticated by design — the daemon doesn't hold a token yet; the one-time code
+    is the proof. The code is burned on success so a replay mints nothing."""
+    data = request.get_json(silent=True) or {}
+    code = (data.get("pairing_code") or "").strip()
+    name = (data.get("device_name") or "").strip()[:128] or "Tangent device"
+    platform = (data.get("platform") or "").strip().lower()
+    if platform not in ("darwin", "win", "linux"):
+        platform = "linux"
+    out = DEVICES.exchange_pairing_code(code, device_name=name, platform=platform)
+    if not out:
+        return jsonify({"error": "配对码无效或已过期。"}), 400
+    return jsonify({"device_token": out["device_token"], "device_id": out["device_id"],
+                    "account_id": out["account_id"]})
+
+
+@app.route("/api/devices", methods=["GET"])
+def devices_list():
+    """List the logged-in account's paired devices — field-stripped (no token/¥/model)."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    return jsonify({"devices": [_device_view(d) for d in DEVICES.list_for_account(customer["id"])],
+                    # The desktop privacy posture, shown on the device-management page
+                    # (same canonical statement the daemon UI carries — WS01).
+                    "privacy_notice": LOCAL_PRIVACY_NOTICE})
+
+
+@app.route("/api/devices/<device_id>/revoke", methods=["POST"])
+def device_revoke(device_id):
+    """Revoke a device (instant kill switch). Scoped to the caller's account, so one
+    account can never revoke another's device → 404 (no existence leak)."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not DEVICES.revoke(device_id, account_id=customer["id"]):
+        return jsonify({"error": "未找到该设备。"}), 404
+    return jsonify({"ok": True})
 
 
 @app.route("/api/account", methods=["GET", "POST"])
@@ -4500,26 +4615,39 @@ def gateway_chat_completions():
     """THE GATEWAY — an OpenAI-compatible endpoint guarded by the 3 layers."""
     load_dotenv(override=True)  # pick up newly-added provider keys without a restart
 
-    # LAYER 1 — AUTH: the request must carry a valid customer key.
-    customer = CUSTOMERS.verify_key(_bearer_key())
+    # LAYER 1 — AUTH: an account key (tng-sk-…) OR a paired-device token (tng-dev-…).
+    # Try the account key first; then the device token, which resolves to its OWNING
+    # account so balance/wallet/COGS are charged exactly as a web call (Phase 11). A
+    # device whose account was deleted, or any unknown token, fails as 401.
+    raw = _bearer_key()
+    customer = CUSTOMERS.verify_key(raw)
+    device = None
+    if not customer:
+        device = DEVICES.verify_token(raw)
+        if device:
+            customer = CUSTOMERS.get_by_id(device["account_id"])
     if not customer:
         return _gateway_error(
-            "Invalid API key. Pass your tng-sk-… key as 'Authorization: Bearer <key>'.",
+            "Invalid API key. Pass your tng-sk-… key (or a tng-dev-… device token) "
+            "as 'Authorization: Bearer <key>'.",
             401, "invalid_api_key")
 
-    # Phase 8 — per-key requests-per-minute cap (this account's accounts.rpm_limit,
-    # default config.DEFAULT_KEY_RPM). Throttles a hot loop on ONE customer key
-    # without penalising everyone behind a shared IP.
+    # Phase 8/11 — per-key RPM. Keyed on the DEVICE id when device-authenticated, so
+    # each paired device gets its own throttle bucket (two devices on one account
+    # don't share a single one); else the account id, as before.
+    rpm_key = device["id"] if device else customer["id"]
     rpm = customer.get("rpm_limit") or config.DEFAULT_KEY_RPM
-    if not _rpm_check(customer["id"], rpm):
+    if not _rpm_check(rpm_key, rpm):
         return _gateway_error(
             f"Rate limit exceeded — at most {rpm} requests per minute on your key.",
             429, "rate_limit_exceeded")
 
-    # Phase 8 — platform spend circuit breaker (+ this account's daily ¥ cap). When
-    # the platform is over its rolling upstream-spend cap, refuse new calls with the
-    # standard "系统繁忙" message until an admin resets the breaker.
-    allowed, reason = platform_guard.check(customer["id"], customer.get("daily_cap_yuan"))
+    # Phase 8/11 — platform spend circuit breaker (+ daily ¥ cap). A device call is
+    # additionally bounded by a per-device sub-cap = min(device_cap, account_cap), so
+    # a stolen device token can't drain the whole account wallet (locked 2026-06-15).
+    acct_cap = customer.get("daily_cap_yuan")
+    cap = _min_cap(_device_daily_cap(acct_cap), acct_cap) if device else acct_cap
+    allowed, reason = platform_guard.check(customer["id"], cap)
     if not allowed:
         return _gateway_error(reason, 503, "platform_busy")
 
@@ -4543,6 +4671,14 @@ def gateway_chat_completions():
         return _gateway_error(
             f"Your key doesn't include access to '{model}'. Models on your plan: {allowed}.",
             403, "model_access_denied")
+
+    # Phase 11 — a device call is ADDITIONALLY narrowed to the device's live model
+    # subset (computed at call time, never frozen). Default subset = the account's
+    # purchased models, so today this is a no-op narrowing on top of can_use; the real
+    # per-device subset belongs to the catalog workstream. Never a widening.
+    if device and model not in _device_model_subset(device, customer):
+        return _gateway_error(
+            f"This device isn't authorized for '{model}'.", 403, "model_access_denied")
 
     # LAYER 2 — BILLING (pre-check): refuse if the balance is already spent.
     if not CUSTOMERS.has_balance(customer):

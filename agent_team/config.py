@@ -244,6 +244,13 @@ def account_daily_cap_yuan():
     return _env_float("ACCOUNT_DAILY_CAP_YUAN", ACCOUNT_DAILY_CAP_YUAN_DEFAULT)
 
 
+# Phase 11 — a paired desktop device gets its OWN daily ¥ sub-cap, the tighter of a
+# fraction of the account's daily cap and a flat ceiling (locked 2026-06-15). Cheap
+# insurance: a stolen device token can't drain the whole account wallet. Tunable.
+DEVICE_DAILY_CAP_FRACTION = _env_float("DEVICE_DAILY_CAP_FRACTION", 0.3)
+DEVICE_DAILY_CAP_MAX_YUAN = _env_float("DEVICE_DAILY_CAP_MAX_YUAN", 20.0)
+
+
 def admin_alert_webhook():
     """A webhook URL the circuit breaker POSTs to when it trips (e.g. a 企业微信
     群机器人), or None. The admin email list reuses ADMIN_EMAILS."""
