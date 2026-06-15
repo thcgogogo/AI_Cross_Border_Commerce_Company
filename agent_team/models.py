@@ -39,6 +39,13 @@ And the Phase 10 onboarding / support / lifecycle tables:
   changelog_seen      which CHANGELOG entry each account last viewed (新功能 badge)
   lifecycle_events    dedup marks for lifecycle emails (welcome / day-3 nudge / receipts)
 
+And the Phase 11 desktop-daemon ("Tangent Agent") tables:
+
+  devices             one row per paired desktop install (per-device token, hash only)
+  agent_catalog       published deployable agents (runner-visible manifest snapshots)
+  agent_install       one account's deployment of a catalog agent
+  agent_run           a per-device run summary, sharing runs.id via FK
+
 Written in the classic-declarative style so the same code runs on SQLAlchemy
 1.4 and 2.x. Each model subclasses the shared Base from db.py.
 """
@@ -74,7 +81,8 @@ RUN_STATUSES = (RUN_RUNNING, RUN_SUCCEEDED, RUN_FAILED, RUN_STOPPED_BUDGET)
 # The allowed values for runs.kind (Phase 6 B1): what produced the row.
 RUN_KIND_REPORT = "report"   # interactive / scheduled pipeline run — quota-metered
 RUN_KIND_IMPORT = "import"   # 历史数据导入 back-fill — free, hidden from 历史报告
-RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT)
+RUN_KIND_DEVICE = "device_run"  # Phase 11 — a run executed by a paired desktop device
+RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT, RUN_KIND_DEVICE)
 
 # Where a scheduled run gets its input files from.
 SOURCE_LATEST_UPLOAD = "latest_upload"   # the most recent files the account uploaded
@@ -162,6 +170,20 @@ LIFECYCLE_NUDGE_DAY3 = "nudge_day3"
 LIFECYCLE_RECEIPT = "receipt"
 LIFECYCLE_KINDS = (LIFECYCLE_WELCOME, LIFECYCLE_NUDGE_DAY3, LIFECYCLE_RECEIPT)
 
+# Phase 11 — a paired device's lifecycle (the desktop "Tangent Agent" daemon).
+DEVICE_PENDING = "pending"    # pairing code minted, token not yet exchanged
+DEVICE_ACTIVE = "active"      # token live; verify_token resolves it
+DEVICE_REVOKED = "revoked"    # kill switch — verify fails closed forever after
+DEVICE_STATUSES = (DEVICE_PENDING, DEVICE_ACTIVE, DEVICE_REVOKED)
+
+# Phase 11 — the per-device agent_run lifecycle (shares runs.id via FK).
+AGENT_RUN_RUNNING = "running"
+AGENT_RUN_SUCCEEDED = "succeeded"
+AGENT_RUN_FAILED = "failed"
+AGENT_RUN_STOPPED = "stopped"
+AGENT_RUN_STATUSES = (AGENT_RUN_RUNNING, AGENT_RUN_SUCCEEDED,
+                      AGENT_RUN_FAILED, AGENT_RUN_STOPPED)
+
 
 class Company(Base):
     """One per account. `account_email` mirrors the login email in the JSON
@@ -216,6 +238,11 @@ class Run(Base):
                            server_default="0")
     total_cost_yuan = Column(Float, default=0.0)
     report_path = Column(String(255), nullable=True)
+    # Phase 11 — where this run executed. "cloud" (the web/scheduled pipeline) or
+    # "device" (a paired desktop daemon synced a device_run summary back). device_id
+    # is a loose ref to devices.id when origin="device".
+    origin = Column(String(16), nullable=False, default="cloud", server_default="cloud")
+    device_id = Column(String(32), nullable=True, index=True)
 
     company = relationship("Company", back_populates="runs")
     metrics = relationship("Metric", back_populates="run",
@@ -402,6 +429,92 @@ class Account(Base):
     # plan quota; the run that lands beyond the base quota consumes one.
     report_credits = Column(Integer, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class Device(Base):
+    """Phase 11 — a paired desktop "Tangent Agent" install.
+
+    The local daemon pairs to an account via a one-time code, then holds a per-device
+    token (tng-dev-…) that authenticates its cloud /v1 calls. SAME secret discipline
+    as the gateway key: only the SHA-256 hash of the token (and of the pairing code)
+    is stored; the raw token/code are each returned exactly once. Revoking flips
+    status to 'revoked' — an instant kill switch (verify fails closed thereafter)."""
+    __tablename__ = "devices"
+
+    # "dev_<hex>" — minted by DeviceTokenStore (not in the model).
+    id = Column(String(32), primary_key=True)
+    account_id = Column(String(32), nullable=False, index=True)    # loose ref to accounts.id
+    name = Column(String(128))
+    platform = Column(String(32))                                  # 'darwin'|'win'|'linux' (free-form)
+    token_hash = Column(String(64), nullable=True, index=True)     # SHA-256 of the device token; NULL until exchanged
+    pairing_code_hash = Column(String(64), nullable=True)          # SHA-256 of the one-time pairing code
+    pairing_expires_at = Column(DateTime, nullable=True)
+    status = Column(Enum(*DEVICE_STATUSES, name="device_status"),
+                    default=DEVICE_PENDING, nullable=False)
+    last_seen_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AgentCatalog(Base):
+    """Phase 11 — a published, deployable agent (a snapshot of a config.AGENTS dict).
+
+    manifest_json holds the RUNNER-VISIBLE half ONLY (display copy, tool/capability
+    NAMES, system prompt, org-chart wiring) — NEVER the model id or per-token ¥ COGS,
+    which resolve server-side. content_hash ('sha256:'+64) lets the desktop runner
+    cache and re-pull only on change. (Populated by a later workstream; the table is
+    created here so the schema matches the migration.)"""
+    __tablename__ = "agent_catalog"
+
+    id = Column(Integer, primary_key=True)
+    agent_id = Column(String(64), nullable=False, index=True)      # config.AGENTS id
+    version = Column(Integer, nullable=False, default=1)
+    name_cn = Column(String(128))
+    manifest_json = Column(Text)                                   # RUNNER-VISIBLE half only — no model/¥
+    content_hash = Column(String(71), index=True)                  # 'sha256:' + 64 hex
+    published = Column(Boolean, nullable=False, default=True, server_default="1")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    __table_args__ = (UniqueConstraint("agent_id", "version",
+                                       name="uq_agent_catalog_agent_version"),)
+
+
+class AgentInstall(Base):
+    """Phase 11 — one account's deployment of a catalog agent. pinned_version NULL
+    means "always the latest published version". (Populated by a later workstream.)"""
+    __tablename__ = "agent_install"
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String(32), nullable=False, index=True)    # loose ref to accounts.id
+    agent_id = Column(String(64), nullable=False, index=True)
+    pinned_version = Column(Integer, nullable=True)                # NULL = latest published
+    active = Column(Boolean, nullable=False, default=True, server_default="1")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    __table_args__ = (UniqueConstraint("account_id", "agent_id",
+                                       name="uq_agent_install_account_agent"),)
+
+
+class AgentRun(Base):
+    """Phase 11 — a per-device agent run. Shares the runs row (run_id FK) so device
+    runs land in the one 历史 list. cost_yuan is a SUMMARY of the user's OWN metered
+    /v1 spend (NOT platform COGS); report_* carry a text summary + sha256 + byte
+    count only — never the file bytes (those stay on the device)."""
+    __tablename__ = "agent_run"
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("runs.id"), index=True)    # HARD FK — shares the run lifecycle
+    device_id = Column(String(32), nullable=True, index=True)      # loose ref to devices.id
+    account_id = Column(String(32), nullable=True, index=True)     # loose ref to accounts.id
+    agent_catalog_id = Column(Integer, ForeignKey("agent_catalog.id"), index=True)
+    agent_id = Column(String(64), nullable=True, index=True)
+    manifest_hash = Column(String(71), nullable=True)
+    status = Column(Enum(*AGENT_RUN_STATUSES, name="agent_run_status"),
+                    default=AGENT_RUN_RUNNING, nullable=False)
+    cost_yuan = Column(Numeric(12, 4), nullable=False, default=0)  # user's own metered spend, NOT COGS
+    report_summary = Column(Text, nullable=True)                   # text only — never bytes
+    report_sha256 = Column(String(64), nullable=True)
+    report_bytes = Column(Integer, nullable=True)
+    deliverable_kind = Column(String(32), nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
 
 
 class SchedulerHeartbeat(Base):

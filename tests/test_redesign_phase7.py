@@ -486,8 +486,10 @@ def test_migration_0006_adds_report_credits_to_legacy_accounts(tmp_path):
     conn.commit()
     conn.close()
 
+    # Pin to the 0006 revision (not "head") — this test verifies 0006's effect
+    # specifically, so it must not also pull in later migrations (0007+).
     proc = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        [sys.executable, "-m", "alembic", "upgrade", "0006_phase7_single_report"],
         cwd=ROOT, capture_output=True, text=True,
         env={**os.environ, "DATABASE_URL": f"sqlite:///{db_path}"})
     assert proc.returncode == 0, proc.stderr
