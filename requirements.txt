@@ -56,4 +56,5 @@ bcrypt>=4.1.0            # password hashing (replaces the legacy werkzeug hash; 
 waitress>=3.0.0          # fork-free WSGI server the daemon runs app.py under (Windows-friendly)
 pystray>=0.19.0          # system-tray icon (Open/Pair/Watched/Pause/Quit)
 pillow>=10.0.0           # the tray glyph image (pystray needs a PIL.Image)
-# keyring / watchdog belong to the pairing + watched-folders workstreams (pyproject [desktop] extra)
+watchdog>=3.0.0          # cross-platform filesystem watcher for the watched-folder automation
+# keyring belongs to the pairing workstream (OS-keychain device token; pyproject [desktop] extra)

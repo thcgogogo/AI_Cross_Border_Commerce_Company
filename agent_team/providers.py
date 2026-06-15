@@ -49,10 +49,15 @@ def provider_key(model_id):
 
     Strips the whitespace/quotes a key often picks up when pasted into .env. We
     return None (not "") so callers can do a simple truthiness check."""
-    _, p = _provider_cfg(model_id)
+    pid, p = _provider_cfg(model_id)
     env = p.get("env_key")
     raw = os.environ.get(env, "") if env else ""
     cleaned = (raw or "").strip().strip('"').strip("'").strip()
+    # Ollama's local server ignores the API key; return a placeholder when unset so the
+    # OpenAI-compatible adapter doesn't raise ProviderKeyMissing (loopback, no real secret).
+    # This does NOT weaken the missing-key behaviour for any real provider.
+    if not cleaned and pid == "ollama":
+        return "ollama-local"
     return cleaned or None
 
 

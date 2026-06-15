@@ -55,6 +55,11 @@ PROVIDERS = {
                   "env_key": "ANTHROPIC_API_KEY", "base_url": None},
     "openai":    {"label": "OpenAI", "sdk": "openai_compatible",
                   "env_key": "OPENAI_API_KEY", "base_url": "https://api.openai.com/v1"},
+    # Phase 4 — OFFLINE Local-Model mode (WS12): Ollama's local OpenAI-compatible server.
+    # The key is UNUSED by Ollama (provider_key returns a placeholder when unset so the
+    # adapter never raises ProviderKeyMissing). Reached ONLY when LOCAL_MODEL_MODE is on.
+    "ollama":    {"label": "Local (Ollama)", "sdk": "openai_compatible",
+                  "env_key": "OLLAMA_API_KEY", "base_url": "http://127.0.0.1:11434/v1"},
     "google":    {"label": "Google", "sdk": "openai_compatible",
                   "env_key": "GEMINI_API_KEY",
                   "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
@@ -839,6 +844,10 @@ def get_model(model_id):
 
 def provider_for(model_id):
     """Which PROVIDERS entry a model runs on (defaults to anthropic)."""
+    # The local model id isn't in MODEL_CHOICES, so it would default to anthropic and break
+    # under LOCAL_MODEL_MODE — route it to the ollama (loopback) provider explicitly.
+    if local_model_mode() and model_id == local_model_id():
+        return "ollama"
     return (get_model(model_id) or {}).get("provider", "anthropic")
 
 
@@ -1198,13 +1207,36 @@ def fuser_fallback_model():
     return _preset_default("FUSER_MODEL", OPUS)
 
 
+# Phase 4 — OFFLINE Local-Model mode (WS12): a DEGRADED, opt-in escape hatch for the
+# regulated / air-gapped segment. Every agent resolves to a local Ollama model and
+# inference runs entirely on-device (file content never leaves the machine), at the cost
+# of: no cloud models, no Anthropic-only tools (LLM file builders / web_search), and no
+# ¥/COGS metering (cost_cny is 0 because the local model isn't in MODEL_CHOICES — that is
+# the deliberate "¥0 marginal, zero COGS visibility" behaviour). NEVER the default.
+LOCAL_MODEL_DEFAULT = "qwen2.5:7b-instruct"   # a sensible small local default (placeholder)
+
+
+def local_model_mode():
+    """True only when LOCAL_MODEL_MODE is explicitly enabled (the offline, degraded path)."""
+    val = _env("LOCAL_MODEL_MODE")
+    return bool(val) and val.lower() in _TRUE
+
+
+def local_model_id():
+    """The local model id every agent resolves to under LOCAL_MODEL_MODE (LOCAL_MODEL_ID
+    env wins, else LOCAL_MODEL_DEFAULT)."""
+    return _env("LOCAL_MODEL_ID") or LOCAL_MODEL_DEFAULT
+
+
 def effective_model(agent_id):
     """The model an agent will actually run on.
 
-    Precedence: a per-agent UI override (most specific intent) wins; else, under the
-    domestic preset, DOMESTIC_MODEL; else the agent's static default. A fresh prod
-    volume has no overrides, so TEAM_MODEL_PRESET=domestic alone runs the whole team
-    on the domestic model."""
+    Precedence: OFFLINE Local-Model mode (a hard environment constraint, not a preference)
+    wins above everything; else a per-agent UI override; else, under the domestic preset,
+    DOMESTIC_MODEL; else the agent's static default. A fresh prod volume has no overrides,
+    so TEAM_MODEL_PRESET=domestic alone runs the whole team on the domestic model."""
+    if local_model_mode():
+        return local_model_id()         # highest precedence — offline degraded path
     if agent_id in MODEL_OVERRIDES:
         return MODEL_OVERRIDES[agent_id]
     if team_model_preset() == "domestic":
