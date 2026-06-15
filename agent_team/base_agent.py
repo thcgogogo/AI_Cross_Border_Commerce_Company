@@ -79,13 +79,46 @@ class Agent:
         return result
 
     # ----------------------------------------------------------------------
+    def _approved_roots(self, out_dir):
+        """Directories the LOCAL filesystem tools may touch. The desktop daemon sets
+        approved roots on the run's memory; a normal CLOUD run has none, so fall back
+        to the job's out_dir — which keeps existing cloud runs unchanged (and sandboxes
+        any filesystem tool to the job folder)."""
+        getter = getattr(self.memory, "approved_roots", None)
+        if callable(getter):
+            try:
+                roots = list(getter() or [])
+                if roots:
+                    return roots
+            except Exception:
+                pass
+        return [out_dir]
+
     def _run_with_tools(self, specs, user_content, web_search=False):
         """Let this agent CALL tools to write real files. Each successful file is
         registered in shared memory so the UI can offer it as a download. If
-        web_search is set, the agent can also search the live web while it works."""
+        web_search is set, the agent can also search the live web while it works.
+
+        Phase 11: filesystem tools (read_file/list_dir/write_file) dispatch to
+        deliverables.run_local_tool against the run's approved workspace roots; the
+        deliverable builders keep their exact existing behavior."""
         out_dir = self.memory.output_dir()
+        approved_roots = self._approved_roots(out_dir)
 
         def executor(name, tool_input):
+            if name in deliverables.LOCAL_TOOL_NAMES:
+                res = deliverables.run_local_tool(name, tool_input, approved_roots)
+                if res.get("ok"):
+                    if res.get("filename"):   # write_file is a downloadable artifact
+                        self.memory.add_deliverable(self.id, res.get("kind", "file"),
+                                                    res.get("title") or res["filename"],
+                                                    res["filename"])
+                    self.memory.log(self.id, f"{name}: {res.get('message', '')[:120]}",
+                                    type="result")
+                    return res["message"]
+                self.memory.log(self.id, f"{name} denied/failed: {res.get('message')}",
+                                type="error")
+                return res["message"]
             res = deliverables.run_tool(name, tool_input, out_dir)
             if res.get("ok"):
                 self.memory.add_deliverable(self.id, res["kind"], res["title"], res["filename"])

@@ -192,10 +192,80 @@ TOOL_SPECS = [
 TOOL_NAMES = {spec["name"] for spec in TOOL_SPECS}
 
 
+# ---------------------------------------------------------------------------
+# LOCAL filesystem tools (Phase 11) — only for agents running on the desktop
+# daemon. They read/list/write files on the USER'S OWN machine, and EVERY path
+# passes the default-deny workspace chokepoint (workspace.assert_in_workspace)
+# before any open. Unlike the builders above (which the model fills with content),
+# these touch real local files the user has approved into the workspace.
+# ---------------------------------------------------------------------------
+LOCAL_TOOL_SPECS = [
+    {
+        "name": "read_file",
+        "description": (
+            "Read a local file the user has approved into the workspace and return its "
+            "text. Handles xlsx/csv/docx/pdf/json/txt (the same parsing an uploaded "
+            "document gets). Use this to inspect the user's own files before analyzing "
+            "or transforming them."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "Path to a file inside the approved workspace."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "list_dir",
+        "description": (
+            "List the files in an approved local directory (one per line, with sizes). "
+            "Use this to discover what files the user has in a folder before reading them."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "Path to a directory inside the approved workspace."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": (
+            "Write a plain-text or Markdown file to an approved local path on the user's "
+            "computer. Use this for notes, summaries, or text deliverables. For "
+            "spreadsheets, slides, PDFs, Word docs or images, use the create_* tools "
+            "instead — they produce real structured files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "Destination path inside the approved workspace."},
+                "content": {"type": "string",
+                            "description": "The text/markdown content to write."},
+            },
+            "required": ["path", "content"],
+        },
+    },
+]
+LOCAL_TOOL_NAMES = {spec["name"] for spec in LOCAL_TOOL_SPECS}
+
+
+def local_specs():
+    """The LOCAL filesystem tool specs (read_file/list_dir/write_file)."""
+    return list(LOCAL_TOOL_SPECS)
+
+
 def specs_for(names):
-    """Return the TOOL_SPECS subset for `names`, preserving declaration order."""
+    """Return the tool-spec subset for `names`, from BOTH the deliverable builders
+    and the LOCAL filesystem tools, preserving declaration order. (web_search is a
+    capability flag handled by base_agent, not a spec here.)"""
     wanted = set(names or [])
-    return [s for s in TOOL_SPECS if s["name"] in wanted]
+    return [s for s in (TOOL_SPECS + LOCAL_TOOL_SPECS) if s["name"] in wanted]
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +294,67 @@ def run_tool(name, tool_input, out_dir):
     return {"ok": True, "kind": kind, "ext": ext,
             "title": title or filename, "filename": filename, "path": path,
             "message": f"Created {kind} '{filename}'."}
+
+
+def run_local_tool(name, tool_input, approved_roots):
+    """Execute a LOCAL filesystem tool (read_file/list_dir/write_file) against the
+    user's approved workspace. NEVER raises — returns the same result-dict contract
+    as run_tool. EVERY path passes the default-deny workspace chokepoint
+    (workspace.assert_in_workspace) BEFORE any open/read/write; a denied path comes
+    back as a clear message (honesty rule: never a fake success)."""
+    from . import workspace
+    from .file_tools import parse_file
+
+    tool_input = tool_input or {}
+    path = str(tool_input.get("path") or "").strip()
+    if not path:
+        return {"ok": False, "message": "Missing required 'path'."}
+
+    try:
+        if name == "list_dir":
+            real = workspace.assert_in_workspace(path, approved_roots, require_file=False)
+            if not os.path.isdir(real):
+                return {"ok": False, "message": f"Not a directory: {path}"}
+            lines = []
+            for entry in sorted(os.listdir(real)):
+                full = os.path.join(real, entry)
+                if os.path.isdir(full):
+                    lines.append(f"{entry}/  (dir)")
+                else:
+                    lines.append(f"{entry}  ({os.path.getsize(full)} bytes)")
+            body = "\n".join(lines) if lines else "(empty directory)"
+            return {"ok": True, "kind": "listing",
+                    "message": f"Files in {path}:\n{body}"}
+
+        if name == "read_file":
+            real = workspace.assert_in_workspace(path, approved_roots)  # require_file=True
+            doc = parse_file(real)
+            return {"ok": True, "kind": "file", "title": doc["name"],
+                    "message": (f"Contents of {doc['name']} "
+                                f"({doc['chars']:,} chars):\n\n{doc['text']}")}
+
+        if name == "write_file":
+            content = tool_input.get("content")
+            if content is None:
+                return {"ok": False, "message": "Missing required 'content'."}
+            real = workspace.assert_in_workspace(
+                path, approved_roots, require_file=False, require_exists=False)
+            os.makedirs(os.path.dirname(real) or ".", exist_ok=True)
+            with open(real, "w", encoding="utf-8") as f:
+                f.write(str(content))
+            crypto.encrypt_file_in_place(real)   # at-rest; no-op when FERNET unset
+            fn = os.path.basename(real)
+            return {"ok": True, "kind": "text file", "title": fn, "filename": fn,
+                    "path": real, "ext": os.path.splitext(fn)[1].lstrip(".") or "txt",
+                    "message": f"Wrote {fn} ({len(str(content)):,} chars)."}
+
+        return {"ok": False, "message": f"Unknown local tool: {name!r}"}
+    except workspace.WorkspaceError as e:
+        # Default-deny: the path is outside the approved workspace (or unsafe).
+        return {"ok": False,
+                "message": f"Path is outside the approved workspace and was denied ({e})."}
+    except Exception as e:
+        return {"ok": False, "message": f"{type(e).__name__}: {e}"}
 
 
 # ---------------------------------------------------------------------------

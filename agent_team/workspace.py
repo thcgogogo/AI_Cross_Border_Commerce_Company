@@ -77,24 +77,27 @@ def is_within(real_path, root):
         return False
 
 
-def assert_in_workspace(path, roots=None, *, require_file=True):
+def assert_in_workspace(path, roots=None, *, require_file=True, require_exists=True):
     """Resolve ``path`` and confirm it lives inside an approved root.
 
     Returns the resolved real path on success; raises ``WorkspaceError`` otherwise.
 
     Default-deny: with no approved roots, every path is rejected. The realpath is
     resolved BEFORE the containment check, so a symlink inside an approved root that
-    points outside it is rejected. ``require_file`` also rejects directories and
-    non-existent paths (a later list_dir tool will pass ``require_file=False``)."""
+    points outside it is rejected. ``require_file`` rejects an EXISTING directory when
+    a file is wanted; ``require_exists`` (default True) keeps the read/run-intake
+    behavior — set it False for a not-yet-created WRITE target (its containment is
+    still enforced, since realpath resolves the existing prefix)."""
     if not path:
         raise WorkspaceError("空路径。")
     roots = approved_roots() if roots is None else [_norm(r) for r in roots if r]
     if not roots:
         raise WorkspaceError("没有已授权的工作目录（默认拒绝所有路径）。")
     real = _norm(path)
-    if not os.path.exists(real):
+    exists = os.path.exists(real)
+    if require_exists and not exists:
         raise WorkspaceError(f"路径不存在：{path}")
-    if require_file and not os.path.isfile(real):
+    if require_file and exists and not os.path.isfile(real):
         raise WorkspaceError(f"不是文件：{path}")
     for root in roots:
         if is_within(real, root):

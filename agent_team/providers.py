@@ -23,7 +23,9 @@ caller. A model whose key is absent fails with a clear "add KEY to .env" message
 instead of silently doing nothing.
 """
 
+import json
 import os
+import re
 
 from . import config
 from .llm import LLMClient, LLMError, _text_of, _count_tokens  # noqa: F401  (_text_of/_count_tokens reused)
@@ -280,3 +282,209 @@ class ModelRouter:
             system_prompt + note, user_content, model=model, effort=effort,
             max_tokens=max_tokens, max_retries=max_retries, budget=budget,
         )
+
+
+# ---------------------------------------------------------------------------
+# RemoteRouter — the desktop daemon's inference path (Phase 11)
+# ---------------------------------------------------------------------------
+# A ModelRouter that sends EVERY model turn to the CLOUD /v1/chat/completions
+# gateway with a per-device token, instead of calling any provider SDK directly. So
+# no provider keys live on the customer machine, and the cloud resolves the model +
+# China routing + cost-control server-side. Because /v1 is plain-chat-only (it has no
+# native tool use), tool-calling agents drive tools via a TEXT protocol and execute
+# them LOCALLY (the deliverable builders + the read_file/list_dir/write_file
+# filesystem tools), interleaved with remote text-only turns. The loop is therefore
+# provider-agnostic on the wire: it works whether the cloud picks Claude or DeepSeek.
+
+_TOOL_CALL_RE = re.compile(r"```tool_call\s*\n(.*?)```", re.DOTALL)
+
+
+def _default_http_post(url, headers, json_body, timeout):
+    """Default transport: POST JSON over stdlib urllib (no `requests` dependency).
+    Returns (status_code, parsed_json_dict). A non-2xx HTTPError is returned as its
+    (code, body) so the caller maps it to a clear LLMError, not a stack trace."""
+    import urllib.error
+    import urllib.request
+    data = json.dumps(json_body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            return resp.status, (json.loads(body) if body else {})
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        try:
+            return e.code, (json.loads(body) if body else {})
+        except Exception:
+            return e.code, {}
+
+
+def _remote_error_message(status, data):
+    """Map a gateway non-200 to a clear message (mirrors app._gateway_error codes)."""
+    detail = ""
+    if isinstance(data, dict):
+        err = data.get("error")
+        detail = err.get("message", "") if isinstance(err, dict) else (err or "")
+    base = {
+        401: "Device token rejected — re-pair this computer (设置 → 设备 → 重新配对).",
+        402: "Account balance is exhausted — top up to keep going.",
+        429: "Rate limited — too many requests; slow down and retry.",
+        503: "The platform is busy or a provider key is missing — try again shortly.",
+    }.get(status, f"Cloud gateway error ({status}).")
+    return f"{base} {detail}".strip()
+
+
+def _tool_protocol_preamble(tool_specs):
+    """The instruction block appended to the system prompt that documents the tool
+    TEXT protocol (since /v1 has no native tool use). Lists each tool's name +
+    JSON input schema and the exact ```tool_call``` block the model must emit."""
+    specs = list(tool_specs or [])
+    if not specs:
+        return ""
+    lines = [
+        "\n\n=== TOOLS ===",
+        "You can use tools. To call one, output EXACTLY one fenced block of this form "
+        "and nothing after it:",
+        "```tool_call",
+        '{"tool": "<tool_name>", "input": { ... }}',
+        "```",
+        "The tool result arrives as the next message. Then either call another tool, "
+        "or write your FINAL answer with NO tool_call block. Available tools:",
+    ]
+    for s in specs:
+        lines.append(f"\n- {s['name']}: {(s.get('description') or '').strip()}")
+        lines.append("  input JSON schema: "
+                     + json.dumps(s.get("input_schema", {}), ensure_ascii=False))
+    return "\n".join(lines)
+
+
+def _parse_tool_call(text):
+    """Find a ```tool_call``` block in `text`. Returns a {'tool','input'} dict on a
+    valid call, an error STRING on a malformed block, or None when there is none."""
+    m = _TOOL_CALL_RE.search(text or "")
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    try:
+        obj = json.loads(raw)
+    except Exception as e:
+        return f"invalid JSON in tool_call block: {e}"
+    if not isinstance(obj, dict) or "tool" not in obj:
+        return "tool_call block must be a JSON object with a 'tool' field"
+    return {"tool": str(obj["tool"]), "input": obj.get("input") or {}}
+
+
+def _strip_tool_call_block(text):
+    return _TOOL_CALL_RE.sub("", text or "").strip()
+
+
+class RemoteRouter(ModelRouter):
+    """Drop-in ModelRouter whose turns go to the cloud /v1 gateway via a device token.
+    Holds ONLY the tng-dev-… token (never a provider key). See module note above."""
+
+    def __init__(self, cloud_base_url, device_token, token_manager=None,
+                 cost_listener=None, *, timeout=120.0, http_post=None):
+        super().__init__(token_manager=token_manager, cost_listener=cost_listener)
+        base = (cloud_base_url or "").rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3].rstrip("/")
+        self._endpoint = base + "/v1/chat/completions"
+        self._device_token = device_token       # never logged, never written to disk
+        self._timeout = timeout
+        self._http_post = http_post or _default_http_post
+
+    # -- one remote turn ----------------------------------------------------
+    def _remote_chat(self, model, messages, max_tokens):
+        headers = {"Authorization": f"Bearer {self._device_token}",
+                   "Content-Type": "application/json"}
+        body = {"model": model, "messages": messages, "max_tokens": max_tokens}
+        try:
+            status, data = self._http_post(self._endpoint, headers, body, self._timeout)
+        except Exception as e:
+            raise LLMError(f"Could not reach the Tangent cloud gateway: {e}")
+        if status != 200:
+            raise LLMError(_remote_error_message(status, data if isinstance(data, dict) else {}))
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        usage = data.get("usage") or {}
+        return {
+            "text": (msg.get("content") or "").strip(),
+            "input_tokens": int(usage.get("prompt_tokens") or 0),
+            "output_tokens": int(usage.get("completion_tokens") or 0),
+            "finish_reason": choice.get("finish_reason"),
+        }
+
+    def _account(self, model, result, budget):
+        """Record ¥ + fire the cost listener after each remote turn — so the local
+        budget guard and the run's ¥ tally stay intact even though inference is
+        remote (the cloud also records usage server-side, independently)."""
+        inp, out = result["input_tokens"], result["output_tokens"]
+        if self.token_manager and budget:
+            self.token_manager.record_cost(budget, config.cost_cny(model, inp, out))
+        if self.cost_listener:
+            self.cost_listener(model, inp, out)
+
+    # -- mirror ModelRouter.complete (remote) -------------------------------
+    def complete(self, system_prompt, user_content, model=config.OPUS, effort="high",
+                 max_tokens=8000, max_retries=3, budget=None, web_search=False):
+        # effort/web_search are server-side concerns on /v1 plain chat — accept and drop.
+        self.last_stop_reason = None
+        if self.token_manager and budget:
+            self.token_manager.ensure_can_spend(budget)   # may raise BudgetExceededError
+        messages = [{"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}]
+        result = self._remote_chat(model, messages, max_tokens)
+        self._account(model, result, budget)
+        self.last_stop_reason = "max_tokens" if result.get("finish_reason") == "length" else None
+        return result["text"] or "(The model returned no text.)"
+
+    # -- the LOCAL tool-execution loop (remote turns + local tool runs) -----
+    def complete_with_tools(self, system_prompt, user_content, tool_specs, tool_executor,
+                            model=config.OPUS, effort="high", max_tokens=12000,
+                            max_retries=3, budget=None, max_iterations=12,
+                            web_search=False):
+        self.last_stop_reason = None
+        messages = [{"role": "system", "content": system_prompt + _tool_protocol_preamble(tool_specs)},
+                    {"role": "user", "content": user_content}]
+        texts = []
+        last = None
+        for _ in range(max_iterations):
+            if self.token_manager and budget:
+                self.token_manager.ensure_can_spend(budget)   # may raise BudgetExceededError
+            last = self._remote_chat(model, messages, max_tokens)
+            self._account(model, last, budget)
+            assistant_text = last["text"]
+
+            call = _parse_tool_call(assistant_text)
+            if call is None:
+                if assistant_text.strip():
+                    texts.append(assistant_text)
+                break
+
+            # A (possibly malformed) tool call: keep any narration, echo the turn.
+            narration = _strip_tool_call_block(assistant_text)
+            if narration:
+                texts.append(narration)
+            messages.append({"role": "assistant", "content": assistant_text})
+
+            if isinstance(call, str):   # malformed → feed the error back, keep going
+                messages.append({"role": "user",
+                                 "content": (f"Your tool_call was invalid ({call}). Fix the "
+                                             f"JSON and try again, or give your final answer.")})
+                continue
+
+            name, tool_in = call["tool"], call.get("input") or {}
+            try:
+                result_str = tool_executor(name, tool_in)
+            except Exception as e:
+                result_str = f"Tool error: {type(e).__name__}: {e}"
+            messages.append({"role": "user",
+                             "content": (f"Tool result for {name}:\n{result_str}\n\n"
+                                         f"Continue: call another tool, or give your final "
+                                         f"answer (no tool_call block).")})
+        else:
+            texts.append("_(Stopped after reaching the tool-call limit.)_")
+
+        self.last_stop_reason = "max_tokens" if (last and last.get("finish_reason") == "length") else None
+        joined = "\n\n".join(t.strip() for t in texts if t and t.strip())
+        return joined or "(The model produced files but no summary text.)"
