@@ -56,10 +56,13 @@ class Supervisor:
         self.port = int(port) if port else pick_free_port()
         self.url = f"http://127.0.0.1:{self.port}/"
         self.open_browser = open_browser
-        # Per-PROCESS CSRF/origin token, never written to disk. The served index.html
-        # carries it so the SPA can echo it on mutating /api/* calls; a cross-origin
-        # page cannot read the loopback HTML (CORS) and so cannot forge the token.
-        self.csrf_token = secrets.token_urlsafe(32)
+        # Per-LAUNCH CSRF/origin shared secret, never written to disk. The served
+        # index.html carries it so the SPA can echo it on mutating /api/* calls; a
+        # cross-origin page cannot read the loopback HTML (CORS) and so cannot forge it.
+        # The Tauri shell (WS11) generates the secret and passes it via the env so the
+        # renderer and daemon agree on it; otherwise we mint our own.
+        self.csrf_token = (os.environ.get("TANGENT_LOCAL_SHARED_SECRET") or "").strip() \
+            or secrets.token_urlsafe(32)
         self._roots = roots
         self._app = None
         self._server = None
@@ -142,6 +145,8 @@ class Supervisor:
 
     def run(self):
         self.start_server()
+        # A parseable line on stdout so the Tauri shell (WS11) learns the chosen port.
+        print(f"TANGENT_DAEMON_PORT={self.port}", flush=True)
         print(f"\n  Tangent Agent 正在运行：  {self.url}")
         print("  关闭：托盘菜单选择「退出」，或在此终端按 Ctrl-C。\n")
         if self.open_browser:

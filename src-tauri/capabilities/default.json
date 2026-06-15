@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimum ACL for Tangent Agent: a native open-dialog, reveal-in-OS, and loopback fetch to the daemon. NOTHING else — no fs:*, no shell:execute, no arbitrary-URL fetch.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "opener:allow-reveal-item-in-dir",
+    {
+      "identifier": "http:default",
+      "allow": [{ "url": "http://127.0.0.1:*" }],
+      "deny": [{ "url": "http://*" }, { "url": "https://*" }]
+    }
+  ]
+}

@@ -618,12 +618,16 @@ def _spa_shell():
     # The VALUE placeholders are distinct from the JS property names
     # (window.__LOCAL_MODE__ / window.__LOCAL_TOKEN__) so the replace can't clobber
     # the identifiers themselves.
+    # Desktop build: the cloud base (auth + /v1) the local daemon points at — from
+    # TANGENT_CLOUD_URL in LOCAL_MODE, else "" (the cloud server uses relative URLs).
+    cloud_base = (os.environ.get("TANGENT_CLOUD_URL") or "").strip() if LOCAL_MODE else ""
     html = (html.replace("__PRODUCT_NAME__", config.product_name())
                 .replace("__PRODUCT_TAGLINE__", config.product_tagline())
                 .replace("__BASE_URL__", request.url_root)
                 .replace("__LOCAL_BANNER__", banner)
                 .replace("__TANGENT_LOCAL_TOKEN__", LOCAL_CSRF_TOKEN or "")
-                .replace("__TANGENT_LOCAL_MODE__", "true" if LOCAL_MODE else "false"))
+                .replace("__TANGENT_LOCAL_MODE__", "true" if LOCAL_MODE else "false")
+                .replace("__TANGENT_CLOUD_BASE__", cloud_base))
     return Response(html, mimetype="text/html")
 
 

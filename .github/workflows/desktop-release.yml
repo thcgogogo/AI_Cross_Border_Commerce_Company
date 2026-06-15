@@ -1,0 +1,130 @@
+name: desktop-release
+
+# Signed release builds fire on a desktop tag; an UNSIGNED dev build is manual-only.
+on:
+  push:
+    tags:
+      - "v*-desktop"
+  workflow_dispatch:
+    inputs:
+      dev_build:
+        description: "Produce an UNSIGNED dev build (artifacts labelled -unsigned)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      # PyInstaller cannot cross-compile — exactly one native runner per target.
+      matrix:
+        include:
+          - runner: macos-14
+            triple: aarch64-apple-darwin
+          - runner: macos-13
+            triple: x86_64-apple-darwin
+          - runner: windows-latest
+            triple: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # HONESTY GATE: a real release tag MUST have the signing secrets, or fail loudly —
+      # never silently emit an unsigned artifact that looks signed. Dev builds skip this.
+      - name: Require signing secrets on a release tag
+        if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            : "${APPLE_SIGNING_IDENTITY:?missing Apple signing secret}" \
+              "${APPLE_CERTIFICATE:?}" "${APPLE_ID:?}" "${APPLE_TEAM_ID:?}"
+          else
+            : "${AZURE_CLIENT_ID:?missing Azure Trusted Signing secret}" \
+              "${AZURE_CLIENT_SECRET:?}" "${AZURE_TENANT_ID:?}"
+          fi
+          : "${TAURI_SIGNING_PRIVATE_KEY:?missing Tauri updater signing key}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build the PyInstaller sidecar
+        shell: bash
+        env:
+          TANGENT_TARGET_TRIPLE: ${{ matrix.triple }}
+        run: |
+          python -m pip install -r requirements-desktop.txt pyinstaller
+          pyinstaller build/agentcore.spec
+          mkdir -p src-tauri/binaries
+          # Move the --onedir output's launcher to the triple-named externalBin location.
+          cp -R "dist/tangent-agentcore" "src-tauri/binaries/" || true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Signed app build (notarization inline via APPLE_* env on macOS; Windows installer
+      # signed by Azure Trusted Signing below). Tauri signs the updater bundle with the
+      # Ed25519 key so the auto-updater will accept it.
+      - name: Build + sign the Tauri app (release)
+        if: github.event_name == 'push'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Azure Trusted Signing (Windows installer + sidecar exe)
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          files-folder: src-tauri/target/release/bundle
+
+      # Manual UNSIGNED dev build — explicitly labelled so it is never mistaken for a release.
+      - name: Build the Tauri app (UNSIGNED dev build)
+        if: github.event_name == 'workflow_dispatch'
+        uses: tauri-apps/tauri-action@v0
+      - name: Label dev artifacts as -unsigned
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: echo "ARTIFACT_SUFFIX=-unsigned" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tangent-agent-${{ matrix.triple }}${{ env.ARTIFACT_SUFFIX }}
+          path: src-tauri/target/release/bundle
+
+  publish-latest-json:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+      - name: Assemble latest.json (all three targets)
+        run: |
+          echo "Run src-tauri/scripts/gen_latest_json.py over the downloaded bundles+.sig,"
+          echo "then publish latest.json to the ICP-filed updater host (ops step)."

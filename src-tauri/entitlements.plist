@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS Hardened Runtime entitlements for Tangent Agent — the MINIMUM set.
+     Each entitlement is justified; add nothing that run/notarization testing doesn't force.
+     We deliberately do NOT grant allow-unsigned-executable-memory / allow-jit unless a
+     Hardened-Runtime run test proves the frozen CPython sidecar needs them (prefer not). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The app spawns the bundled PyInstaller sidecar (a child process). -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <!-- Outbound network: loopback to the daemon + HTTPS to the paired cloud (auth + /v1). -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+</dict>
+</plist>

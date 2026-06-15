@@ -1,0 +1,47 @@
+# requirements-desktop.txt — the PyInstaller SIDECAR subset (Tangent Agent desktop).
+#
+# The local daemon boots the existing Flask app.py under waitress on 127.0.0.1, parses
+# local files, and BUILDS deliverables on-device — but it never talks to Postgres/Redis
+# and never runs Alembic. Version floors are copied verbatim from requirements.txt so dev
+# and desktop resolve compatibly (CI asserts this in tests/test_desktop_packaging.py).
+#
+# EXCLUDED (server-only — pulling them would bloat the bundle, and PyInstaller's spec
+# `excludes` them transitively):
+#   psycopg2-binary  → Postgres driver; the daemon uses bundled stdlib sqlite3.
+#   gunicorn         → fork-based WSGI server; the daemon uses waitress (Windows-friendly).
+#   redis            → shared rate-limit/RPM counters across workers; single-user daemon
+#                      runs flask-limiter on memory:// (no redis needed).
+#   alembic          → Postgres migrations; SQLite uses create_all + the column shim.
+#   sentry-sdk       → optional cloud error tracking; off by default, not for the device.
+#
+# NOTE on keys: NO provider/Anthropic/DeepSeek/Qwen key is ever bundled. `anthropic` is
+# listed only because agent_team/llm.py imports it at module load; the daemon NEVER
+# constructs an Anthropic client (inference is cloud-proxied through /v1 by RemoteRouter).
+
+# --- Web app the daemon serves locally ---
+flask>=2.2.0
+werkzeug>=2.2.0
+python-dotenv>=1.0.0
+SQLAlchemy>=1.4,<3          # SQLite only on-device (bundled stdlib sqlite3)
+PyYAML>=6.0
+flask-limiter>=3.5.0       # hard-imported by app.py; runs on memory:// (redis excluded)
+bcrypt>=4.1.0              # password hashing (imported via customers.py at load)
+APScheduler>=3.10.0        # imported at load via agent_team/scheduler.py; the in-process
+                          # scheduler is DISABLED in LOCAL_MODE (RUN_SCHEDULER=0)
+anthropic>=0.40.0         # import-time only (agent_team/llm.py); NO key bundled, never built
+
+# --- Local file parsing + on-device deliverable builders ---
+pandas>=2.0.0             # spreadsheet/CSV analysis (numpy collected via the spec's hooks)
+openpyxl>=3.1.0           # .xlsx read + the create_excel_workbook / drive_excel builders
+pypdf>=4.0.0             # PDF reading
+python-docx>=1.1.0       # .docx read + the create_word_document builder
+python-pptx>=0.6.23     # the create_slide_deck builder (XML templates collected via spec)
+reportlab>=4.0.0        # the create_pdf_document builder + the branded CJK report PDF
+
+# --- At-rest encryption + on-device runtime ---
+cryptography>=42.0.0     # Fernet encryption of generated files at rest
+waitress>=3.0.0          # the local WSGI server the supervisor boots app.py under
+pystray>=0.19.0          # the system-tray icon
+pillow>=10.0.0           # the tray glyph image
+keyring>=24.0.0          # OS-keychain storage of the tng-dev- device token (never on disk)
+watchdog>=3.0.0          # the watched-folder automation (WS12)

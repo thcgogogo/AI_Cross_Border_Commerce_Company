@@ -30,6 +30,10 @@
   <script>
     window.__LOCAL_MODE__ = __TANGENT_LOCAL_MODE__;
     window.__LOCAL_TOKEN__ = "__TANGENT_LOCAL_TOKEN__";
+    // Desktop build: the SPA is served by the LOCAL daemon, but auth + /v1 inference must
+    // target the CLOUD. The daemon fills this from the paired account's cloud host; the
+    // cloud server leaves it "" (relative URLs). NEVER a model id or ¥ rate.
+    window.__CLOUD_BASE_URL__ = "__TANGENT_CLOUD_BASE__";
   </script>
   <!-- =====================================================================
        SHELL (UI redesign Phase 2) — a minimal frame: top bar, <main id="view">,

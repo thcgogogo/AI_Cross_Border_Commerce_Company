@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tangent Agent",
+  "version": "0.1.0",
+  "identifier": "ai.tangent.agent",
+  "build": {
+    "frontendDist": "../frontend"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Tangent Agent",
+        "width": 1100,
+        "height": 760,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "//": "Strict CSP: the webview may talk ONLY to the loopback daemon and the paired cloud host (auth + /v1). No unsafe-eval, no other remote origins. CLOUD_BASE is templated per channel (CN build points at the mainland ICP-filed gateway).",
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* https://api.tangent.example; img-src 'self' data: https://api.tangent.example; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "nsis"],
+    "identifier": "ai.tangent.agent",
+    "//externalBin": "Tauri appends the target triple → resolves binaries/tangent-agentcore-<triple>(.exe), the PyInstaller sidecar CI drops into src-tauri/binaries/.",
+    "externalBin": ["binaries/tangent-agentcore"],
+    "resources": ["../frontend"],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "entitlements": "entitlements.plist",
+      "//signingIdentity": "Developer ID Application — sourced from APPLE_SIGNING_IDENTITY in CI, never committed.",
+      "signingIdentity": null
+    },
+    "windows": {
+      "//": "Installer signed by Azure Trusted Signing in CI (NOT an EV cert). No cert fields here.",
+      "nsis": {}
+    }
+  },
+  "plugins": {
+    "updater": {
+      "//": "Tauri signed auto-update. pubkey is the Ed25519 PUBLIC key; the matching PRIVATE key lives ONLY in CI secrets + a sealed backup vault (its loss is unrecoverable — see UPDATER.md). endpoints = the ICP-filed latest.json.",
+      "pubkey": "REPLACE_WITH_ED25519_PUBLIC_KEY_FROM_tauri_signer_generate",
+      "endpoints": [
+        "https://api.tangent.example/desktop/{{target}}/{{arch}}/latest.json"
+      ],
+      "dialog": true
+    },
+    "dialog": {},
+    "opener": {}
+  }
+}
