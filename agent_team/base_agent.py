@@ -80,10 +80,13 @@ class Agent:
 
     # ----------------------------------------------------------------------
     def _approved_roots(self, out_dir):
-        """Directories the LOCAL filesystem tools may touch. The desktop daemon sets
-        approved roots on the run's memory; a normal CLOUD run has none, so fall back
-        to the job's out_dir — which keeps existing cloud runs unchanged (and sandboxes
-        any filesystem tool to the job folder)."""
+        """Directories the LOCAL filesystem tools may touch, by priority:
+          1. explicit roots on the run's memory (if a caller set them);
+          2. the workspace module's approved roots — the desktop daemon's set_roots
+             (the user's chosen folders). EMPTY on the cloud server, so a normal cloud
+             run falls through untouched;
+          3. the job out_dir — keeps cloud runs unchanged and sandboxes any filesystem
+             tool to the job folder when nothing else is approved."""
         getter = getattr(self.memory, "approved_roots", None)
         if callable(getter):
             try:
@@ -92,6 +95,13 @@ class Agent:
                     return roots
             except Exception:
                 pass
+        try:
+            from . import workspace
+            roots = workspace.approved_roots()
+            if roots:
+                return roots
+        except Exception:
+            pass
         return [out_dir]
 
     def _run_with_tools(self, specs, user_content, web_search=False):

@@ -64,7 +64,17 @@ class Orchestrator:
         # Qwen/MiniMax/Kimi via one OpenAI-compatible adapter). Every Agent shares
         # this one instance, so an agent assigned to any model "just works".
         # cost_listener (optional) bills each call to the logged-in account.
-        self.llm = llm or ModelRouter(token_manager=token_manager, cost_listener=_tally)
+        if llm is not None:
+            # A router injected by the caller (e.g. the desktop daemon's RemoteRouter,
+            # which proxies inference through the cloud /v1 gateway). Route ITS cost
+            # through this run's wrappers too, so the ¥ tally (for finish_run) and the
+            # per-account biller still fire exactly as on the default path.
+            self.llm = llm
+            self.llm.cost_listener = _tally
+            if token_manager is not None:
+                self.llm.token_manager = token_manager
+        else:
+            self.llm = ModelRouter(token_manager=token_manager, cost_listener=_tally)
 
         # Surface the persistent-brain id + DB run id on the run so the snapshot/UI
         # can use them (the result page attaches per-section feedback to run_id).

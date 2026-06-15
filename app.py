@@ -1080,9 +1080,32 @@ def run_local():
     industry_key = _resolve_industry(industry_override, company_id)
     thread = threading.Thread(
         target=_run_team,
-        args=(memory, customer["id"], company_id, run_id, industry_key), daemon=True)
+        args=(memory, customer["id"], company_id, run_id, industry_key),
+        kwargs={"llm": _local_remote_router()}, daemon=True)
     thread.start()
     return jsonify({"job_id": job_id})
+
+
+def _local_remote_router():
+    """In LOCAL_MODE, build a RemoteRouter so the local run's inference is proxied
+    through the cloud /v1 gateway with THIS device's token — no provider keys on the
+    customer machine, and the cloud resolves the model + China routing + cost-control
+    server-side. Returns None (→ the Orchestrator's normal ModelRouter, i.e. the
+    Phase-0 local-key dev path) when the device isn't paired yet (TANGENT_CLOUD_URL /
+    TANGENT_DEVICE_TOKEN unset). The agent's deliverable/file tools run on-device
+    either way (RemoteRouter's local tool loop); only the model turns go to the cloud.
+
+    Pairing: the user signs in to the cloud web app, mints a code (POST
+    /api/devices/pair-code), the daemon redeems it (POST /api/devices/exchange) for a
+    tng-dev-… token, and sets TANGENT_CLOUD_URL + TANGENT_DEVICE_TOKEN. (Keychain
+    storage + the tray pairing UX are a later workstream; env is the v1/demo path.)"""
+    if not LOCAL_MODE:
+        return None
+    cloud = (os.environ.get("TANGENT_CLOUD_URL") or "").strip()
+    token = (os.environ.get("TANGENT_DEVICE_TOKEN") or "").strip()
+    if not cloud or not token:
+        return None
+    return providers.RemoteRouter(cloud, token, token_manager=TOKENS)
 
 
 def _free_run_rides_credit(customer_id):
@@ -1173,9 +1196,13 @@ def _resolve_industry(override, company_id):
     return ""
 
 
-def _run_team(memory, customer_id=None, company_id=None, run_id=None, industry_key=None):
+def _run_team(memory, customer_id=None, company_id=None, run_id=None, industry_key=None,
+              llm=None):
     try:
-        Orchestrator(memory, token_manager=TOKENS,
+        # `llm` is injected by the desktop daemon (a RemoteRouter that proxies every
+        # turn through the cloud /v1 gateway with this device's token). None → the
+        # Orchestrator builds the normal ModelRouter (cloud server / local-key dev).
+        Orchestrator(memory, llm=llm, token_manager=TOKENS,
                      cost_listener=_make_biller(customer_id),
                      company_id=company_id, run_id=run_id,
                      industry_key=industry_key).run()
