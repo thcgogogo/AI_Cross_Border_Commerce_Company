@@ -11,6 +11,8 @@ import { esc, pageHead, skeletonCard, statusPillHTML } from "../components.js";
 import { renderErrorState } from "../errors.js";
 
 function typeBadge(r) {
+  // A device (desktop daemon) run ran on the user's own machine — no cloud PDF.
+  if (r.origin === "device") return ["本地", "rep-badge-device"];
   const templates = (state.meta && state.meta.report_goal_templates) || [];
   const t = templates.find((x) => x.goal === r.goal_text);
   if (t) return t.code === "monthly" ? ["月报", "rep-badge-monthly"] : ["周报", "rep-badge-weekly"];
@@ -33,7 +35,13 @@ function dayLabel(iso) {
 function rowHTML(r) {
   const [badge, badgeCls] = typeBadge(r);
   const viewable = !!r.has_content;
-  const title = badge === "历史导入" ? "历史数据导入" : `经营${badge === "月报" ? "月报" : badge === "周报" ? "周报" : "分析报告"}`;
+  const isDevice = r.origin === "device";
+  const title = isDevice ? "本地运行"
+    : badge === "历史导入" ? "历史数据导入"
+    : `经营${badge === "月报" ? "月报" : badge === "周报" ? "周报" : "分析报告"}`;
+  // A device run produced its file ON the user's machine — there is no cloud PDF, so
+  // never render a download link (download_url is null) and label it accordingly.
+  const inactiveLabel = isDevice ? "本地结果" : "仅 PDF";
   return `<div class="rep-row ${viewable ? "viewable" : ""}" ${viewable ? `data-id="${esc(r.id)}" role="link" tabindex="0"` : ""}>
       <div class="rep-main">
         <span class="rep-title">${esc(title)}</span>
@@ -42,8 +50,8 @@ function rowHTML(r) {
       <span class="rep-date">${esc(dayLabel(r.started_at))}</span>
       ${statusPillHTML(r.status)}
       <div class="rep-actions">
-        ${viewable ? `<a href="/reports/${esc(r.id)}" data-nav class="rep-act">查看</a>` : `<span class="rep-act muted-act">仅 PDF</span>`}
-        ${r.download_url ? `<a href="${esc(r.download_url)}" class="rep-act">PDF</a>` : ""}
+        ${viewable ? `<a href="/reports/${esc(r.id)}" data-nav class="rep-act">查看</a>` : `<span class="rep-act muted-act">${esc(inactiveLabel)}</span>`}
+        ${(r.download_url && !isDevice) ? `<a href="${esc(r.download_url)}" class="rep-act">PDF</a>` : ""}
       </div>
     </div>`;
 }

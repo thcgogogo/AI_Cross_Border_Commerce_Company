@@ -89,6 +89,7 @@ from agent_team.models import (
     ORDER_SUBSCRIPTION,
     ORDER_TOPUP,
     RUN_FAILED,
+    RUN_KIND_DEVICE,
     RUN_KIND_IMPORT,
     RUN_KIND_REPORT,
     RUN_STOPPED_BUDGET,
@@ -2362,6 +2363,67 @@ def device_revoke(device_id):
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# Phase 11 — device run telemetry. A paired desktop daemon reports a run SUMMARY
+# (no file bytes) so local + cloud runs share ONE runs table / ONE 历史 list, badged
+# origin='device'. A device run NEVER consumes a ¥29 credit, never counts against the
+# plan quota, and never renders a cloud PDF (report_path stays NULL) — the existing
+# kind=='report' guards already exclude kind='device_run'. cost_yuan is a SUMMARY of
+# the user's OWN already-metered /v1 spend: it is NOT routed through the breaker/wallet.
+# ---------------------------------------------------------------------------
+_AGENT_TO_RUN_STATUS = {
+    "succeeded": RUN_SUCCEEDED, "failed": RUN_FAILED, "stopped": RUN_STOPPED_BUDGET,
+}
+
+
+@app.route("/api/devices/run/start", methods=["POST"])
+def device_run_start():
+    """A paired device opens a run on the cloud (device-auth). Returns {run_id,
+    agent_run_id}."""
+    dev = _current_device()
+    if not dev:
+        return jsonify({"error": "设备未授权。"}), 401
+    data = request.get_json(silent=True) or {}
+    agent_id = (data.get("agent_id") or "").strip()
+    if not agent_id:
+        return jsonify({"error": "缺少 agent_id。"}), 400
+    customer = CUSTOMERS.get_by_id(dev["account_id"])
+    if not customer or not customer.get("email"):
+        return jsonify({"error": "无法解析设备所属账户。"}), 400
+    company_id = metrics_store.get_or_create_company(
+        customer.get("email"), company_name=customer.get("company") or customer.get("name"))
+    run_id = metrics_store.create_device_run(
+        company_id, (data.get("goal_text") or "").strip(), device_id=dev["id"])
+    agent_run_id = metrics_store.create_agent_run(
+        run_id, account_id=dev["account_id"], device_id=dev["id"], agent_id=agent_id,
+        manifest_hash=data.get("manifest_hash"))
+    return jsonify({"run_id": run_id, "agent_run_id": agent_run_id})
+
+
+@app.route("/api/devices/run/<int:run_id>/finish", methods=["POST"])
+def device_run_finish(run_id):
+    """A paired device closes out its run with a SUMMARY (device-auth). Ownership-checked
+    (a device may only finish ITS OWN run). report_path stays NULL — no cloud PDF."""
+    dev = _current_device()
+    if not dev:
+        return jsonify({"error": "设备未授权。"}), 401
+    run = metrics_store.get_run(run_id)
+    if not run or run.get("origin") != "device" or run.get("device_id") != dev["id"]:
+        return jsonify({"error": "未找到该运行。"}), 404   # not found / not owned
+    data = request.get_json(silent=True) or {}
+    agent_status = (data.get("status") or "succeeded").strip()
+    run_status = _AGENT_TO_RUN_STATUS.get(agent_status, RUN_FAILED)
+    cost = data.get("cost_yuan")
+    # report_path STAYS NULL — device runs have no cloud PDF; cost_yuan is a summary
+    # only (already metered on the device's /v1 calls), never fed to the breaker/wallet.
+    metrics_store.finish_run(run_id, run_status, total_cost_yuan=cost, report_path=None)
+    metrics_store.finish_agent_run_for_run(
+        run_id, agent_status, cost_yuan=cost,
+        report_summary=data.get("report_summary"), report_sha256=data.get("report_sha256"),
+        report_bytes=data.get("report_bytes"), deliverable_kind=data.get("deliverable_kind"))
+    return jsonify({"ok": True, "run_id": run_id})
+
+
 @app.route("/api/account", methods=["GET", "POST"])
 def account_view():
     """DASHBOARD — given a key (header or POST body), return that account's view.
@@ -3271,7 +3333,11 @@ def list_reports():
     if not company_id:
         return jsonify({"reports": []})
     out = []
-    for r in metrics_store.list_runs(company_id, limit=100):
+    # Show cloud reports AND device (desktop) runs; both carry `origin` so the UI can
+    # badge a device run and never offer a (nonexistent) PDF. Import back-fill rows stay
+    # hidden, and device runs still never count toward the plan quota (count_runs_*).
+    for r in metrics_store.list_runs(company_id, limit=100,
+                                     kind=(RUN_KIND_REPORT, RUN_KIND_DEVICE)):
         rid = r.get("id")
         has_pdf = os.path.isfile(metrics_store.report_pdf_path(company_id, rid))
         job_id = (r.pop("report_path", "") or "").strip()

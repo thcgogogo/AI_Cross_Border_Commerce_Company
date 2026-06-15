@@ -59,10 +59,15 @@ from .models import (
     ORDER_STATUSES,
     ORDER_TOPUP,
     ORDER_TYPES,
+    AGENT_RUN_FAILED,
+    AGENT_RUN_RUNNING,
+    AGENT_RUN_STATUSES,
     RUN_FAILED,
+    RUN_KIND_DEVICE,
     RUN_KIND_IMPORT,
     RUN_KIND_REPORT,
     RUN_KINDS,
+    RUN_RUNNING,
     RUN_STATUSES,
     RUN_SUCCEEDED,
     SOURCE_LATEST_UPLOAD,
@@ -74,6 +79,7 @@ from .models import (
     Account,
     AgentCatalog,
     AgentInstall,
+    AgentRun,
     AuditLog,
     ChangelogSeen,
     Company,
@@ -163,6 +169,98 @@ def list_agent_installs(account_id):
                 .order_by(AgentInstall.created_at.desc()).all())
         return [{"agent_id": r.agent_id, "active": bool(r.active),
                  "pinned_version": r.pinned_version} for r in rows]
+
+
+def create_device_run(company_id, goal_text, device_id):
+    """Open a runs row for a desktop (device) run: kind='device_run', origin='device',
+    device_id stamped. Returns the run_id, or None. device_run is excluded from the
+    quota meter, the ¥29 credit consume, and the default 历史报告 filter — exactly like
+    'import' — because count_runs_*/list_runs/consume_report_credit all gate on
+    kind == 'report'."""
+    if not company_id:
+        return None
+    with db.session_scope() as s:
+        run = Run(company_id=company_id, goal_text=goal_text or "", status=RUN_RUNNING,
+                  kind=RUN_KIND_DEVICE, origin="device",
+                  device_id=str(device_id)[:32] if device_id else None)
+        s.add(run)
+        s.flush()
+        return run.id
+
+
+def create_agent_run(run_id, account_id, device_id, agent_id,
+                     agent_catalog_id=None, manifest_hash=None):
+    """INSERT an agent_run row (status='running') tied to an open runs.id. Returns the
+    agent_run id, or None."""
+    if not run_id:
+        return None
+    with db.session_scope() as s:
+        ar = AgentRun(
+            run_id=run_id, account_id=account_id,
+            device_id=str(device_id)[:32] if device_id else None,
+            agent_id=str(agent_id)[:64] if agent_id else None,
+            agent_catalog_id=agent_catalog_id,
+            manifest_hash=str(manifest_hash)[:71] if manifest_hash else None,
+            status=AGENT_RUN_RUNNING)
+        s.add(ar)
+        s.flush()
+        return ar.id
+
+
+def _agent_run_to_dict(ar):
+    if ar is None:
+        return None
+    return {"id": ar.id, "run_id": ar.run_id, "account_id": ar.account_id,
+            "device_id": ar.device_id, "agent_id": ar.agent_id, "status": ar.status,
+            "cost_yuan": float(ar.cost_yuan or 0), "report_summary": ar.report_summary or "",
+            "report_sha256": ar.report_sha256, "report_bytes": ar.report_bytes,
+            "deliverable_kind": ar.deliverable_kind,
+            "started_at": _iso(ar.started_at), "finished_at": _iso(ar.finished_at)}
+
+
+def get_agent_run(agent_run_id):
+    with db.session_scope() as s:
+        return _agent_run_to_dict(s.get(AgentRun, agent_run_id))
+
+
+def finish_agent_run(agent_run_id, status, cost_yuan=None, report_summary=None,
+                     report_sha256=None, report_bytes=None, deliverable_kind=None):
+    """Close out the agent_run SUMMARY. Coerces an unknown status to 'failed'; truncates
+    text defensively so a runaway client can't bloat the row. Returns True if updated."""
+    if not agent_run_id:
+        return False
+    if status not in AGENT_RUN_STATUSES:
+        status = AGENT_RUN_FAILED
+    with db.session_scope() as s:
+        ar = s.get(AgentRun, agent_run_id)
+        if ar is None:
+            return False
+        ar.status = status
+        ar.finished_at = datetime.utcnow()
+        if cost_yuan is not None:
+            ar.cost_yuan = _coerce_float(cost_yuan) or 0
+        if report_summary is not None:
+            ar.report_summary = str(report_summary)[:8000]   # text only, never bytes
+        if report_sha256 is not None:
+            ar.report_sha256 = str(report_sha256)[:64]
+        if report_bytes is not None:
+            try:
+                ar.report_bytes = int(report_bytes)
+            except (TypeError, ValueError):
+                pass
+        if deliverable_kind is not None:
+            ar.deliverable_kind = str(deliverable_kind)[:32]
+        return True
+
+
+def finish_agent_run_for_run(run_id, status, **summary):
+    """Find the agent_run tied to `run_id` and close it (convenience for the finish
+    endpoint, which knows the run_id but not the agent_run id). Returns True if found."""
+    with db.session_scope() as s:
+        ar = (s.query(AgentRun).filter(AgentRun.run_id == run_id)
+              .order_by(AgentRun.id.desc()).first())
+        ar_id = ar.id if ar else None
+    return finish_agent_run(ar_id, status, **summary) if ar_id else False
 
 
 def catalog_for_account(account_id):
@@ -1112,6 +1210,10 @@ def _run_to_dict(r):
         "kind": r.kind or RUN_KIND_REPORT,
         "total_cost_yuan": float(r.total_cost_yuan or 0.0),
         "report_path": r.report_path or "",
+        # Phase 11 — provenance: 'cloud' (web/scheduled) or 'device' (synced from a
+        # paired desktop daemon). The 历史 UI badges device runs + offers no PDF.
+        "origin": r.origin or "cloud",
+        "device_id": r.device_id or "",
         "started_at": _iso(r.started_at),
         "finished_at": _iso(r.finished_at),
     }
@@ -1137,7 +1239,12 @@ def list_runs(company_id, limit=50, kind=RUN_KIND_REPORT):
     with db.session_scope() as s:
         q = s.query(Run).filter_by(company_id=company_id)
         if kind is not None:
-            q = q.filter(Run.kind == kind)
+            # `kind` may be one value or an iterable (the 历史 page passes
+            # (report, device_run) to show local runs alongside cloud ones).
+            if isinstance(kind, (list, tuple, set, frozenset)):
+                q = q.filter(Run.kind.in_(list(kind)))
+            else:
+                q = q.filter(Run.kind == kind)
         rows = q.order_by(Run.id.desc()).limit(int(limit)).all()
         return [_run_to_dict(r) for r in rows]
 
