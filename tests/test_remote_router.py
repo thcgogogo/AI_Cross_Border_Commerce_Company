@@ -185,10 +185,11 @@ def test_write_file_writes_and_encrypts_and_denies_escape(tmp_path):
 
 def test_local_tool_specs_shape():
     names = [s["name"] for s in deliverables.LOCAL_TOOL_SPECS]
-    assert names == ["read_file", "list_dir", "write_file"]
+    assert names == ["read_file", "list_dir", "write_file", "drive_excel"]
     by = {s["name"]: s for s in deliverables.LOCAL_TOOL_SPECS}
     assert by["read_file"]["input_schema"]["required"] == ["path"]
     assert by["write_file"]["input_schema"]["required"] == ["path", "content"]
+    assert by["drive_excel"]["input_schema"]["required"] == ["path", "edits"]
 
 
 # ---------------------------------------------------------------------------

@@ -251,6 +251,52 @@ LOCAL_TOOL_SPECS = [
             "required": ["path", "content"],
         },
     },
+    {
+        # The IN-PLACE Excel editor — operates on an approved local path like the fs
+        # tools (hence it lives here, routed through run_local_tool), distinct from
+        # create_excel_workbook which emits a brand-new file into the job out_dir.
+        "name": "drive_excel",
+        "description": (
+            "Edit an EXISTING Excel (.xlsx) workbook on the user's machine: set specific "
+            "cell values or formulas, or append rows — without rebuilding the file. Use this "
+            "when the user wants their OWN spreadsheet updated/annotated rather than a "
+            "brand-new file. By DEFAULT the result is saved as a '<name>_edited.xlsx' copy "
+            "next to the original (the original is left untouched); set overwrite=true only "
+            "if the user explicitly asked to change the original in place. For a brand-new "
+            "spreadsheet, use create_excel_workbook instead."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "Absolute path of the existing .xlsx to edit."},
+                "edits": {
+                    "type": "array",
+                    "description": "Targeted edits, applied in order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "sheet": {"type": "string",
+                                      "description": "Sheet/tab name; defaults to the active sheet."},
+                            "cell": {"type": "string",
+                                     "description": "A1-style cell ref, e.g. 'B2' (with 'value' or 'formula')."},
+                            "value": {"type": ["string", "number", "boolean", "null"],
+                                      "description": "Value to set in 'cell' (numbers stay numeric)."},
+                            "formula": {"type": "string",
+                                        "description": "An Excel formula like '=SUM(B2:B10)' to set in 'cell'."},
+                            "append_row": {"type": "array",
+                                           "items": {"type": ["string", "number", "boolean", "null"]},
+                                           "description": "Cell values appended as a new bottom row."},
+                        },
+                    },
+                },
+                "overwrite": {"type": "boolean",
+                              "description": "If true, edit the original file in place instead of "
+                                             "saving a *_edited.xlsx copy. Default false."},
+            },
+            "required": ["path", "edits"],
+        },
+    },
 ]
 LOCAL_TOOL_NAMES = {spec["name"] for spec in LOCAL_TOOL_SPECS}
 
@@ -347,6 +393,31 @@ def run_local_tool(name, tool_input, approved_roots):
             return {"ok": True, "kind": "text file", "title": fn, "filename": fn,
                     "path": real, "ext": os.path.splitext(fn)[1].lstrip(".") or "txt",
                     "message": f"Wrote {fn} ({len(str(content)):,} chars)."}
+
+        if name == "drive_excel":
+            edits = tool_input.get("edits")
+            if not isinstance(edits, list) or not edits:
+                return {"ok": False, "message": "Missing 'edits' (a non-empty list)."}
+            src = workspace.assert_in_workspace(path, approved_roots)   # must exist (require_file=True)
+            overwrite = bool(tool_input.get("overwrite"))
+            # Write-approval (locked 2026-06-15): default to a *_edited.xlsx COPY next to
+            # the original, leaving the user's file untouched; overwrite is opt-in only.
+            if overwrite:
+                dest = src
+            else:
+                stem, ext = os.path.splitext(src)
+                dest = workspace.assert_in_workspace(
+                    f"{stem}_edited{ext or '.xlsx'}", approved_roots,
+                    require_file=False, require_exists=False)
+            _drive_xlsx(src, dest, edits)
+            # NOTE: user-directory writes are NOT encrypted — the user opens them
+            # directly in Excel. (The job/out_dir create_* family stays encrypted; do
+            # NOT port the Fernet-at-rest invariant here or it corrupts their files.)
+            fn = os.path.basename(dest)
+            return {"ok": True, "kind": "Excel edit", "ext": "xlsx", "title": fn,
+                    "filename": fn, "path": dest,
+                    "message": (f"Edited workbook in place: {fn}." if overwrite
+                                else f"Saved edited workbook as {fn} (original untouched).")}
 
         return {"ok": False, "message": f"Unknown local tool: {name!r}"}
     except workspace.WorkspaceError as e:
@@ -484,6 +555,38 @@ def _build_xlsx(data, path):
             ws.append([_xlsx_cell(v) for v in (row or [])])
 
     wb.save(path)
+
+
+def _drive_xlsx(src_path, dest_path, edits):
+    """IN-PLACE Excel editor: load an existing .xlsx, apply targeted edits, save to
+    dest_path (a *_edited.xlsx copy by default; the same path when overwriting).
+    Each edit names an optional sheet (default = active; created if missing) and ONE
+    of: cell+value, cell+formula ('=…' stored as a real formula), or append_row.
+    Reuses _xlsx_cell so numbers stay numeric. Raises on a missing/invalid workbook —
+    run_local_tool's caller turns that into an {ok: False} result."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(src_path)
+    for edit in edits or []:
+        if not isinstance(edit, dict):
+            continue
+        sheet = edit.get("sheet")
+        if sheet and sheet in wb.sheetnames:
+            ws = wb[sheet]
+        elif sheet:
+            ws = wb.create_sheet(title=str(sheet))
+        else:
+            ws = wb.active
+        if isinstance(edit.get("append_row"), list):
+            ws.append([_xlsx_cell(v) for v in edit["append_row"]])
+        elif edit.get("cell"):
+            cell = str(edit["cell"])
+            if edit.get("formula") is not None:
+                formula = str(edit["formula"])
+                ws[cell] = formula if formula.startswith("=") else "=" + formula
+            else:
+                ws[cell] = _xlsx_cell(edit.get("value"))
+    wb.save(dest_path)
 
 
 # Excel forbids these characters in a sheet/tab name, caps it at 31 chars, and

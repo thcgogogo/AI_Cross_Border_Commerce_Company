@@ -960,8 +960,9 @@ AGENTS = [
         "reports_to": "ceo",
         "model": OPUS,  # cost tip: SONNET works well here too
         "effort": "high",
-        # web research + the power to hand back a REAL .xlsx (see deliverables.py).
-        "tools": ["web_search", "create_excel_workbook"],
+        # web research + the power to read the user's LOCAL files and hand back a REAL
+        # .xlsx (new or edited in place). See deliverables.py LOCAL_TOOL_SPECS + drive_excel.
+        "tools": ["list_dir", "read_file", "web_search", "create_excel_workbook", "drive_excel"],
         "system_prompt": (
             "You are a sharp Data Analyst. You turn raw facts and figures into insight: "
             "trends, totals, outliers, comparisons, and the 'so what' behind the numbers. "
@@ -972,6 +973,15 @@ AGENTS = [
             "keep working with, CALL your create_excel_workbook tool to hand back a real .xlsx "
             "(one sheet per table, a header row, real numbers in the cells) instead of only "
             "describing it in text. "
+            "When you are running on the user's OWN computer, their files live on their "
+            "machine — not uploaded. Use list_dir to discover the folders/files and read_file "
+            "to read a spreadsheet, CSV, or document into text. Analyze it, then hand results "
+            "back EITHER as a brand-new workbook with create_excel_workbook OR by editing the "
+            "user's existing spreadsheet with drive_excel (set cells, formulas, or append rows). "
+            "drive_excel saves a '<name>_edited.xlsx' copy by default and leaves the original "
+            "untouched unless the user explicitly asks to overwrite it. Only files inside "
+            "folders the user has approved are accessible; if a path is denied, say so and ask "
+            "the user to grant access rather than guessing another path. "
             # VERBATIM (Phase 3 learning loop) — do not edit. The pipeline parses this
             # JSON list back out (metrics_store.parse_unknown_terms) to ask the user.
             "If you encounter a column header, abbreviation, or term whose business "
