@@ -82,7 +82,14 @@ RUN_STATUSES = (RUN_RUNNING, RUN_SUCCEEDED, RUN_FAILED, RUN_STOPPED_BUDGET)
 RUN_KIND_REPORT = "report"   # interactive / scheduled pipeline run — quota-metered
 RUN_KIND_IMPORT = "import"   # 历史数据导入 back-fill — free, hidden from 历史报告
 RUN_KIND_DEVICE = "device_run"  # Phase 11 — a run executed by a paired desktop device
-RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT, RUN_KIND_DEVICE)
+RUN_KIND_RECON = "recon"     # 对账 / 平台结算核对 — a settlement-reconciliation run
+RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT, RUN_KIND_DEVICE, RUN_KIND_RECON)
+
+# Run kinds that count against the shared report quota / can consume a 单次 credit.
+# 对账 folds into the existing report quota (owner decision 2026-06-16) so it sits
+# here next to the weekly report; import + device runs never count. `runs.kind` is a
+# plain String(32), so adding RUN_KIND_RECON needs NO enum migration.
+QUOTA_RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_RECON)
 
 # Where a scheduled run gets its input files from.
 SOURCE_LATEST_UPLOAD = "latest_upload"   # the most recent files the account uploaded
@@ -750,3 +757,77 @@ class LifecycleEvent(Base):
                   nullable=False, index=True)
     detail = Column(String(255), nullable=True)      # e.g. the receipt's order_no
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# 对账 / 平台结算核对 (settlement reconciliation) — the CUSTOMER-scoped feature.
+# Distinct from recon_reports/ReconReport above, which is our OWN internal
+# provider-bill reconciliation. These two tables hold one customer's per-run
+# settlement result (summary) and the non-blocking exception worklist. Every
+# number in them is produced by the deterministic settlement_engine, never an
+# LLM. Bucket/cause/status are kept as plain String columns (the runs.kind
+# precedent) so the value sets can grow without a Postgres enum migration.
+# ---------------------------------------------------------------------------
+
+# Per-layer match buckets the engine assigns to every line.
+SETTLE_BUCKET_MATCHED = "matched"               # 已匹配
+SETTLE_BUCKET_UNMATCHED_OURS = "unmatched_ours"  # 单边挂账(本方)
+SETTLE_BUCKET_UNMATCHED_THEIRS = "unmatched_theirs"  # 单边挂账(对方)
+SETTLE_BUCKET_PARTIAL = "partial"               # 部分匹配
+SETTLE_BUCKETS = (SETTLE_BUCKET_MATCHED, SETTLE_BUCKET_UNMATCHED_OURS,
+                  SETTLE_BUCKET_UNMATCHED_THEIRS, SETTLE_BUCKET_PARTIAL)
+
+# An exception worklist item's lifecycle.
+SETTLE_EXC_OPEN = "open"
+SETTLE_EXC_CLASSIFIED = "classified"
+SETTLE_EXC_RESOLVED = "resolved"
+SETTLE_EXC_STATUSES = (SETTLE_EXC_OPEN, SETTLE_EXC_CLASSIFIED, SETTLE_EXC_RESOLVED)
+
+
+class SettlementReport(Base):
+    """One 对账 run's result summary (customer-scoped). One row per (company, run),
+    upserted on re-runs. `summary_json` holds the full engine output blob (headline
+    figures, per-layer bucket counts, attributions, bridge-balance); the headline
+    `unexplained_amount` / `unexplained_count` and `bridge_ok` are denormalized for
+    the 对账 history list. `platform` is the platform key (e.g. "wechat_pay")."""
+    __tablename__ = "settlement_reports"
+    __table_args__ = (UniqueConstraint("company_id", "run_id",
+                                       name="uq_settlement_report_company_run"),)
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("runs.id"), nullable=False, index=True)
+    account_id = Column(String(32), nullable=True, index=True)   # loose ref accounts.id
+    platform = Column(String(32), nullable=True)
+    period_label = Column(String(64), nullable=True)
+    summary_json = Column(Text, nullable=True)
+    bridge_ok = Column(Boolean, nullable=False, default=True, server_default="1")
+    unexplained_amount = Column(Numeric(12, 2), nullable=False, default=0,
+                                server_default="0")
+    unexplained_count = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SettlementException(Base):
+    """One row of the non-blocking 异常工作清单. The customer's one-tap classify
+    (这是退款 / 已核对 / 挂账) flips `status` + records `user_label`; a generalized
+    rule is also written to the company brain so the NEXT run auto-classifies the
+    same kind of line. `detail_json` carries the matched/raw rows for display."""
+    __tablename__ = "settlement_exceptions"
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("runs.id"), nullable=False, index=True)
+    layer = Column(String(16), nullable=True)        # L1 | L2 | L3
+    bucket = Column(String(24), nullable=True)       # SETTLE_BUCKET_*
+    cause = Column(String(48), nullable=True)        # attributed cause (中文) or "未解释"
+    amount = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
+    platform_ref = Column(String(128), nullable=True)
+    bank_ref = Column(String(128), nullable=True)
+    ledger_ref = Column(String(128), nullable=True)
+    status = Column(String(16), nullable=False, default=SETTLE_EXC_OPEN,
+                    server_default=SETTLE_EXC_OPEN)
+    user_label = Column(String(48), nullable=True)   # the one-tap classification
+    detail_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)

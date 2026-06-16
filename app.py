@@ -48,6 +48,7 @@ from agent_team import (
     config,
     crypto,
     db,
+    deliverables,
     delivery,
     helpdocs,
     industry_packs,
@@ -59,6 +60,7 @@ from agent_team import (
     providers,
     reconciliation,
     security,
+    settlement_templates,
     sms,
     trends,
 )
@@ -88,9 +90,11 @@ from agent_team.models import (
     ORDER_SINGLE_REPORT,
     ORDER_SUBSCRIPTION,
     ORDER_TOPUP,
+    QUOTA_RUN_KINDS,
     RUN_FAILED,
     RUN_KIND_DEVICE,
     RUN_KIND_IMPORT,
+    RUN_KIND_RECON,
     RUN_KIND_REPORT,
     RUN_STOPPED_BUDGET,
     RUN_SUCCEEDED,
@@ -101,6 +105,7 @@ from agent_team.models import (
 )
 from agent_team.orchestrator import Orchestrator
 from agent_team.providers import ModelRouter
+from agent_team.settlement_orchestrator import SettlementOrchestrator
 from agent_team.scheduler import ReportScheduler
 from agent_team.token_manager import BudgetExceededError, TokenManager
 
@@ -335,6 +340,9 @@ def _request_start():
 _LOCAL_MODE_BLOCKED_PREFIXES = (
     "/api/pay", "/pay/", "/api/orders", "/api/plans",
     "/api/subscription", "/api/fapiao", "/api/scheduled-jobs",
+    # 对账 is cloud-only for the MVP (it ingests sensitive financial files through
+    # the cloud run path); revisit when the local-agents path takes it on.
+    "/api/recon",
 )
 _LOCAL_MUTATING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
@@ -459,6 +467,11 @@ def _validate_industry_packs_or_exit():
         industry_packs.validate_all_packs()
     except industry_packs.PackError as e:
         raise SystemExit(f"  [!!]  Industry pack error — the app cannot start: {e}")
+    # Same loud gate for the 对账 platform packs (settlement reconciliation).
+    try:
+        settlement_templates.validate_all_packs()
+    except settlement_templates.PlatformPackError as e:
+        raise SystemExit(f"  [!!]  Platform pack error — the app cannot start: {e}")
 
 
 _validate_industry_packs_or_exit()
@@ -671,6 +684,8 @@ FOUNDER_SPA_PAGES = ("team", "costs", "models", "fusion", "api")
 @app.route("/new")
 @app.route("/reports")
 @app.route("/reports/<int:run_id>")
+@app.route("/recon")
+@app.route("/recon/<int:run_id>")
 @app.route("/schedule")
 @app.route("/brain")
 @app.route("/account")
@@ -1272,7 +1287,9 @@ def _make_biller(customer_id, run_kind=RUN_KIND_REPORT):
     except Exception:
         plan_code = "free"
     charge_balance = (plan_code == "free")
-    if (charge_balance and run_kind == RUN_KIND_REPORT
+    # 对账 (RUN_KIND_RECON) folds into the report quota/credits, so a credit-funded
+    # free recon run is metered like a subscriber run too — QUOTA_RUN_KINDS covers both.
+    if (charge_balance and run_kind in QUOTA_RUN_KINDS
             and _free_run_rides_credit(customer_id)):
         charge_balance = False
 
@@ -1315,6 +1332,22 @@ def _run_team(memory, customer_id=None, company_id=None, run_id=None, industry_k
                      industry_key=industry_key).run()
     except Exception as e:
         # Make sure any failure (even while building the team) is visible to the UI.
+        if memory.snapshot().get("status") != "error":
+            memory.set_error(f"{type(e).__name__}: {e}")
+
+
+def _run_recon(memory, files_by_role, platform_key=None, period_label=None,
+               customer_id=None, company_id=None, run_id=None, account_id=None):
+    """Background target for a 对账 run — the settlement-reconciliation sibling of
+    _run_team. Bills through the SAME per-account path (run_kind=RUN_KIND_RECON folds
+    into the report quota/credits)."""
+    try:
+        SettlementOrchestrator(
+            memory, files_by_role, platform_key=platform_key, period_label=period_label,
+            token_manager=TOKENS,
+            cost_listener=_make_biller(customer_id, run_kind=RUN_KIND_RECON),
+            company_id=company_id, run_id=run_id, account_id=account_id).run()
+    except Exception as e:
         if memory.snapshot().get("status") != "error":
             memory.set_error(f"{type(e).__name__}: {e}")
 
@@ -3436,6 +3469,234 @@ def download_report_pdf(run_id):
     return send_file(io.BytesIO(crypto.read_plaintext(pdf_path)),
                      as_attachment=True, download_name="经营周报-%s.pdf" % run_id,
                      mimetype="application/pdf")
+
+
+# ---------------------------------------------------------------------------
+# 对账 / 平台结算核对 — the customer settlement-reconciliation workflow.
+# Mirrors the report run's /api/run → /api/status → report_detail → feedback
+# quartet: a multipart run trigger, the REUSED /api/status feed, a customer-safe
+# result, the non-blocking exception worklist + one-tap classify, and the
+# audit-ready Excel ledger. NOT founder-gated (it's a customer product); ¥ COGS is
+# metered internally and never surfaced here.
+# ---------------------------------------------------------------------------
+_RECON_ROLE_FIELDS = (("platform", "platform_file", True),
+                      ("bank", "bank_file", True),
+                      ("ledger", "ledger_file", False))
+_RECON_ROLE_CN = {"platform": "平台结算单", "bank": "银行流水", "ledger": "账本"}
+
+
+@app.route("/api/recon/platforms")
+def recon_platforms():
+    """The 对账 platform dropdown (customer-safe: key + Chinese label only)."""
+    if not _current_customer():
+        return jsonify({"error": "请先登录。"}), 401
+    return jsonify({"platforms": settlement_templates.available_platforms()})
+
+
+@app.route("/api/recon/run", methods=["POST"])
+@limiter.limit(config.run_rate_limit, key_func=_run_rate_key)
+def recon_run():
+    """Start a 对账 run on uploaded platform/bank/ledger files. Clones /api/run's
+    auth + breaker + plan gate + upload screening, then dispatches _run_recon."""
+    load_dotenv(override=True)
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再对账。"}), 401
+    allowed, reason = platform_guard.check(customer["id"], customer.get("daily_cap_yuan"))
+    if not allowed:
+        return jsonify({"error": reason}), 503
+    plan_ok, plan_msg, _code = _plan_gate(customer)
+    if not plan_ok:
+        return jsonify({"error": plan_msg}), 402
+
+    platform_key = (request.form.get("platform_key") or "").strip()
+    period_label = (request.form.get("period") or "").strip()
+
+    # Collect the role-tagged uploads (platform + bank required, ledger optional).
+    role_files = []
+    for role, field, required in _RECON_ROLE_FIELDS:
+        f = request.files.get(field)
+        if f and f.filename:
+            role_files.append((role, f))
+        elif required:
+            return jsonify({"error": f"请上传{_RECON_ROLE_CN[role]}文件。"}), 400
+
+    # Validate BEFORE creating the job (exe magic-byte sniff + per-file size cap).
+    max_mb = config.MAX_UPLOAD_BYTES_PER_FILE // (1024 * 1024)
+    for role, f in role_files:
+        head = f.stream.read(16)
+        f.stream.seek(0, os.SEEK_END)
+        size = f.stream.tell()
+        f.stream.seek(0)
+        if security.looks_executable(head):
+            return jsonify({"error": f"文件 “{f.filename}” 看起来是可执行程序，已拒绝上传。"}), 400
+        if size > config.MAX_UPLOAD_BYTES_PER_FILE:
+            return jsonify({"error": f"文件 “{f.filename}” 超过单个文件 {max_mb} MB 的上限。"}), 400
+
+    job_id = uuid.uuid4().hex[:12]
+    goal = (f"对账：{platform_key or '平台结算'} {period_label}").strip()
+    memory = SharedMemory(job_id, store_dir=MEMORY_DIR, goal=goal,
+                          output_dir=os.path.join(OUTPUT_DIR, job_id))
+    JOBS[job_id] = memory
+
+    job_upload_dir = os.path.join(UPLOAD_DIR, job_id)
+    os.makedirs(job_upload_dir, exist_ok=True)
+    files_by_role = {}
+    for role, f in role_files:
+        safe_name = _inbox_safe_filename(f.filename)
+        path = os.path.join(job_upload_dir, safe_name)
+        f.save(path)
+        crypto.encrypt_file_in_place(path)   # at-rest; the engine decrypts in memory
+        files_by_role[role] = (path, f.filename)
+        memory.log("system", f"已接收{_RECON_ROLE_CN[role]}：{f.filename}", type="info")
+
+    company_id = run_id = None
+    try:
+        company_id = metrics_store.get_or_create_company(
+            customer.get("email"),
+            company_name=customer.get("company") or customer.get("name"))
+        run_id = metrics_store.create_run(company_id, goal, kind=RUN_KIND_RECON)
+    except Exception as e:
+        memory.log("system", f"企业大脑暂不可用（{e}）；继续运行。", type="info")
+
+    # Set the brain ids immediately so /api/status's owner-check is correct before
+    # the background orchestrator (which also sets them) starts.
+    memory.set_company_id(company_id)
+    memory.set_run_id(run_id)
+
+    thread = threading.Thread(
+        target=_run_recon,
+        kwargs=dict(memory=memory, files_by_role=files_by_role, platform_key=platform_key,
+                    period_label=period_label, customer_id=customer["id"],
+                    company_id=company_id, run_id=run_id, account_id=customer["id"]),
+        daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id, "run_id": run_id})
+
+
+@app.route("/api/recon/result/<int:run_id>")
+def recon_result(run_id):
+    """One 对账 run as a CUSTOMER-SAFE document (the same auth ladder as report_detail).
+    NEVER returns ¥ COGS, model names, or raw activity."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    run = metrics_store.get_run(run_id)
+    if not run:
+        return jsonify({"error": "对账记录不存在。"}), 404
+    if not company_id or run.get("company_id") != company_id:
+        return jsonify({"error": "无权访问该对账。"}), 403
+
+    has_pdf = os.path.isfile(metrics_store.report_pdf_path(company_id, run_id))
+    report = metrics_store.get_settlement_report(company_id, run_id) or {}
+    out = {
+        "id": run_id,
+        "status": run.get("status"),
+        "started_at": run.get("started_at"),
+        "finished_at": run.get("finished_at"),
+        "platform": report.get("platform", ""),
+        "period_label": report.get("period_label", ""),
+        "summary": report.get("summary", {}),
+        "buckets": report.get("buckets", {}),
+        "attributions": report.get("attributions", []),
+        "bridge": report.get("bridge", {}),
+        "bridge_ok": report.get("bridge_ok", True),
+        "unexplained_count": report.get("unexplained_count", 0),
+        "has_pdf": has_pdf,
+        "download_url": ("/api/reports/%s/download" % run_id) if has_pdf else None,
+        "ledger_url": ("/api/recon/ledger/%s" % run_id) if report else None,
+    }
+    # The prose report + provenance live in the job snapshot (keyed by report_path).
+    job_id = (run.get("report_path") or "").strip()
+    if job_id and re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+        memory = _load_job_memory(job_id)
+        if memory is not None:
+            snap = memory.snapshot()
+            out["final_report"] = snap.get("final_report") or ""
+            out["sources"] = snap.get("sources") or []
+            out["sources_status"] = snap.get("sources_status")
+    return jsonify(out)
+
+
+@app.route("/api/recon/reports")
+def recon_reports_list():
+    """This account's 对账 history (newest first)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"reports": []})
+    return jsonify({"reports": metrics_store.list_settlement_reports(company_id)})
+
+
+@app.route("/api/recon/exceptions")
+def recon_exceptions():
+    """The non-blocking exception worklist (optionally one run / one status)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"exceptions": []})
+    run_id = request.args.get("run_id", type=int)
+    status_filter = (request.args.get("status") or "").strip() or None
+    return jsonify({"exceptions": metrics_store.list_settlement_exceptions(
+        company_id, run_id=run_id, status=status_filter)})
+
+
+@app.route("/api/recon/exceptions/<int:exc_id>/classify", methods=["POST"])
+def recon_classify(exc_id):
+    """One-tap classify a worklist exception (这是退款 / 已核对 / 挂账). Ownership is
+    enforced in the store (company_id filter); a cross-account id gets 404. Writes a
+    learned rule so the NEXT run auto-classifies the same kind of line."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"error": "功能暂不可用。"}), 503
+    data = request.get_json(silent=True) or {}
+    label = (data.get("label") or "").strip()
+    if not label:
+        return jsonify({"error": "请选择分类。"}), 400
+    updated = metrics_store.classify_settlement_exception(company_id, exc_id, label)
+    if not updated:
+        return jsonify({"error": "无权操作该异常，或异常不存在。"}), 404
+    return jsonify({"ok": True, "exception": updated})
+
+
+@app.route("/api/recon/ledger/<int:run_id>")
+def recon_ledger(run_id):
+    """Serve the audit-ready 对账 Excel ledger — login required, ownership-checked.
+    Built deterministically from the engine result + the live worklist status."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    run = metrics_store.get_run(run_id)
+    if not run:
+        return jsonify({"error": "对账记录不存在。"}), 404
+    if not company_id or run.get("company_id") != company_id:
+        return jsonify({"error": "无权访问该对账。"}), 403
+    result = metrics_store.get_settlement_result(company_id, run_id)
+    if not result:
+        return jsonify({"error": "对账结果尚未生成。"}), 404
+    # The live worklist (with the customer's classifications) supersedes the snapshot.
+    result["exceptions"] = metrics_store.list_settlement_exceptions(company_id, run_id)
+    metrics_store.write_audit(customer["id"], AUDIT_DOWNLOAD, _client_ip(),
+                              detail="recon ledger run %s" % run_id)
+    import tempfile
+    tmp = os.path.join(tempfile.gettempdir(),
+                       f"duizhang-{run_id}-{uuid.uuid4().hex[:8]}.xlsx")
+    deliverables.build_settlement_ledger(result, tmp)
+    try:
+        with open(tmp, "rb") as fh:
+            blob = fh.read()
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return send_file(
+        io.BytesIO(blob), as_attachment=True, download_name="对账明细-%s.xlsx" % run_id,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 # ---- Report feedback (Phase 6 feedback loop) ------------------------------

@@ -14,6 +14,7 @@ import * as onboarding from "./views/onboarding.js";
 import * as fusion from "./views/fusion.js";
 import * as reportView from "./views/report_view.js";
 import * as workflow from "./views/workflow.js";
+import * as recon from "./views/recon.js";
 import * as fTeam from "./founder/team.js";
 import * as fCosts from "./founder/costs.js";
 import * as fModels from "./founder/models.js";
@@ -31,9 +32,11 @@ const $ = (id) => document.getElementById(id);
 // in-page tab pre-selected (see ROUTES + views/workflow.js), so deep links keep working.
 const WORKFLOW_NAV = [
   { path: "/agents", label: "数据分析+报告生成" },
+  { path: "/recon", label: "对账核对" },
 ];
 // Every sub-path the one workflow page owns — used to light the 工作流 nav as active.
-const AGENTS_PATHS = ["/agents", "/new", "/reports", "/schedule", "/brain", "/account"];
+const AGENTS_PATHS = ["/agents", "/new", "/reports", "/schedule", "/brain", "/account",
+  "/recon"];
 const FOUNDER_NAV = [
   { path: "/founder/team", label: "团队与模型" },
   { path: "/founder/costs", label: "成本控制台" },
@@ -50,6 +53,8 @@ const ROUTES = [
   { pattern: /^\/new$/, view: () => workflow, auth: true, params: () => ({ tab: "generate" }) },
   { pattern: /^\/reports$/, view: () => workflow, auth: true, params: () => ({ tab: "history" }) },
   { pattern: /^\/reports\/(\d+)$/, view: () => reportView, auth: true, params: (m) => ({ runId: m[1] }) },
+  { pattern: /^\/recon$/, view: () => recon, auth: true, params: () => ({}) },
+  { pattern: /^\/recon\/(\d+)$/, view: () => recon, auth: true, params: (m) => ({ runId: m[1] }) },
   { pattern: /^\/schedule$/, view: () => workflow, auth: true, params: () => ({ tab: "schedule" }) },
   { pattern: /^\/brain$/, view: () => workflow, auth: true, params: () => ({ tab: "brain" }) },
   { pattern: /^\/account$/, view: () => workflow, auth: true, params: () => ({ tab: "account" }) },

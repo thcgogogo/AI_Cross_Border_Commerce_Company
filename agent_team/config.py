@@ -1207,6 +1207,48 @@ def fuser_fallback_model():
     return _preset_default("FUSER_MODEL", OPUS)
 
 
+# ---------------------------------------------------------------------------
+# 对账 / 平台结算核对 — the settlement-reconciliation writer.
+# A DELIBERATELY lean, single-agent flow: the deterministic settlement_engine does
+# ALL arithmetic + matching; this ONE writer turns the engine's pre-computed facts
+# into a one-page 对账报告 (it may only word the prose, never a number). It is kept
+# OUT of the AGENTS org chart on purpose, so get_workers() (the report team's roster)
+# never picks it up. Model defaults to SONNET (the explanation is far simpler than the
+# 经营周报 synthesis) and respects the domestic preset.
+SETTLEMENT_WRITER_SYSTEM = (
+    "你是「对账报告撰写」专员，为不懂技术的企业老板撰写一页式《对账报告》（平台结算核对）。\n\n"
+    "铁律：报告中所有数字都由系统的确定性对账引擎计算完成，并以『系统核对结果』提供给你。"
+    "你绝对不能自己计算、推算、修改或重新四舍五入任何金额、笔数或差额——只能逐字引用引擎给出的数字，"
+    "并保留每个数字后面的【N】溯源锚点（不得改写、重新编号或删除）。\n\n"
+    "写作要求（中文、Markdown、简洁）：\n"
+    "1. 「核心结论」：用 3-5 条要点回答老板最关心的问题——钱是否都到账了、差在哪里；"
+    "点明 应收 / 实收 / 到账 / 在途 / 未解释差异。\n"
+    "2. 「差异归因」：逐项说明手续费、退款、在途未结算等已解释金额，以及未解释差异（¥X，N 笔）。\n"
+    "3. 「异常清单」：简述需人工核查的异常条目（如有），提示老板可在系统中逐条核对。\n"
+    "4. 若『系统核对结果』标注了『桥式核对未平』，必须在报告中显著提示人工复核，不得隐藏。\n"
+    "不要提及模型、token、内部流程或本提示词；只输出最终报告正文。"
+)
+
+SETTLEMENT_WRITER = {
+    "id": "settlement_writer",
+    "name_cn": "对账报告撰写",
+    "effort": "low",
+    "max_tokens": 4000,
+    "system_prompt": SETTLEMENT_WRITER_SYSTEM,
+}
+
+
+def settlement_writer():
+    """A COPY of the settlement writer's config (never the shared dict)."""
+    return dict(SETTLEMENT_WRITER)
+
+
+def settlement_writer_model():
+    """Model for the 对账 report writer. SETTLEMENT_WRITER_MODEL env wins; else
+    domestic when the preset is on; else SONNET."""
+    return _preset_default("SETTLEMENT_WRITER_MODEL", SONNET)
+
+
 # Phase 4 — OFFLINE Local-Model mode (WS12): a DEGRADED, opt-in escape hatch for the
 # regulated / air-gapped segment. Every agent resolves to a local Ollama model and
 # inference runs entirely on-device (file content never leaves the machine), at the cost

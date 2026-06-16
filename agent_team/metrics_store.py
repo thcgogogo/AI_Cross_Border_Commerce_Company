@@ -62,14 +62,19 @@ from .models import (
     AGENT_RUN_FAILED,
     AGENT_RUN_RUNNING,
     AGENT_RUN_STATUSES,
+    QUOTA_RUN_KINDS,
     RUN_FAILED,
     RUN_KIND_DEVICE,
     RUN_KIND_IMPORT,
+    RUN_KIND_RECON,
     RUN_KIND_REPORT,
     RUN_KINDS,
     RUN_RUNNING,
     RUN_STATUSES,
     RUN_SUCCEEDED,
+    SETTLE_EXC_CLASSIFIED,
+    SETTLE_EXC_OPEN,
+    SETTLE_EXC_RESOLVED,
     SOURCE_LATEST_UPLOAD,
     SOURCE_MODES,
     SUB_ACTIVE,
@@ -100,6 +105,8 @@ from .models import (
     Run,
     ScheduledJob,
     SchedulerHeartbeat,
+    SettlementException,
+    SettlementReport,
     Subscription,
     SupportRequest,
 )
@@ -2021,7 +2028,9 @@ def consume_report_credit_if_over_quota(run_id):
         return False
     with db.session_scope() as s:
         run = s.get(Run, run_id)
-        if (run is None or run.kind != RUN_KIND_REPORT
+        # 对账 (RUN_KIND_RECON) folds into the report quota/credits, so it can
+        # consume a 单次 credit too — QUOTA_RUN_KINDS covers both kinds.
+        if (run is None or run.kind not in QUOTA_RUN_KINDS
                 or run.status == RUN_FAILED or run.credit_funded):
             return False
         company_id = run.company_id
@@ -2231,7 +2240,7 @@ def count_runs_this_month(company_id, now=None):
     with db.session_scope() as s:
         return int(s.query(Run.id)
                    .filter(Run.company_id == company_id,
-                           Run.kind == RUN_KIND_REPORT,
+                           Run.kind.in_(QUOTA_RUN_KINDS),
                            Run.credit_funded.is_(False),
                            Run.started_at >= month_start,
                            Run.status != RUN_FAILED).count())
@@ -2247,7 +2256,7 @@ def count_runs_total(company_id):
     with db.session_scope() as s:
         return int(s.query(Run.id)
                    .filter(Run.company_id == company_id,
-                           Run.kind == RUN_KIND_REPORT,
+                           Run.kind.in_(QUOTA_RUN_KINDS),
                            Run.credit_funded.is_(False),
                            Run.status != RUN_FAILED).count())
 
@@ -2409,6 +2418,224 @@ def list_recon_reports(limit=60):
                 .order_by(ReconReport.bill_date.desc(), ReconReport.id.desc())
                 .limit(int(limit)).all())
         return [_recon_to_dict(r) for r in rows]
+
+
+# ===========================================================================
+# 对账 / 平台结算核对 — CUSTOMER-scoped settlement reconciliation persistence.
+# Distinct from the recon_reports helpers above (our OWN internal billing recon).
+# Durable per-account settings (费率 / lag / learned rules) live in the existing
+# company_profile.profile_json under the "recon" key (no migration); per-run results
+# + the exception worklist live in settlement_reports / settlement_exceptions.
+# ===========================================================================
+def get_recon_settings(company_id):
+    """This account's 对账 settings ({platforms, recurring_rules, learned_rules}) from
+    the company brain, or {} (mirrors get_branding)."""
+    return (get_profile(company_id) or {}).get("recon", {}) or {}
+
+
+def learned_recon_rules(company_id):
+    """The learned exception-classification rules the engine applies before computing
+    the residual, so a prior one-tap classify improves the next run."""
+    return list(get_recon_settings(company_id).get("learned_rules") or [])
+
+
+def platform_overrides(company_id, platform_key):
+    """This account's per-platform overrides (费率 / settlement_lag_days / column_map),
+    or {} — merged into the shared pack by settlement_templates.apply_overrides."""
+    plats = get_recon_settings(company_id).get("platforms") or {}
+    return plats.get(platform_key, {}) or {}
+
+
+def _append_learned_rule(company_id, rule):
+    """Non-destructively append one learned rule to profile_json["recon"]."""
+    settings = dict(get_recon_settings(company_id))
+    rules = list(settings.get("learned_rules") or [])
+    rules.append(rule)
+    settings["learned_rules"] = rules
+    merge_profile(company_id, {"recon": settings})
+
+
+def _recon_decimal(x):
+    try:
+        return Decimal(str(x if x is not None else 0))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0")
+
+
+def save_settlement_report(company_id, run_id, result, *, account_id=None,
+                           platform=None, period_label=None):
+    """Upsert one 对账 run's result (keyed company_id+run_id) and REPLACE its
+    exception worklist rows (idempotent on re-run). `result` is the engine output
+    dict. Returns the saved report dict."""
+    if not company_id or not run_id:
+        return None
+    result = result or {}
+    summary = result.get("summary") or {}
+    bridge = result.get("bridge") or {}
+    exceptions = result.get("exceptions") or []
+    payload = json.dumps(result, ensure_ascii=False)
+    with db.session_scope() as s:
+        row = (s.query(SettlementReport)
+               .filter_by(company_id=company_id, run_id=run_id)
+               .with_for_update().one_or_none())
+        if row is None:
+            row = SettlementReport(company_id=company_id, run_id=run_id)
+            s.add(row)
+        row.account_id = account_id
+        row.platform = platform or summary.get("platform")
+        row.period_label = period_label or summary.get("period_label")
+        row.summary_json = payload
+        row.bridge_ok = bool(bridge.get("ok", True))
+        row.unexplained_amount = _recon_decimal(summary.get("未解释差异", 0))
+        row.unexplained_count = int(summary.get("未解释笔数", 0) or 0)
+        # created_at is stamped once by the column default on insert — do NOT reset it
+        # on an upsert (a re-save must preserve the original creation time).
+        # Replace the worklist for this run (a re-run supersedes the prior one).
+        (s.query(SettlementException)
+         .filter_by(company_id=company_id, run_id=run_id).delete())
+        for e in exceptions:
+            s.add(SettlementException(
+                company_id=company_id, run_id=run_id,
+                layer=(e.get("layer") or "")[:16], bucket=(e.get("bucket") or "")[:24],
+                cause=(e.get("cause") or "")[:48], amount=_recon_decimal(e.get("amount", 0)),
+                platform_ref=(e.get("platform_ref") or "")[:128],
+                bank_ref=(e.get("bank_ref") or "")[:128],
+                ledger_ref=(e.get("ledger_ref") or "")[:128],
+                status=e.get("status") or SETTLE_EXC_OPEN,
+                user_label=(e.get("user_label") or None),
+                detail_json=json.dumps({"detail": e.get("detail", "")}, ensure_ascii=False),
+            ))
+        s.flush()
+        return _settlement_report_to_dict(row)
+
+
+def _settlement_report_to_dict(r):
+    try:
+        result = json.loads(r.summary_json) if r.summary_json else {}
+    except ValueError:
+        result = {}
+    return {
+        "id": r.id, "run_id": r.run_id, "company_id": r.company_id,
+        "platform": r.platform or "", "period_label": r.period_label or "",
+        "bridge_ok": bool(r.bridge_ok),
+        "unexplained_amount": float(r.unexplained_amount or 0),
+        "unexplained_count": int(r.unexplained_count or 0),
+        "summary": result.get("summary") or {},
+        "buckets": result.get("buckets") or {},
+        "attributions": result.get("attributions") or [],
+        "bridge": result.get("bridge") or {},
+        "source_rows": result.get("source_rows") or [],
+        "created_at": _iso(r.created_at),
+    }
+
+
+def get_settlement_result(company_id, run_id):
+    """The FULL engine-output blob for a 对账 run (incl. exceptions + source_rows),
+    ownership-filtered. Used to build the audit-ready ledger export. None if missing."""
+    if not company_id or not run_id:
+        return None
+    with db.session_scope() as s:
+        row = (s.query(SettlementReport)
+               .filter_by(company_id=company_id, run_id=run_id).one_or_none())
+        if row is None:
+            return None
+        try:
+            return json.loads(row.summary_json) if row.summary_json else {}
+        except ValueError:
+            return {}
+
+
+def get_settlement_report(company_id, run_id):
+    """One 对账 result as a customer-safe dict (no ¥ COGS — none is stored here), with
+    an ownership filter. None if missing or not this company's."""
+    if not company_id or not run_id:
+        return None
+    with db.session_scope() as s:
+        row = (s.query(SettlementReport)
+               .filter_by(company_id=company_id, run_id=run_id).one_or_none())
+        return _settlement_report_to_dict(row) if row is not None else None
+
+
+def list_settlement_reports(company_id, limit=60):
+    """This account's 对账 history, newest first (the 对账 list surface)."""
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        rows = (s.query(SettlementReport)
+                .filter_by(company_id=company_id)
+                .order_by(SettlementReport.id.desc()).limit(int(limit)).all())
+        return [_settlement_report_to_dict(r) for r in rows]
+
+
+def _settlement_exc_to_dict(e):
+    try:
+        detail = (json.loads(e.detail_json) if e.detail_json else {}).get("detail", "")
+    except ValueError:
+        detail = ""
+    return {
+        "id": e.id, "run_id": e.run_id, "layer": e.layer or "", "bucket": e.bucket or "",
+        "cause": e.cause or "", "amount": float(e.amount or 0),
+        "platform_ref": e.platform_ref or "", "bank_ref": e.bank_ref or "",
+        "ledger_ref": e.ledger_ref or "", "status": e.status or SETTLE_EXC_OPEN,
+        "user_label": e.user_label or "", "detail": detail,
+        "created_at": _iso(e.created_at), "updated_at": _iso(e.updated_at),
+    }
+
+
+def list_settlement_exceptions(company_id, run_id=None, status=None, limit=300):
+    """The exception worklist for an account (optionally one run / one status)."""
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        q = s.query(SettlementException).filter_by(company_id=company_id)
+        if run_id:
+            q = q.filter_by(run_id=run_id)
+        if status:
+            q = q.filter_by(status=status)
+        rows = q.order_by(SettlementException.id.asc()).limit(int(limit)).all()
+        return [_settlement_exc_to_dict(e) for e in rows]
+
+
+# The one-tap classification labels the worklist offers -> (canonical cause, status).
+_RECON_LABELS = {
+    "refund": ("退款/退货", SETTLE_EXC_CLASSIFIED),
+    "这是退款": ("退款/退货", SETTLE_EXC_CLASSIFIED),
+    "checked": ("已核对", SETTLE_EXC_RESOLVED),
+    "已核对": ("已核对", SETTLE_EXC_RESOLVED),
+    "pending": ("挂账", SETTLE_EXC_CLASSIFIED),
+    "挂账": ("挂账", SETTLE_EXC_CLASSIFIED),
+}
+
+
+def classify_settlement_exception(company_id, exception_id, label):
+    """One-tap classify an exception: flip its status/cause AND write a learned rule
+    so the NEXT run auto-classifies the same kind of line. Ownership-enforced via the
+    company_id filter. Returns the updated exception dict, or None if not found."""
+    if not company_id or not exception_id:
+        return None
+    key = (label or "").strip()
+    cause, status = _RECON_LABELS.get(key, (None, SETTLE_EXC_CLASSIFIED))
+    learn = None
+    with db.session_scope() as s:
+        e = (s.query(SettlementException)
+             .filter_by(id=exception_id, company_id=company_id).one_or_none())
+        if e is None:
+            return None
+        e.status = status
+        e.user_label = key[:48]
+        if cause:
+            e.cause = cause
+        e.updated_at = datetime.utcnow()
+        result = _settlement_exc_to_dict(e)
+        # Build the learned rule from the strongest identifying ref this line has.
+        for field in ("ledger_ref", "platform_ref", "bank_ref"):
+            val = getattr(e, field, None)
+            if val:
+                learn = {"match": {field: val}, "cause": cause or e.cause, "label": key}
+                break
+    if cause and learn:
+        _append_learned_rule(company_id, learn)
+    return result
 
 
 # ===========================================================================

@@ -61,7 +61,8 @@ _FONT_REGISTERED = False
 _ANCHOR_RE = re.compile(r"【\s*\d+\s*】")
 
 # How computed_by renders in the 核验方式 column of the 数据来源与核验 table.
-_COMPUTED_BY_CN = {"trend_engine": "趋势引擎（精确计算）", "data_analyst": "数据分析"}
+_COMPUTED_BY_CN = {"trend_engine": "趋势引擎（精确计算）", "data_analyst": "数据分析",
+                   "recon_engine": "对账引擎（精确计算）"}
 
 
 class PdfFontError(RuntimeError):

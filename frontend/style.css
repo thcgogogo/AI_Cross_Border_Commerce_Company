@@ -1525,3 +1525,53 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
   .wf-bar-inner { padding: 18px 16px 0; }
   .wf-title { font-size: 19px; }
 }
+
+/* ===========================================================================
+   对账 / 平台结算核对 (settlement reconciliation) — recon.js view
+   =========================================================================== */
+.page-head { margin: 8px 0 18px; }
+.page-head h1 { margin: 0 0 6px; font-size: 22px; }
+.back-link { display: inline-block; margin-bottom: 8px; color: var(--muted); text-decoration: none; font-size: 13px; }
+.field .req { color: #c0392b; font-style: normal; font-size: 11px; font-weight: 600; margin-left: 4px; }
+.recon-form .field { margin-bottom: 4px; }
+
+.recon-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 6px 0 18px; }
+.recon-card { background: var(--card, #fff); border: 1px solid var(--border, #e6e8ee); border-radius: 12px; padding: 14px 16px; }
+.recon-card .rc-k { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.recon-card .rc-v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.recon-card.warn { border-color: #f0b429; background: #fffaf0; }
+.recon-card.warn .rc-v { color: #b9770e; }
+
+.recon-feed { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow: auto; }
+.recon-feed-line { font-size: 13px; color: var(--muted); padding: 2px 0; }
+.recon-feed-line.success { color: #1d9e75; }
+.recon-feed-line.warning { color: #b9770e; }
+.recon-feed-line.error { color: #c0392b; }
+.recon-prog-title { font-weight: 600; margin-bottom: 8px; }
+
+.recon-history { margin-top: 22px; }
+.recon-history h2 { font-size: 16px; margin: 0 0 10px; }
+.recon-hist-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border, #e6e8ee); border-radius: 10px; margin-bottom: 8px; text-decoration: none; color: inherit; }
+.recon-hist-row:hover { border-color: var(--accent, #1f5eff); }
+.recon-hist-row .rh-period { font-weight: 600; }
+.recon-hist-row .rh-plat { color: var(--muted); font-size: 13px; }
+.recon-hist-row .rh-diff { margin-left: auto; font-size: 13px; }
+.recon-hist-row .rh-diff.warn { color: #b9770e; }
+.recon-hist-row .rh-diff.ok { color: #1d9e75; }
+.recon-hist-row .rh-bridge { color: #c0392b; font-size: 12px; }
+
+.recon-attr { list-style: none; padding: 0; margin: 8px 0 0; }
+.recon-attr li { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed var(--border, #e6e8ee); font-variant-numeric: tabular-nums; }
+
+.recon-report-body { margin-top: 4px; }
+.recon-worklist h2 { font-size: 16px; margin: 0 0 4px; }
+.exc-row { border: 1px solid var(--border, #e6e8ee); border-radius: 10px; padding: 12px; margin-top: 10px; }
+.exc-row.done { opacity: 0.7; }
+.exc-main { display: flex; align-items: baseline; gap: 12px; }
+.exc-main .exc-amt { font-weight: 700; font-variant-numeric: tabular-nums; }
+.exc-main .exc-cause { color: #b9770e; font-size: 13px; }
+.exc-main .exc-layer { color: var(--muted); font-size: 12px; margin-left: auto; }
+.exc-detail { font-size: 13px; margin: 4px 0 8px; }
+.exc-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.exc-actions .ghost-btn { padding: 5px 12px; font-size: 13px; }
+.exc-done { color: #1d9e75; font-size: 13px; font-weight: 600; }

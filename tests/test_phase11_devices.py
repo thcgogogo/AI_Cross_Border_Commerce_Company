@@ -199,7 +199,9 @@ def test_migration_0007_is_reversible(tmp_path):
     _seed_pre_0007(db_path)
 
     assert _alembic(db_path, "upgrade", "head").returncode == 0
-    down = _alembic(db_path, "downgrade", "-1")
+    # Target 0006 explicitly (not "-1") so this stays a test of 0007's
+    # reversibility even after later migrations (0008+) are stacked on head.
+    down = _alembic(db_path, "downgrade", "0006_phase7_single_report")
     assert down.returncode == 0, down.stderr
     conn = sqlite3.connect(db_path)
     tables = {r[0] for r in conn.execute(

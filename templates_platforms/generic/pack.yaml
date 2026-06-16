@@ -1,0 +1,39 @@
+# 通用 — the neutral fallback platform pack (对账 / 平台结算核对).
+#
+# Used when the platform is unknown or set to "通用 / 其他". It carries only the
+# common bank/ledger column defaults and the four baseline attribution causes; the
+# customer supplies the platform statement's column mapping via company-brain
+# overrides. No platform-specific 费率 is assumed.
+display_name_cn: "通用 / 其他"
+
+settlement_lag_days: 1
+amount_tolerance: 0.01
+
+column_map:
+  platform:
+    event_time: "交易时间"
+    platform_txn_no: "交易号"
+    merchant_order_no: "商户订单号"
+    status: "状态"
+    gross_amount: "订单金额"
+    net_amount: "结算金额"
+    fee: "手续费"
+    refund_amount: "退款金额"
+  bank:
+    event_time: "交易日期"
+    net_amount: "收入金额"
+    counterparty: "对方户名"
+  ledger:
+    merchant_order_no: "商户订单号"
+    event_time: "下单时间"
+    gross_amount: "订单金额"
+
+attribution_rules:
+  - cause: "支付手续费"
+    kind: "fee"
+  - cause: "退款/退货"
+    kind: "refund"
+  - cause: "在途/未结算"
+    kind: "in_transit"
+  - cause: "提现差额"
+    kind: "withdraw_diff"

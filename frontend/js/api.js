@@ -71,6 +71,19 @@ export const sendFeedback = (payload) => postJSON("/api/feedback", payload);
 export const saveFeedbackPreference = (id) => postJSON("/api/feedback/save-preference", { id });
 export const confirmGlossaryTerms = (answers) => postJSON("/api/glossary/confirm", { answers });
 
+// ---- 对账 / 平台结算核对 (settlement reconciliation) ---------------------------
+export const getReconPlatforms = () => getJSON("/api/recon/platforms");
+export const startRecon = (formData) => postForm("/api/recon/run", formData);
+export const getReconResult = (runId) => getJSON(`/api/recon/result/${encodeURIComponent(runId)}`);
+export const getReconHistory = () => getJSON("/api/recon/reports");
+export const getReconExceptions = (params = {}) => {
+  const q = new URLSearchParams(params).toString();
+  return getJSON(`/api/recon/exceptions${q ? "?" + q : ""}`);
+};
+export const classifyReconException = (excId, label) =>
+  postJSON(`/api/recon/exceptions/${encodeURIComponent(excId)}/classify`, { label });
+export const reconLedgerUrl = (runId) => `/api/recon/ledger/${encodeURIComponent(runId)}`;
+
 // ---- token manager (founder 成本控制台) ---------------------------------------
 export const getTokens = () => getJSON("/api/tokens");
 export const setTokensTotal = (limit) => postJSON("/api/tokens/total", { limit });

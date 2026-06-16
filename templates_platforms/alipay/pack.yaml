@@ -1,0 +1,45 @@
+# 支付宝 — settlement-statement parsing template (对账 / 平台结算核对).
+#
+# PROVISIONAL — column names follow the 支付宝 商户「业务明细」export (订单级:
+# 商家实收 / 服务费 …). The 账务明细 (资金级: 收入/支出/账户余额) layout and the real
+# cadence MUST be confirmed against a customer's export. Per-account differences
+# belong in company-brain overrides, not here.
+display_name_cn: "支付宝"
+
+fee_rate: 0.006
+settlement_lag_days: 1
+amount_tolerance: 0.01
+
+column_map:
+  platform:                      # 支付宝 业务明细 (订单级)
+    event_time: "创建时间"
+    platform_txn_no: "支付宝交易号"
+    merchant_order_no: "商户订单号"
+    status: "业务类型"
+    gross_amount: "订单金额"
+    net_amount: "商家实收"
+    fee: "服务费"
+    counterparty: "对方账户"
+  bank:
+    event_time: "交易日期"
+    net_amount: "收入金额"
+    counterparty: "对方户名"
+    batch_no: "凭证号"
+  ledger:
+    merchant_order_no: "商户订单号"
+    event_time: "下单时间"
+    gross_amount: "订单金额"
+
+status_map:
+  "交易付款": "SUCCESS"
+  "退款": "REFUND"
+
+attribution_rules:
+  - cause: "支付手续费"
+    kind: "fee"
+  - cause: "退款/退货"
+    kind: "refund"
+  - cause: "在途/未结算"
+    kind: "in_transit"
+  - cause: "提现差额"
+    kind: "withdraw_diff"

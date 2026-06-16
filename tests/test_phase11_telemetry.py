@@ -52,7 +52,9 @@ def _device_token(account_id):
 # Model + metrics_store layer
 # ---------------------------------------------------------------------------
 def test_run_kinds_includes_device_run():
-    assert RUN_KINDS == ("report", "import", "device_run")
+    # RUN_KINDS grows over time (e.g. "recon" was added for 对账); assert membership
+    # rather than an exact tuple so a new kind doesn't spuriously fail this.
+    assert {"report", "import", "device_run"} <= set(RUN_KINDS)
     assert RUN_KIND_DEVICE == "device_run"
 
 

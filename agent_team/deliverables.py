@@ -570,6 +570,43 @@ def _build_xlsx(data, path):
     wb.save(path)
 
 
+def build_settlement_ledger(result, out_path):
+    """Build the audit-ready 对账 ledger .xlsx from a settlement_engine result dict —
+    DETERMINISTICALLY (the engine's numbers go straight in via _xlsx_cell, never
+    re-typed by an LLM). Sheets: 对账汇总 / 差异归因 / 异常清单 / 数据来源与核验.
+    Writes an UNENCRYPTED workbook (the caller serves it as an ephemeral download)."""
+    result = result or {}
+    summary = result.get("summary") or {}
+    order = ["应收", "实收", "到账", "在途金额", "总手续费", "总佣金", "总退款",
+             "未解释差异", "未解释笔数"]
+    summary_rows = [[k, summary.get(k)] for k in order if k in summary]
+
+    attr_rows = [[a.get("cause"), a.get("amount"), a.get("count")]
+                 for a in (result.get("attributions") or [])]
+
+    exc_rows = [[e.get("layer"), e.get("bucket"), e.get("cause"), e.get("amount"),
+                 e.get("platform_ref"), e.get("bank_ref"), e.get("ledger_ref"),
+                 e.get("status"), e.get("detail")]
+                for e in (result.get("exceptions") or [])]
+
+    src_rows = [[s.get("anchor"), s.get("claim_cn"), s.get("source_file"),
+                 s.get("source_detail"), s.get("computed_by")]
+                for s in (result.get("source_rows") or [])]
+
+    data = {"sheets": [
+        {"name": "对账汇总", "headers": ["项目", "金额"], "rows": summary_rows},
+        {"name": "差异归因", "headers": ["差异类型", "金额", "笔数"], "rows": attr_rows},
+        {"name": "异常清单",
+         "headers": ["层级", "类型", "归因", "金额", "平台单号", "银行流水",
+                     "账本单号", "状态", "说明"], "rows": exc_rows},
+        {"name": "数据来源与核验",
+         "headers": ["锚点", "数据 / 结论", "来源文件", "定位", "核验方式"],
+         "rows": src_rows},
+    ]}
+    _build_xlsx(data, out_path)
+    return out_path
+
+
 def _drive_xlsx(src_path, dest_path, edits):
     """IN-PLACE Excel editor: load an existing .xlsx, apply targeted edits, save to
     dest_path (a *_edited.xlsx copy by default; the same path when overwriting).

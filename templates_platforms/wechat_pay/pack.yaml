@@ -1,0 +1,63 @@
+# 微信支付 — settlement-statement parsing template (对账 / 平台结算核对).
+#
+# PROVISIONAL — column names are grounded in the official 微信支付 商户平台「交易账单」
+# (ALL 类型) 27-column layout, but fee_rate, settlement cadence, and the bank/ledger
+# column defaults MUST be confirmed against a customer's real export. A customer's
+# own 费率 / lag / column-name differences belong in their company-brain overrides,
+# never in this shared file.
+#
+# WeChat exports each CSV cell prefixed with a backtick (`) to force text; the engine
+# strips it on load, so map to the clean header names below.
+display_name_cn: "微信支付"
+
+# Default 费率 (fraction). WeChat standard rate is ~0.6% but varies by merchant
+# category — treat as a sanity-check default; the real 手续费 column is authoritative.
+fee_rate: 0.006
+
+# Bank 到账 typically lands T+1 after settlement (merchant-configurable).
+settlement_lag_days: 1
+
+# Rounding tolerance for amount matching, in yuan (分-level).
+amount_tolerance: 0.01
+
+# raw column header  ->  canonical NormalizedTxn field, per uploaded source role.
+column_map:
+  platform:                      # the 微信支付 交易账单 (订单级)
+    event_time: "交易时间"
+    platform_txn_no: "微信订单号"
+    merchant_order_no: "商户订单号"
+    status: "交易状态"
+    gross_amount: "订单金额"
+    net_amount: "应结订单金额"
+    fee: "手续费"
+    refund_amount: "退款金额"
+    coupon_amount: "代金券金额"
+    currency: "货币种类"
+  bank:                          # 银行流水 (provisional defaults, override per account)
+    event_time: "交易日期"
+    net_amount: "收入金额"
+    counterparty: "对方户名"
+    batch_no: "凭证号"
+  ledger:                        # 账本 / ERP 订单导出 (provisional defaults)
+    merchant_order_no: "商户订单号"
+    event_time: "下单时间"
+    gross_amount: "订单金额"
+
+# raw 交易状态 value -> canonical status. Unmapped values pass through verbatim.
+status_map:
+  SUCCESS: "SUCCESS"
+  REFUND: "REFUND"
+  REVOKED: "REVOKED"
+
+# Ordered causes the engine walks to explain each gap; the residual is whatever no
+# rule claims. `kind` selects the engine's deterministic handler — adding a cause
+# that fits an existing kind is a pure YAML edit. Order matters (fee before residual).
+attribution_rules:
+  - cause: "支付手续费"
+    kind: "fee"
+  - cause: "退款/退货"
+    kind: "refund"
+  - cause: "在途/未结算"
+    kind: "in_transit"
+  - cause: "提现差额"
+    kind: "withdraw_diff"
