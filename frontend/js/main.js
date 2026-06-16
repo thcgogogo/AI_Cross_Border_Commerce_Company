@@ -19,7 +19,6 @@ import * as reports from "./views/reports.js";
 import * as schedule from "./views/schedule.js";
 import * as brain from "./views/brain.js";
 import * as account from "./views/account.js";
-import * as market from "./views/market.js";
 import * as devices from "./views/devices.js";
 import * as fTeam from "./founder/team.js";
 import * as fCosts from "./founder/costs.js";
@@ -55,7 +54,6 @@ const FOUNDER_NAV = [
 
 const ROUTES = [
   { pattern: /^\/$/, view: () => fusion },                       // public Fusion chat (the landing)
-  { pattern: /^\/market$/, view: () => market },                 // public 智能体市场 (agent supermarket)
   { pattern: /^\/agents$/, view: () => workbench, auth: true },  // the Agents (report product) home
   { pattern: /^\/devices$/, view: () => devices, auth: true },   // 桌面版与设备 (pair/manage desktop)
   { pattern: /^\/new$/, view: () => reportNew, auth: true },
@@ -173,11 +171,9 @@ function navLinkHTML(item, current) {
 function renderNav() {
   const nav = $("mainNav");
   const current = location.pathname;
-  // Fusion is the public home — always shown. 智能体市场 is the public agent
-  // supermarket. Agents is a dropdown of the report views when logged in, a single
-  // link (→ the sign-in gate) when logged out.
+  // Fusion is the public home — always shown. Agents is a dropdown of the report
+  // views when logged in, a single link (→ the sign-in gate) when logged out.
   let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
-  html += navLinkHTML({ path: "/market", label: "智能体市场" }, current);
   if (state.account) {
     const open = AGENTS_PATHS.some((p) => (p === "/agents" ? current === "/agents" : current.startsWith(p)));
     html += `<div class="nav-drop" id="agentsDrop">
@@ -222,7 +218,6 @@ function renderNavSheet() {
   const sheet = $("navSheet");
   const current = location.pathname;
   let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
-  html += navLinkHTML({ path: "/market", label: "智能体市场" }, current);
   if (state.account) {
     html += `<div class="nav-sheet-group">Agents</div>` + AGENTS_NAV.map((i) => navLinkHTML(i, current)).join("");
   } else {
