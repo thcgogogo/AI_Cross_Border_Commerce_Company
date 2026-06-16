@@ -1502,3 +1502,26 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
   padding: 11px 22px; font: inherit; font-weight: 700; font-size: 15px; cursor: pointer;
 }
 .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ===========================================================================
+   工作流 · 数据分析+报告生成 — the consolidated workflow page (in-page tab strip)
+   =========================================================================== */
+.wf-bar { border-bottom: 1px solid var(--line); background: var(--card); }
+.wf-bar-inner { max-width: 1080px; margin: 0 auto; padding: 22px 24px 0; }
+.wf-titlerow { margin-bottom: 12px; }
+.wf-title { font-size: 22px; font-weight: 800; margin: 0; }
+.wf-sub { color: var(--muted); font-size: 13.5px; margin: 4px 0 0; }
+.wf-tabs { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.wf-tabs::-webkit-scrollbar { display: none; }
+.wf-tab {
+  flex: none; border: none; background: none; cursor: pointer; font: inherit;
+  font-size: 14px; font-weight: 600; color: var(--muted); padding: 10px 14px;
+  border-bottom: 2px solid transparent; white-space: nowrap; transition: color .12s;
+}
+.wf-tab:hover { color: var(--ink); }
+.wf-tab.on { color: var(--accent); border-bottom-color: var(--accent); }
+/* sub-views bring their own .page / .page-narrow wrapper, so no padding here */
+@media (max-width: 640px) {
+  .wf-bar-inner { padding: 18px 16px 0; }
+  .wf-title { font-size: 19px; }
+}

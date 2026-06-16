@@ -1,10 +1,10 @@
 // ===========================================================================
 // main.js — boot, path router (History API) and shell wiring (plan §5).
 //
-// Customer IA (§3): 工作台 / 生成报告 / 历史报告 / 定时与送达 / 企业大脑 /
-// 账户与套餐 — plus, for is_admin accounts only, the 内部工具 section with the
-// five machinery views and the /admin pages. Logged-out visitors see the
-// marketing landing.
+// Customer IA: the whole data→report→deliver workflow on ONE page ("数据分析+报告
+// 生成", views/workflow.js) under the "工作流" tab — plus, for is_admin accounts only,
+// the 内部工具 section with the five machinery views and the /admin pages. Logged-out
+// visitors see the marketing landing.
 // ===========================================================================
 import { state, bus, isAdmin, loadMeta, loadMe, loadChangelogState } from "./state.js";
 import { esc } from "./components.js";
@@ -12,13 +12,8 @@ import * as api from "./api.js";
 import * as auth from "./views/auth.js";
 import * as onboarding from "./views/onboarding.js";
 import * as fusion from "./views/fusion.js";
-import * as workbench from "./views/workbench.js";
-import * as reportNew from "./views/report_new.js";
 import * as reportView from "./views/report_view.js";
-import * as reports from "./views/reports.js";
-import * as schedule from "./views/schedule.js";
-import * as brain from "./views/brain.js";
-import * as account from "./views/account.js";
+import * as workflow from "./views/workflow.js";
 import * as fTeam from "./founder/team.js";
 import * as fCosts from "./founder/costs.js";
 import * as fModels from "./founder/models.js";
@@ -30,17 +25,15 @@ const $ = (id) => document.getElementById(id);
 // ---------------------------------------------------------------------------
 // Navigation model
 // ---------------------------------------------------------------------------
-// The report/analytics product, now grouped under the "Agents" section (its home
-// 工作台 moved from "/" to "/agents", since "/" is the public Fusion chat).
-const AGENTS_NAV = [
-  { path: "/agents", label: "工作台" },
-  { path: "/new", label: "生成报告" },
-  { path: "/reports", label: "历史报告" },
-  { path: "/schedule", label: "定时与送达" },
-  { path: "/brain", label: "企业大脑" },
-  { path: "/account", label: "账户与套餐" },
+// The report/analytics product — the whole data→report→deliver workflow now lives on
+// ONE page ("数据分析+报告生成") under the "工作流" nav tab. The old per-view paths
+// (/new /reports /schedule /brain /account) still route to that page with the matching
+// in-page tab pre-selected (see ROUTES + views/workflow.js), so deep links keep working.
+const WORKFLOW_NAV = [
+  { path: "/agents", label: "数据分析+报告生成" },
 ];
-const AGENTS_PATHS = AGENTS_NAV.map((i) => i.path);
+// Every sub-path the one workflow page owns — used to light the 工作流 nav as active.
+const AGENTS_PATHS = ["/agents", "/new", "/reports", "/schedule", "/brain", "/account"];
 const FOUNDER_NAV = [
   { path: "/founder/team", label: "团队与模型" },
   { path: "/founder/costs", label: "成本控制台" },
@@ -52,13 +45,14 @@ const FOUNDER_NAV = [
 
 const ROUTES = [
   { pattern: /^\/$/, view: () => fusion },                       // public Fusion chat (the landing)
-  { pattern: /^\/agents$/, view: () => workbench, auth: true },  // the Agents (report product) home
-  { pattern: /^\/new$/, view: () => reportNew, auth: true },
-  { pattern: /^\/reports$/, view: () => reports, auth: true },
+  // The whole report workflow on one page; each legacy path selects its in-page tab.
+  { pattern: /^\/agents$/, view: () => workflow, auth: true, params: () => ({ tab: "home" }) },
+  { pattern: /^\/new$/, view: () => workflow, auth: true, params: () => ({ tab: "generate" }) },
+  { pattern: /^\/reports$/, view: () => workflow, auth: true, params: () => ({ tab: "history" }) },
   { pattern: /^\/reports\/(\d+)$/, view: () => reportView, auth: true, params: (m) => ({ runId: m[1] }) },
-  { pattern: /^\/schedule$/, view: () => schedule, auth: true },
-  { pattern: /^\/brain$/, view: () => brain, auth: true },
-  { pattern: /^\/account$/, view: () => account, auth: true },
+  { pattern: /^\/schedule$/, view: () => workflow, auth: true, params: () => ({ tab: "schedule" }) },
+  { pattern: /^\/brain$/, view: () => workflow, auth: true, params: () => ({ tab: "brain" }) },
+  { pattern: /^\/account$/, view: () => workflow, auth: true, params: () => ({ tab: "account" }) },
   { pattern: /^\/founder\/team$/, view: () => fTeam, auth: true },
   { pattern: /^\/founder\/costs$/, view: () => fCosts, auth: true },
   { pattern: /^\/founder\/models$/, view: () => fModels, auth: true },
@@ -168,18 +162,18 @@ function navLinkHTML(item, current) {
 function renderNav() {
   const nav = $("mainNav");
   const current = location.pathname;
-  // Fusion is the public home — always shown. Agents is a dropdown of the report
-  // views when logged in, a single link (→ the sign-in gate) when logged out.
+  // Fusion is the public home — always shown. 工作流 is a dropdown holding the single
+  // consolidated workflow page when logged in, a single link (→ the sign-in gate) out.
   let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
   if (state.account) {
     const open = AGENTS_PATHS.some((p) => (p === "/agents" ? current === "/agents" : current.startsWith(p)));
     html += `<div class="nav-drop" id="agentsDrop">
       <button type="button" class="nav-link ${open ? "active" : ""}" id="agentsDropBtn"
-        aria-haspopup="true" aria-expanded="false">Agents <span class="nav-drop-caret">▾</span></button>
-      <div class="nav-drop-menu">${AGENTS_NAV.map((i) => navLinkHTML(i, current)).join("")}</div>
+        aria-haspopup="true" aria-expanded="false">工作流 <span class="nav-drop-caret">▾</span></button>
+      <div class="nav-drop-menu">${WORKFLOW_NAV.map((i) => `<a class="nav-link ${open ? "active" : ""}" href="${esc(i.path)}" data-nav>${esc(i.label)}</a>`).join("")}</div>
     </div>`;
   } else {
-    html += navLinkHTML({ path: "/agents", label: "Agents" }, current);
+    html += navLinkHTML({ path: "/agents", label: "工作流" }, current);
   }
   if (isAdmin()) {
     const open = current.startsWith("/founder");
@@ -216,9 +210,9 @@ function renderNavSheet() {
   const current = location.pathname;
   let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
   if (state.account) {
-    html += `<div class="nav-sheet-group">Agents</div>` + AGENTS_NAV.map((i) => navLinkHTML(i, current)).join("");
+    html += `<div class="nav-sheet-group">工作流</div>` + WORKFLOW_NAV.map((i) => navLinkHTML(i, current)).join("");
   } else {
-    html += navLinkHTML({ path: "/agents", label: "Agents" }, current);
+    html += navLinkHTML({ path: "/agents", label: "工作流" }, current);
   }
   html += `<div class="nav-sheet-group">帮助</div>
     <a class="nav-link" href="/help">帮助中心</a>
