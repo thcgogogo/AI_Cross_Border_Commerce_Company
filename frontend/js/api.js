@@ -64,15 +64,6 @@ export const getJobStatus = (jobId) => getJSON(`/api/status/${encodeURIComponent
 export const setAgentModel = (agentId, model) =>
   postJSON("/api/agents/model", { agent_id: agentId, model });
 
-// ---- paired devices (Phase 11 — locally-deployable agents) -------------------
-// Paired desktop daemons. The pairing CODE is shown ONCE (10-min, single-use); the
-// daemon redeems it via /api/devices/exchange (that call lives IN the daemon, not
-// here, since the web app never holds a device token). List is field-stripped.
-export const getDevices = () => getJSON("/api/devices");
-export const createPairingCode = () => postJSON("/api/devices/pair-code");
-export const revokeDevice = (deviceId) =>
-  postJSON(`/api/devices/${encodeURIComponent(deviceId)}/revoke`);
-
 // ---- reports / feedback / learning loop --------------------------------------
 export const getReports = () => getJSON("/api/reports");
 export const getReport = (runId) => getJSON(`/api/reports/${encodeURIComponent(runId)}`);

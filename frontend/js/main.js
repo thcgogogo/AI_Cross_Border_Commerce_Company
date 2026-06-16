@@ -19,7 +19,6 @@ import * as reports from "./views/reports.js";
 import * as schedule from "./views/schedule.js";
 import * as brain from "./views/brain.js";
 import * as account from "./views/account.js";
-import * as devices from "./views/devices.js";
 import * as fTeam from "./founder/team.js";
 import * as fCosts from "./founder/costs.js";
 import * as fModels from "./founder/models.js";
@@ -39,7 +38,6 @@ const AGENTS_NAV = [
   { path: "/reports", label: "历史报告" },
   { path: "/schedule", label: "定时与送达" },
   { path: "/brain", label: "企业大脑" },
-  { path: "/devices", label: "桌面版与设备" },
   { path: "/account", label: "账户与套餐" },
 ];
 const AGENTS_PATHS = AGENTS_NAV.map((i) => i.path);
@@ -55,7 +53,6 @@ const FOUNDER_NAV = [
 const ROUTES = [
   { pattern: /^\/$/, view: () => fusion },                       // public Fusion chat (the landing)
   { pattern: /^\/agents$/, view: () => workbench, auth: true },  // the Agents (report product) home
-  { pattern: /^\/devices$/, view: () => devices, auth: true },   // 桌面版与设备 (pair/manage desktop)
   { pattern: /^\/new$/, view: () => reportNew, auth: true },
   { pattern: /^\/reports$/, view: () => reports, auth: true },
   { pattern: /^\/reports\/(\d+)$/, view: () => reportView, auth: true, params: (m) => ({ runId: m[1] }) },

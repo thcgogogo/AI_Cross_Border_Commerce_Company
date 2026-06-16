@@ -674,7 +674,6 @@ FOUNDER_SPA_PAGES = ("team", "costs", "models", "fusion", "api")
 @app.route("/schedule")
 @app.route("/brain")
 @app.route("/account")
-@app.route("/devices")
 @app.route("/founder/<founder_page>")
 def spa_page(run_id=None, founder_page=None):
     """Serve the SPA shell for the redesigned customer pages (and the founder

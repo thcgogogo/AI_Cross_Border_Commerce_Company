@@ -1502,24 +1502,3 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
   padding: 11px 22px; font: inherit; font-weight: 700; font-size: 15px; cursor: pointer;
 }
 .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
-
-/* ===========================================================================
-   桌面版与设备 (Desktop & Devices) — pairing + device management
-   =========================================================================== */
-.dev-hero-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
-.dev-hero-actions .run-btn, .dev-hero-actions .ghost-btn { width: auto; margin: 0; padding: 11px 20px; }
-.dev-steps { margin: 14px 0 0; padding: 14px 16px; background: var(--inset); border-radius: 10px; font-size: 13px; color: var(--ink); line-height: 1.6; }
-.dev-steps code { background: var(--card); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; font-size: 12.5px; }
-.dev-steps ol { margin: 8px 0; padding-left: 20px; }
-.dev-steps li { margin: 7px 0; }
-.dev-code-box { margin-top: 16px; padding: 18px; border: 1px dashed var(--accent); border-radius: 12px; background: var(--accent-soft); text-align: center; }
-.dev-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 27px; font-weight: 800; letter-spacing: 4px; color: var(--accent-2); }
-.dev-code-meta { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
-.dev-code-box .dev-copy { width: auto; margin: 12px auto 0; padding: 8px 18px; font-size: 13px; }
-.dev-row { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line); }
-.dev-row:first-child { border-top: none; }
-.dev-meta { flex: 1; min-width: 0; }
-.dev-dname { font-weight: 700; font-size: 14.5px; }
-.dev-sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
-.dev-row .ghost-btn { width: auto; margin: 0; padding: 7px 14px; font-size: 13px; }
-.dev-privacy { margin-top: 18px; padding: 14px 16px; background: var(--inset); border-radius: 10px; color: var(--muted); font-size: 12.5px; line-height: 1.65; }
