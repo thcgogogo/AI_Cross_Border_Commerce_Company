@@ -650,6 +650,14 @@ def agents_page():
     return _spa_shell()
 
 
+@app.route("/market")
+def market_page():
+    """智能体市场 — the public "agent supermarket" browse surface. Served to EVERYONE
+    (the deploy/cloud CTAs funnel logged-out visitors to the login modal client-side;
+    the device + install DATA endpoints stay session-gated server-side)."""
+    return _spa_shell()
+
+
 @app.route("/company-brain")
 def company_brain_page():
     """The "企业大脑" page. Logged-out visitors are redirected to /login (302); the
@@ -674,6 +682,7 @@ FOUNDER_SPA_PAGES = ("team", "costs", "models", "fusion", "api")
 @app.route("/schedule")
 @app.route("/brain")
 @app.route("/account")
+@app.route("/devices")
 @app.route("/founder/<founder_page>")
 def spa_page(run_id=None, founder_page=None):
     """Serve the SPA shell for the redesigned customer pages (and the founder

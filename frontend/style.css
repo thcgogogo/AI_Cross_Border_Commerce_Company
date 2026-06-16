@@ -1502,3 +1502,52 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
   padding: 11px 22px; font: inherit; font-weight: 700; font-size: 15px; cursor: pointer;
 }
 .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ===========================================================================
+   智能体市场 (Agent Marketplace) — the agent supermarket card grid
+   =========================================================================== */
+.mk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 16px; margin-top: 20px; }
+.mk-card {
+  display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--card); padding: 20px; box-shadow: 0 1px 2px rgba(16,24,40,.04);
+  transition: box-shadow .15s ease, transform .15s ease;
+}
+.mk-card:hover { box-shadow: 0 12px 30px rgba(16,24,40,.10); transform: translateY(-2px); }
+.mk-card.mk-soon { opacity: .72; }
+.mk-card.mk-soon:hover { transform: none; box-shadow: 0 1px 2px rgba(16,24,40,.04); }
+.mk-top { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.mk-icon {
+  width: 48px; height: 48px; flex: none; border-radius: 12px; background: var(--accent-soft);
+  display: grid; place-items: center; font-size: 25px;
+}
+.mk-name { font-size: 16.5px; font-weight: 800; margin: 0; display: flex; align-items: center; gap: 8px; }
+.mk-flag { font-size: 10.5px; font-weight: 800; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 8px; }
+.mk-tagline { color: var(--muted); font-size: 13.5px; line-height: 1.6; margin: 0 0 14px; flex: 1; }
+.mk-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+.mk-tag { font-size: 11.5px; font-weight: 600; color: var(--muted); background: var(--inset); border-radius: 6px; padding: 3px 9px; }
+.mk-actions { display: flex; gap: 8px; }
+.mk-actions .run-btn, .mk-actions .ghost-btn { width: auto; flex: 1; margin: 0; padding: 10px 14px; font-size: 14px; }
+.mk-soon-chip { font-size: 12.5px; font-weight: 700; color: var(--amber); background: var(--amber-soft); border-radius: 8px; padding: 9px 12px; text-align: center; }
+.mk-deploy-note { margin-top: 24px; color: var(--muted); font-size: 13px; text-align: center; }
+.mk-deploy-note a { color: var(--accent); font-weight: 700; }
+
+/* ===========================================================================
+   桌面版与设备 (Desktop & Devices) — pairing + device management
+   =========================================================================== */
+.dev-hero-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.dev-hero-actions .run-btn, .dev-hero-actions .ghost-btn { width: auto; margin: 0; padding: 11px 20px; }
+.dev-steps { margin: 14px 0 0; padding: 14px 16px; background: var(--inset); border-radius: 10px; font-size: 13px; color: var(--ink); line-height: 1.6; }
+.dev-steps code { background: var(--card); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; font-size: 12.5px; }
+.dev-steps ol { margin: 8px 0; padding-left: 20px; }
+.dev-steps li { margin: 7px 0; }
+.dev-code-box { margin-top: 16px; padding: 18px; border: 1px dashed var(--accent); border-radius: 12px; background: var(--accent-soft); text-align: center; }
+.dev-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 27px; font-weight: 800; letter-spacing: 4px; color: var(--accent-2); }
+.dev-code-meta { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+.dev-code-box .dev-copy { width: auto; margin: 12px auto 0; padding: 8px 18px; font-size: 13px; }
+.dev-row { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line); }
+.dev-row:first-child { border-top: none; }
+.dev-meta { flex: 1; min-width: 0; }
+.dev-dname { font-weight: 700; font-size: 14.5px; }
+.dev-sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.dev-row .ghost-btn { width: auto; margin: 0; padding: 7px 14px; font-size: 13px; }
+.dev-privacy { margin-top: 18px; padding: 14px 16px; background: var(--inset); border-radius: 10px; color: var(--muted); font-size: 12.5px; line-height: 1.65; }
