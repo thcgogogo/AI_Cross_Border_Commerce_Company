@@ -14,6 +14,7 @@ import * as onboarding from "./views/onboarding.js";
 import * as fusion from "./views/fusion.js";
 import * as reportView from "./views/report_view.js";
 import * as workflow from "./views/workflow.js";
+import * as workflowHub from "./views/workflow_hub.js";
 import * as recon from "./views/recon.js";
 import * as fTeam from "./founder/team.js";
 import * as fCosts from "./founder/costs.js";
@@ -35,8 +36,8 @@ const WORKFLOW_NAV = [
   { path: "/recon", label: "对账核对" },
 ];
 // Every sub-path the one workflow page owns — used to light the 工作流 nav as active.
-const AGENTS_PATHS = ["/agents", "/new", "/reports", "/schedule", "/brain", "/account",
-  "/recon"];
+const AGENTS_PATHS = ["/workflow", "/agents", "/new", "/reports", "/schedule", "/brain",
+  "/account", "/recon"];
 const FOUNDER_NAV = [
   { path: "/founder/team", label: "团队与模型" },
   { path: "/founder/costs", label: "成本控制台" },
@@ -48,6 +49,8 @@ const FOUNDER_NAV = [
 
 const ROUTES = [
   { pattern: /^\/$/, view: () => fusion },                       // public Fusion chat (the landing)
+  // 工作流 hub: a page presenting the two work surfaces (reports + 对账) as cards.
+  { pattern: /^\/workflow$/, view: () => workflowHub, auth: true, params: () => ({}) },
   // The whole report workflow on one page; each legacy path selects its in-page tab.
   { pattern: /^\/agents$/, view: () => workflow, auth: true, params: () => ({ tab: "home" }) },
   { pattern: /^\/new$/, view: () => workflow, auth: true, params: () => ({ tab: "generate" }) },
@@ -172,9 +175,11 @@ function renderNav() {
   let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
   if (state.account) {
     const open = AGENTS_PATHS.some((p) => (p === "/agents" ? current === "/agents" : current.startsWith(p)));
-    html += `<div class="nav-drop" id="agentsDrop">
-      <button type="button" class="nav-link ${open ? "active" : ""}" id="agentsDropBtn"
-        aria-haspopup="true" aria-expanded="false">工作流 <span class="nav-drop-caret">▾</span></button>
+    // 工作流 opens the hub PAGE on click; the menu (the two sub-pages) reveals on
+    // hover/focus (.nav-drop-hover) so the dropdown is kept as a quick jump.
+    html += `<div class="nav-drop nav-drop-hover" id="agentsDrop">
+      <a class="nav-link ${open ? "active" : ""}" href="/workflow" data-nav
+         aria-haspopup="true">工作流 <span class="nav-drop-caret">▾</span></a>
       <div class="nav-drop-menu">${WORKFLOW_NAV.map((i) => `<a class="nav-link ${open ? "active" : ""}" href="${esc(i.path)}" data-nav>${esc(i.label)}</a>`).join("")}</div>
     </div>`;
   } else {
@@ -195,7 +200,6 @@ function renderNav() {
   // Always available — the top nav (Fusion + Agents) is hidden by CSS at mobile
   // widths, so the hamburger must work even logged out (CSS hides it on desktop).
   $("navToggle").hidden = false;
-  wireDrop("agentsDrop", "agentsDropBtn");
   wireDrop("founderDrop", "founderDropBtn");
   renderNavSheet();
 }
@@ -215,7 +219,9 @@ function renderNavSheet() {
   const current = location.pathname;
   let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
   if (state.account) {
-    html += `<div class="nav-sheet-group">工作流</div>` + WORKFLOW_NAV.map((i) => navLinkHTML(i, current)).join("");
+    html += `<div class="nav-sheet-group">工作流</div>`
+      + navLinkHTML({ path: "/workflow", label: "工作流主页" }, current)
+      + WORKFLOW_NAV.map((i) => navLinkHTML(i, current)).join("");
   } else {
     html += navLinkHTML({ path: "/agents", label: "工作流" }, current);
   }

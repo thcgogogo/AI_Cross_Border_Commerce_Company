@@ -85,6 +85,9 @@ a { color: var(--accent); }
   box-shadow: var(--shadow); padding: 6px; display: none;
 }
 .nav-drop.open .nav-drop-menu { display: block; }
+/* 工作流: trigger is a link to the hub; the menu reveals on hover/keyboard focus. */
+.nav-drop-hover:hover .nav-drop-menu,
+.nav-drop-hover:focus-within .nav-drop-menu { display: block; }
 .nav-drop-menu .nav-link { display: flex; width: 100%; text-align: left; }
 .nav-drop-caret { font-size: 10px; transform: translateY(1px); }
 .nav-founder-tag {
@@ -1408,34 +1411,72 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 }
 
 /* ===========================================================================
-   Public Fusion chat (views/fusion.js) — the landing. Light theme, scoped under
-   .fusion-page so it never touches the dark founder Fusion view.
+   Public Fusion chat (views/fusion.js) — the "Consensus" landing. Light theme,
+   scoped under .fusion-page so it never touches the dark founder Fusion view.
+   The ask box is the hero; the signature is the CONSENSUS STACK (model voices →
+   one verified fused answer). Primary accent stays blue; green/amber are the
+   已核验 / 已纠正 semantic signals only.
    =========================================================================== */
-.fusion-page { max-width: 860px; margin: 0 auto; padding: 8px 16px 28px; }
-.fusion-hero { text-align: center; padding: 22px 0 16px; }
-.fusion-hero h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.5px; }
-.fusion-hero p { color: var(--muted); max-width: 580px; margin: 0 auto; font-size: 14.5px; }
+.fusion-page { max-width: 760px; margin: 0 auto; padding: 8px 16px 32px; }
+.fusion-page.landing { padding-top: 6vh; }
 
+/* hero (landing) */
+.fusion-hero { text-align: center; margin-bottom: 22px; }
+.fusion-eyebrow { font-size: 12px; letter-spacing: .14em; color: var(--muted); margin-bottom: 12px; }
+.fusion-headline {
+  font-size: clamp(28px, 5vw, 42px); font-weight: 800; letter-spacing: -.02em;
+  line-height: 1.18; margin: 0 0 10px; color: var(--ink);
+}
+.fusion-subhead { font-size: 16px; color: var(--muted); max-width: 30em; margin: 0 auto; line-height: 1.6; }
+
+/* example prompts (landing) */
+.fusion-examples { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin: 14px 0 0; }
+.fusion-example {
+  border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  border-radius: 999px; padding: 6px 14px; font: inherit; font-size: 13px; cursor: pointer;
+}
+.fusion-example:hover { border-color: var(--accent); color: var(--accent); }
+
+/* conversing: slim top line + sticky dock */
+.fusion-topline { display: flex; align-items: center; justify-content: space-between; padding: 4px 0 14px; }
+.fusion-mark { font-size: 14px; font-weight: 700; color: var(--muted); letter-spacing: -.01em; }
+.fusion-new {
+  border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  border-radius: 999px; padding: 5px 13px; font: inherit; font-size: 13px; cursor: pointer;
+}
+.fusion-new:hover { border-color: var(--accent); color: var(--accent); }
+.fusion-dock { background: var(--bg); padding-top: 8px; }
+/* Conversing: a proper chat column — the thread scrolls inside a bounded height
+   while the dock + foot stay put, so the composer never overlaps the fused answer. */
+.fusion-page.conversing { display: flex; flex-direction: column; height: calc(100vh - 150px); min-height: 440px; }
+.fusion-page.conversing .fusion-topline,
+.fusion-page.conversing .fusion-dock,
+.fusion-page.conversing .fusion-foot { flex: none; }
+.fusion-page.conversing .fusion-thread { flex: 1 1 auto; overflow-y: auto; margin: 14px 0; }
+
+/* controls (presets + the 自定义 model picker) */
 .fusion-controls {
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 14px 16px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 12px;
+  padding: 12px 14px; box-shadow: var(--shadow); margin: 0 auto; max-width: 640px;
 }
-.fusion-presets { display: flex; gap: 8px; }
-.fusion-preset {
+.fusion-page.conversing .fusion-controls { background: none; border: none; box-shadow: none; padding: 0 0 8px; max-width: none; }
+.fusion-presets { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.fusion-preset, .fusion-adv-toggle {
   border: 1px solid var(--line); background: var(--card); color: var(--muted);
   border-radius: 999px; padding: 5px 14px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
 }
-.fusion-preset:hover { border-color: var(--accent); color: var(--accent); }
+.fusion-preset:hover, .fusion-adv-toggle:hover { border-color: var(--accent); color: var(--accent); }
 .fusion-preset.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.fusion-adv-toggle { margin-left: auto; }
+.fusion-adv-toggle.on { color: var(--accent); border-color: var(--accent); }
+.fusion-advanced { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
 .fusion-models { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .fusion-chip {
   display: inline-flex; align-items: center; gap: 6px; background: var(--inset);
   border: 1px solid var(--line); border-radius: 9px; padding: 5px 6px 5px 11px; font-size: 13px; font-weight: 600;
 }
 .fusion-chip.unavail { opacity: .6; border-style: dashed; }
-.fusion-chip .fc-rm {
-  border: none; background: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px;
-}
+.fusion-chip .fc-rm { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
 .fusion-chip .fc-rm:hover { color: var(--red, #d23); }
 .fusion-add, .fusion-fuser {
   border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 9px;
@@ -1445,21 +1486,40 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 .fusion-fuse-row { display: flex; align-items: center; gap: 10px; }
 .fusion-fuse-label { font-size: 13px; color: var(--muted); font-weight: 600; }
 
-.fusion-thread { margin: 20px 0; display: flex; flex-direction: column; gap: 16px; }
-.fusion-empty { text-align: center; color: var(--muted); padding: 40px 0; }
-.fusion-empty-icon { font-size: 30px; color: var(--accent); margin-bottom: 8px; }
+/* thread */
+.fusion-thread { margin: 18px 0; display: flex; flex-direction: column; gap: 18px; }
 .ft-turn { display: flex; flex-direction: column; }
 .ft-turn.user { align-items: flex-end; }
 .ft-turn.assistant { align-items: stretch; }
 .ft-bubble { max-width: 88%; border-radius: 14px; padding: 12px 16px; }
 .ft-turn.user .ft-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; white-space: pre-wrap; }
-.ft-bubble.ft-assistant { background: var(--card); border: 1px solid var(--line); max-width: 100%; }
-.ft-bubble.ft-assistant .report-body { font-size: 15px; }
-.ft-bubble.ft-thinking { background: var(--inset); color: var(--muted); display: inline-flex; align-items: center; gap: 9px; font-size: 14px; }
-.ft-detail { margin-top: 8px; }
-.ft-detail > summary {
-  cursor: pointer; font-size: 12.5px; color: var(--muted); font-weight: 600; list-style: none; padding: 4px 0;
-}
+
+/* the signature: consensus stack (voices → one verified fused answer) */
+.consensus-stack { display: flex; flex-direction: column; animation: cs-fade .25s ease; }
+@keyframes cs-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.cs-voices { display: grid; gap: 6px; }
+.cs-voice { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+.cs-voice.off { opacity: .65; }
+.cs-voice-icon { flex: none; width: 16px; text-align: center; font-weight: 700; color: var(--muted); }
+.cs-voice.ok .cs-voice-icon { color: var(--green); }
+.cs-voice-name { flex: none; width: 132px; font-size: 13px; font-weight: 700; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cs-voice-take { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cs-merge { display: flex; justify-content: center; align-items: center; position: relative; height: 28px; }
+.cs-merge::before { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: var(--line); }
+.cs-merge-label { position: relative; background: var(--bg); color: var(--muted); font-size: 11px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; }
+.cs-fused { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; box-shadow: var(--shadow); }
+.cs-fused-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.cs-fused-title { font-size: 14px; font-weight: 700; }
+.cs-chip { font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 2px 9px; }
+.cs-chip-ok { color: var(--green); background: var(--green-soft); }
+.cs-chip-warn { color: var(--amber); background: var(--amber-soft); }
+.cs-fused .report-body { font-size: 15px; }
+.cs-note { margin-top: 10px; font-size: 12.5px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 8px; }
+.cs-thinking { display: inline-flex; align-items: center; gap: 9px; background: var(--inset); color: var(--muted); border-radius: 12px; padding: 12px 16px; font-size: 14px; }
+
+/* secondary: full per-model answers (one tap away) */
+.ft-detail { margin-top: 10px; }
+.ft-detail > summary { cursor: pointer; font-size: 12.5px; color: var(--muted); font-weight: 600; list-style: none; padding: 4px 0; }
 .ft-detail > summary:hover { color: var(--accent); }
 .fusion-answers { display: grid; gap: 10px; margin-top: 8px; }
 .fusion-answer { border: 1px solid var(--line); border-radius: 10px; padding: 10px 13px; background: var(--inset); }
@@ -1467,31 +1527,28 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 .fa-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .fa-label { font-weight: 700; font-size: 13px; }
 .fa-state { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 1px 8px; }
-.fa-state.ok { color: var(--green, #18794e); background: rgba(24,121,78,.1); }
-.fa-state.bad { color: var(--red, #d23); background: rgba(210,51,51,.1); }
+.fa-state.ok { color: var(--green); background: var(--green-soft); }
+.fa-state.bad { color: var(--red, #d23); background: var(--red-soft); }
 .fr-text { font-size: 14px; }
 .fr-error { color: var(--red, #d23); font-size: 13.5px; }
-.fusion-error {
-  background: rgba(210,51,51,.08); border: 1px solid rgba(210,51,51,.25); color: var(--red, #d23);
-  border-radius: 10px; padding: 10px 14px; font-size: 13.5px;
-}
 
-.fusion-composer {
-  position: sticky; bottom: 14px; display: flex; gap: 8px; align-items: flex-end;
-  background: var(--card); border: 1px solid var(--line); border-radius: 16px;
-  padding: 10px 10px 10px 16px; box-shadow: var(--shadow);
-}
-.fusion-input {
-  flex: 1; border: none; outline: none; resize: none; background: none; color: var(--ink);
-  font: inherit; font-size: 15px; line-height: 1.5; max-height: 200px;
-}
-.fusion-send {
-  flex: none; width: 38px; height: 38px; border-radius: 11px; border: none; cursor: pointer;
-  background: var(--accent); color: #fff; font-size: 18px; font-weight: 700;
-}
+.fusion-error { background: var(--red-soft); border: 1px solid var(--red); color: var(--red, #d23); border-radius: 10px; padding: 10px 14px; font-size: 13.5px; margin-top: 12px; }
+
+/* composer (hero ask box on landing; docked on conversing) */
+.fusion-composer { display: flex; gap: 8px; align-items: flex-end; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 10px 10px 10px 16px; box-shadow: var(--shadow); }
+.fusion-page.landing .fusion-composer { max-width: 640px; margin: 0 auto; }
+.fusion-input { flex: 1; border: none; outline: none; resize: none; background: none; color: var(--ink); font: inherit; font-size: 15.5px; line-height: 1.5; max-height: 200px; }
+.fusion-send { flex: none; width: 38px; height: 38px; border-radius: 11px; border: none; cursor: pointer; background: var(--accent); color: #fff; font-size: 18px; font-weight: 700; }
 .fusion-send:hover:not(:disabled) { background: var(--accent-2); }
 .fusion-send:disabled { opacity: .5; cursor: default; }
-.fusion-foot { text-align: center; font-size: 12px; margin: 10px 0 0; }
+.fusion-foot { text-align: center; font-size: 12px; margin: 12px 0 0; }
+
+@media (prefers-reduced-motion: reduce) { .consensus-stack { animation: none; } }
+@media (max-width: 640px) {
+  .fusion-page.landing { padding-top: 2vh; }
+  .cs-voice-name { width: 92px; }
+  .fusion-adv-toggle { margin-left: 0; }
+}
 
 /* Agents (report-product) sign-in gate */
 .agents-gate { text-align: center; padding: 48px 0; }
@@ -1575,3 +1632,26 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 .exc-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .exc-actions .ghost-btn { padding: 5px 12px; font-size: 13px; }
 .exc-done { color: #1d9e75; font-size: 13px; font-weight: 600; }
+
+/* ===========================================================================
+   工作流 hub (/workflow) — workflow_hub.js
+   =========================================================================== */
+.wf-hub { display: grid; gap: 14px; margin-top: 6px; }
+.wf-hub-card {
+  display: flex; align-items: center; gap: 16px;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 20px 22px; text-decoration: none; color: inherit;
+  box-shadow: var(--shadow); transition: border-color .15s ease, transform .15s ease;
+}
+.wf-hub-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.wf-hub-icon {
+  flex: none; width: 46px; height: 46px; border-radius: 13px;
+  background: var(--accent-soft); color: var(--accent);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.wf-hub-icon svg { width: 24px; height: 24px; }
+.wf-hub-text { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+.wf-hub-title { font-size: 16px; font-weight: 700; color: var(--ink); }
+.wf-hub-desc { font-size: 13.5px; color: var(--muted); line-height: 1.55; }
+.wf-hub-go { flex: none; color: var(--muted); font-size: 18px; transition: color .15s ease, transform .15s ease; }
+.wf-hub-card:hover .wf-hub-go { color: var(--accent); transform: translateX(2px); }
