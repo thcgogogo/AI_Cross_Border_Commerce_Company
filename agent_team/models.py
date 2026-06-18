@@ -60,6 +60,7 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -125,6 +126,19 @@ AUDIT_DOWNLOAD = "download"
 AUDIT_ADMIN = "admin_action"
 AUDIT_ACTIONS = (AUDIT_LOGIN, AUDIT_PASSWORD_CHANGE, AUDIT_TOPUP,
                  AUDIT_DOWNLOAD, AUDIT_ADMIN)
+
+# First-party analytics (founder-only) — events.name values. The events table owns
+# ONLY the head-of-funnel data that has no other row: web page views, the anonymous
+# Fusion front-door query, the pre-account phone-verify, the anon→account link at
+# signup, and a thin report dimension breadcrumb (industry pack + specialists used —
+# NOT a second report count; the count stays in `runs`).
+EVENT_PAGE_VIEW = "page_view"
+EVENT_FUSION_QUERY = "fusion_query"
+EVENT_PHONE_VERIFIED = "phone_verified"
+EVENT_ACCOUNT_CREATED = "account_created"
+EVENT_REPORT_DIM = "report_dim"
+EVENT_KINDS = (EVENT_PAGE_VIEW, EVENT_FUSION_QUERY, EVENT_PHONE_VERIFIED,
+               EVENT_ACCOUNT_CREATED, EVENT_REPORT_DIM)
 
 # Phase 9 — what a payment order buys. Phase 7 (redesign B4) adds the 单次
 # ¥29 report: one paid order grants ONE report credit (accounts.report_credits)
@@ -831,3 +845,25 @@ class SettlementException(Base):
     detail_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class Event(Base):
+    """First-party, FOUNDER-ONLY analytics events (append-only). Fills the head-of-
+    funnel gap that has no other row: web page views + the anonymous Fusion front
+    door + the pre-signup funnel. Reports/payments/subscriptions are NEVER counted
+    here (those read runs/orders/subscriptions) — the events table only carries what
+    isn't already authoritative. `account_id` is a LOOSE String(32) ref (no FK) and
+    is NULL for anonymous rows; `anon_id` stitches the pre-signup trail to the account
+    at signup. IPs are stored hashed (never raw); `props` is JSON-as-Text and holds NO
+    PII. Every read surface is _is_admin-gated."""
+    __tablename__ = "events"
+    __table_args__ = (Index("ix_events_name_created", "name", "created_at"),)
+
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    name = Column(Enum(*EVENT_KINDS, name="event_name"), nullable=False, index=True)
+    account_id = Column(String(32), nullable=True, index=True)  # loose ref accounts.id; NULL = anon
+    anon_id = Column(String(64), nullable=True, index=True)     # first-party cookie id
+    path = Column(String(255), nullable=True)
+    ip_hash = Column(String(64), nullable=True)                 # salted sha256, never raw
+    props = Column(Text, nullable=True)                         # JSON-as-Text; no PII

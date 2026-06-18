@@ -47,6 +47,7 @@ export const getMe = () => getJSON("/api/me");
 export const getAgents = () => getJSON("/api/agents");
 export const getModels = () => getJSON("/api/models");
 export const getProviders = () => getJSON("/api/providers");
+export const getAnalytics = () => getJSON("/api/analytics");
 export const getIndustries = () => getJSON("/api/industries");
 export const getChangelogState = () => getJSON("/api/changelog/state");
 

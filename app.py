@@ -45,6 +45,7 @@ from werkzeug.utils import safe_join
 from admin import queries as admin_queries
 from agent_team import (
     alerts,
+    analytics,
     config,
     crypto,
     db,
@@ -76,6 +77,11 @@ from agent_team.models import (
     AUDIT_TOPUP,
     CODE_RESET,
     CODE_SIGNUP,
+    EVENT_ACCOUNT_CREATED,
+    EVENT_FUSION_QUERY,
+    EVENT_PAGE_VIEW,
+    EVENT_PHONE_VERIFIED,
+    EVENT_REPORT_DIM,
     DELIVERY_FAILED,
     DELIVERY_SENT,
     FAPIAO_ISSUED,
@@ -333,6 +339,12 @@ if not _ACCESS_LOG.handlers:
 def _request_start():
     g.request_id = uuid.uuid4().hex[:12]
     g.request_started = time.perf_counter()
+    # First-party anonymous id: read the cookie, or mint one (written in the
+    # analytics after_request). Lets pre-signup activity stitch to an account later.
+    g.anon_id = request.cookies.get("anon_id")
+    g.anon_id_fresh = not g.anon_id
+    if g.anon_id_fresh:
+        g.anon_id = uuid.uuid4().hex
 
 
 # Server-only product surfaces hidden on the desktop build (they should look ABSENT,
@@ -397,6 +409,46 @@ def _request_log(response):
             "latency_ms": latency_ms,
         }, ensure_ascii=False))
     response.headers["X-Request-Id"] = getattr(g, "request_id", "") or ""
+    return response
+
+
+# First-party analytics (founder-only). Static assets serve at root
+# (static_url_path=""), so exclude them by file-extension, not request.endpoint.
+def _should_track_pageview(req):
+    if req.method != "GET":
+        return False
+    p = req.path or ""
+    if p == "/healthz" or p.startswith("/api/") or p.startswith("/pay/"):
+        return False
+    if "." in p.rsplit("/", 1)[-1]:   # a file extension in the last segment → static asset
+        return False
+    return True
+
+
+@app.after_request
+def _analytics_after(response):
+    """Set the anon_id cookie on first visit and record a best-effort page_view.
+    Wrapped so analytics can never affect the response (track() is already
+    non-blocking; the cookie/referer handling is belt-and-suspenders)."""
+    try:
+        if getattr(g, "anon_id_fresh", False) and request.path != "/healthz":
+            response.set_cookie("anon_id", g.anon_id, max_age=365 * 24 * 3600,
+                                httponly=True, samesite="Lax",
+                                secure=config.is_production())
+        if _should_track_pageview(request):
+            props = {}
+            if request.referrer:
+                props["referer"] = request.referrer
+            if request.args.get("utm_source"):
+                props["utm_source"] = request.args.get("utm_source")
+            analytics.track(EVENT_PAGE_VIEW,
+                            account_id=session.get("customer_id"),
+                            anon_id=getattr(g, "anon_id", None),
+                            path=request.path,
+                            ip_hash=analytics.hash_ip(_client_ip()),
+                            props=props or None)
+    except Exception:
+        pass
     return response
 
 
@@ -678,7 +730,7 @@ def company_brain_page():
 # (the same pattern as /company-brain above). /reports/<run_id> additionally
 # gets per-report ownership checks with B7 (Phase 4) — here a session is enough
 # to load the shell, and the report data API enforces ownership already.
-FOUNDER_SPA_PAGES = ("team", "costs", "models", "fusion", "api")
+FOUNDER_SPA_PAGES = ("team", "costs", "models", "fusion", "api", "analytics")
 
 
 @app.route("/new")
@@ -1330,6 +1382,15 @@ def _run_team(memory, customer_id=None, company_id=None, run_id=None, industry_k
                      cost_listener=_make_biller(customer_id),
                      company_id=company_id, run_id=run_id,
                      industry_key=industry_key).run()
+        # Founder-only dimension breadcrumb (top industry pack / top specialist). NOT
+        # a report count — the count reads `runs`; this only adds the per-run dims a
+        # Run row doesn't carry. Best-effort; only on a run that didn't raise.
+        try:
+            analytics.track(EVENT_REPORT_DIM, account_id=customer_id, props={
+                "run_id": run_id, "industry_key": industry_key or "",
+                "specialists": list(memory.snapshot().get("artifacts", {}).keys())})
+        except Exception:
+            pass
     except Exception as e:
         # Make sure any failure (even while building the team) is visible to the UI.
         if memory.snapshot().get("status") != "error":
@@ -2562,6 +2623,8 @@ def signup():
             phone, CODE_SIGNUP, code, config.SMS_MAX_VERIFY_ATTEMPTS)
         if not verdict.get("ok"):
             return jsonify({"error": verdict.get("reason") or "验证码错误"}), 400
+        analytics.track(EVENT_PHONE_VERIFIED, anon_id=getattr(g, "anon_id", None),
+                        ip_hash=analytics.hash_ip(_client_ip()))
 
     try:
         # Accounts start with no models; the dashboard's picker adds them.
@@ -2572,6 +2635,11 @@ def signup():
         return jsonify({"error": str(e)}), 400
     customer = CUSTOMERS.get_by_id(out["customer"]["id"])
     _login_session(customer)                  # log them straight in (rotated session)
+    # Link the pre-signup anonymous trail (page_views + fusion_query keyed by anon_id)
+    # to the new account, so the visit→signup→paid funnel resolves end to end.
+    analytics.track(EVENT_ACCOUNT_CREATED, account_id=customer["id"],
+                    anon_id=getattr(g, "anon_id", None),
+                    ip_hash=analytics.hash_ip(_client_ip()))
     # Phase 10 — the welcome email (3-step quickstart). Deduped + best-effort
     # inside lifecycle; the extra guard keeps signup alive through ANY hiccup.
     try:
@@ -4652,6 +4720,27 @@ def _kpi_card(label, value, sub=""):
                           ('<div class="kpi-s">%s</div>' % _h(sub)) if sub else ""))
 
 
+@app.route("/api/analytics")
+def api_analytics():
+    """Founder-only first-party operating-data aggregates: visits & sessions over
+    time, traffic sources, the visit→signup→paid acquisition funnel, Fusion usage,
+    top industry pack / specialist, and scheduled-vs-manual runs. Same server-side
+    gate as /admin — a non-admin (logged in or not) gets 403. Authoritative tables
+    (runs/orders/subscriptions/onboarding_events) are read directly; the events table
+    only supplies the head-of-funnel/web data that has no other row."""
+    if not _is_admin(_current_customer()):
+        return Response("403 — 仅限管理员访问 (/api/analytics)。",
+                        status=403, mimetype="text/plain; charset=utf-8")
+    return jsonify({
+        "page_views": admin_queries.page_views_per_day(days=30),
+        "sources": admin_queries.traffic_sources(days=30),
+        "funnel": admin_queries.acquisition_funnel(days=30),
+        "fusion": admin_queries.fusion_usage(days=30),
+        "packs_agents": admin_queries.pack_and_agent_usage(days=30),
+        "runs_breakdown": admin_queries.scheduled_vs_manual(days=30),
+    })
+
+
 @app.route("/admin")
 def admin_dashboard():
     """Founder-only ops dashboard: signups/activation/retention, MRR & churn,
@@ -5431,6 +5520,13 @@ def fusion_chat():
     if not picked:
         return jsonify({"error": "Pick at least one text model."}), 400
     picked = picked[:config.fusion_anon_max_models()]
+
+    # The ONLY capture of the anonymous Fusion front door (creates no Run/Order).
+    # Founder-only event; anon_id stitches it to an account if the visitor signs up.
+    analytics.track(EVENT_FUSION_QUERY, account_id=session.get("customer_id"),
+                    anon_id=getattr(g, "anon_id", None), path="/api/fusion/chat",
+                    ip_hash=analytics.hash_ip(_client_ip()),
+                    props={"models": picked, "fuser": fuser})
 
     max_tokens = config.fusion_anon_max_tokens()
 

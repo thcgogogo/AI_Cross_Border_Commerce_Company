@@ -1655,3 +1655,22 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 .wf-hub-desc { font-size: 13.5px; color: var(--muted); line-height: 1.55; }
 .wf-hub-go { flex: none; color: var(--muted); font-size: 18px; transition: color .15s ease, transform .15s ease; }
 .wf-hub-card:hover .wf-hub-go { color: var(--accent); transform: translateX(2px); }
+
+/* ===========================================================================
+   founder/analytics.js — 数据/经营分析 (dark founder scope; reuses .meter)
+   =========================================================================== */
+.founder-scope .an-row { margin-bottom: 12px; }
+.founder-scope .an-row-head { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px; }
+.founder-scope .an-row-n { font-weight: 700; font-variant-numeric: tabular-nums; }
+.founder-scope .an-stat { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 12px; }
+.founder-scope .an-big { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.founder-scope .an-bars { display: flex; align-items: flex-end; gap: 2px; height: 60px; margin-top: 6px; }
+.founder-scope .an-bar { flex: 1; min-width: 2px; min-height: 2px; background: var(--accent); border-radius: 2px 2px 0 0; opacity: .85; }
+.founder-scope .an-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.founder-scope .an-table th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.founder-scope .an-table td { padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.founder-scope .an-td-bar { width: 48%; }
+.founder-scope .an-td-n { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+.founder-scope .an-split { display: flex; gap: 28px; flex-wrap: wrap; }
+.founder-scope .an-split > div { display: flex; flex-direction: column; }
+.founder-scope .an-split .muted { font-size: 12px; }

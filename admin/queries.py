@@ -39,7 +39,9 @@ make_interval with no '%' at all.
 Every function takes `now` so tests pin time deterministically.
 """
 
+import json
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 from sqlalchemy import text
 
@@ -324,3 +326,165 @@ def onboarding_funnel():
         steps.append({"step": n, "label": FUNNEL_STEP_LABELS[n],
                       "completed": completed, "pct": pct})
     return {"accounts_started": started, "steps": steps}
+
+
+# ===========================================================================
+# First-party analytics (the `events` table) — the head-of-funnel/web data that
+# has no other row. Founder-only at read time (gated in app.py). Same house style:
+# text() SQL, dialect-portable, `now=None`, plain dicts. Reports/payments/subs are
+# NEVER counted from events — those read runs/orders/subscriptions.
+# ===========================================================================
+def _window_start(days, now):
+    now = now or datetime.utcnow()
+    return (now - timedelta(days=int(days) - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+
+
+def _props_rows(name, start):
+    """All `props` JSON strings for events of `name` since `start` (one column)."""
+    with db.session_scope() as s:
+        rows = s.execute(text(
+            "SELECT props FROM events WHERE name = :name AND created_at >= :start"),
+            {"name": name, "start": start}).fetchall()
+    out = []
+    for (p,) in rows:
+        if not p:
+            out.append({})
+            continue
+        try:
+            out.append(json.loads(p) or {})
+        except (ValueError, TypeError):
+            out.append({})
+    return out
+
+
+def page_views_per_day(days=30, now=None):
+    """[{"day", "visits", "sessions"}] for the last `days` days, zero-filled.
+    `sessions` = distinct anon_id (a unique-visitor proxy)."""
+    start = _window_start(days, now)
+    sql = text(
+        "SELECT " + _day_expr("created_at") + " AS d, COUNT(*) AS visits, "
+        "COUNT(DISTINCT anon_id) AS sessions FROM events "
+        "WHERE name = 'page_view' AND created_at >= :start GROUP BY d")
+    with db.session_scope() as s:
+        rows = {r[0]: (int(r[1]), int(r[2])) for r in s.execute(sql, {"start": start}).fetchall()}
+    out = []
+    for i in range(int(days)):
+        day = (start + timedelta(days=i)).strftime("%Y-%m-%d")
+        v, sess = rows.get(day, (0, 0))
+        out.append({"day": day, "visits": v, "sessions": sess})
+    return out
+
+
+def traffic_sources(days=30, now=None):
+    """[{"source", "count"}] over the window, desc. Source = utm_source, else the
+    referer host, else 直接访问 (no/own referer). Bucketed in Python (portable)."""
+    start = _window_start(days, now)
+    own = None
+    counts = {}
+    for props in _props_rows("page_view", start):
+        src = (props.get("utm_source") or "").strip()
+        if not src:
+            ref = (props.get("referer") or "").strip()
+            if ref:
+                try:
+                    host = urlparse(ref).netloc.lower()
+                except Exception:
+                    host = ""
+                src = host or "直接访问"
+            else:
+                src = "直接访问"
+        counts[src] = counts.get(src, 0) + 1
+    items = sorted(({"source": k, "count": v} for k, v in counts.items()),
+                   key=lambda x: x["count"], reverse=True)
+    return items[:15]
+
+
+def fusion_usage(days=30, now=None):
+    """Anonymous Fusion front-door usage: {"per_day": [{day,count}], "total",
+    "by_model": [{model,count}]}. The ONLY measure of the public `/` query volume."""
+    start = _window_start(days, now)
+    sql = text(
+        "SELECT " + _day_expr("created_at") + " AS d, COUNT(*) AS n FROM events "
+        "WHERE name = 'fusion_query' AND created_at >= :start GROUP BY d")
+    with db.session_scope() as s:
+        rows = dict(s.execute(sql, {"start": start}).fetchall())
+    per_day, total = [], 0
+    for i in range(int(days)):
+        day = (start + timedelta(days=i)).strftime("%Y-%m-%d")
+        n = int(rows.get(day, 0)); total += n
+        per_day.append({"day": day, "count": n})
+    model_counts = {}
+    for props in _props_rows("fusion_query", start):
+        for mid in (props.get("models") or []):
+            model_counts[mid] = model_counts.get(mid, 0) + 1
+    by_model = sorted(({"model": k, "count": v} for k, v in model_counts.items()),
+                      key=lambda x: x["count"], reverse=True)
+    return {"per_day": per_day, "total": total, "by_model": by_model}
+
+
+def acquisition_funnel(days=30, now=None):
+    """The stitched visit→paid funnel: the anonymous head from `events` (distinct
+    anon_id), the post-signup tail from authoritative tables. Returns
+    {"stages": [{key, label, count}]}. Stages mix anon sessions (head) and accounts
+    (tail) — labelled accordingly; this is directional, not a single-cohort ratio."""
+    start = _window_start(days, now)
+    with db.session_scope() as s:
+        def scal(sql, extra=None):
+            return int(s.execute(text(sql), {"start": start, **(extra or {})}).scalar() or 0)
+        visitors = scal("SELECT COUNT(DISTINCT anon_id) FROM events "
+                        "WHERE name='page_view' AND created_at>=:start AND anon_id IS NOT NULL")
+        fusion = scal("SELECT COUNT(DISTINCT anon_id) FROM events "
+                      "WHERE name='fusion_query' AND created_at>=:start AND anon_id IS NOT NULL")
+        verified = scal("SELECT COUNT(*) FROM events "
+                        "WHERE name='phone_verified' AND created_at>=:start")
+        signups = scal("SELECT COUNT(*) FROM accounts WHERE created_at>=:start")
+        activated = scal(
+            "SELECT COUNT(DISTINCT a.id) FROM accounts a "
+            "JOIN companies c ON c.account_email = LOWER(a.email) "
+            "JOIN runs r ON r.company_id = c.id AND r.status = 'succeeded' "
+            "WHERE a.created_at >= :start")
+        paid = scal(
+            "SELECT COUNT(DISTINCT a.id) FROM accounts a "
+            "JOIN orders o ON o.account_id = a.id AND o.status = 'paid' "
+            "WHERE a.created_at >= :start")
+    return {"stages": [
+        {"key": "visitors", "label": "访问（独立会话）", "count": visitors},
+        {"key": "fusion", "label": "Fusion 提问", "count": fusion},
+        {"key": "verified", "label": "验证手机", "count": verified},
+        {"key": "signups", "label": "注册", "count": signups},
+        {"key": "activated", "label": "出首份报告", "count": activated},
+        {"key": "paid", "label": "付费", "count": paid},
+    ]}
+
+
+def pack_and_agent_usage(days=30, now=None):
+    """Top industry pack + top specialist over the window, from the `report_dim`
+    breadcrumbs (NOT a report count — that reads `runs`). Returns
+    {"packs": [{pack,count}], "agents": [{agent,count}]}, desc."""
+    start = _window_start(days, now)
+    packs, agents = {}, {}
+    for props in _props_rows("report_dim", start):
+        pack = (props.get("industry_key") or "").strip() or "通用 / 未设置"
+        packs[pack] = packs.get(pack, 0) + 1
+        for a in (props.get("specialists") or []):
+            agents[a] = agents.get(a, 0) + 1
+    top = lambda d, k: sorted(({k: x, "count": c} for x, c in d.items()),
+                              key=lambda r: r["count"], reverse=True)[:15]
+    return {"packs": top(packs, "pack"), "agents": top(agents, "agent")}
+
+
+def scheduled_vs_manual(days=30, now=None):
+    """Report runs split by scheduled vs manual over the window. A run is
+    "scheduled" when a delivery row carries a scheduled-job id (deliveries.job_id);
+    everything else is manual. {"total", "scheduled", "manual"}."""
+    start = _window_start(days, now)
+    with db.session_scope() as s:
+        total = int(s.execute(text(
+            "SELECT COUNT(*) FROM runs WHERE started_at >= :start AND kind = 'report'"),
+            {"start": start}).scalar() or 0)
+        scheduled = int(s.execute(text(
+            "SELECT COUNT(DISTINCT run_id) FROM deliveries "
+            "WHERE job_id IS NOT NULL AND run_id IS NOT NULL AND created_at >= :start"),
+            {"start": start}).scalar() or 0)
+    return {"total": total, "scheduled": scheduled, "manual": max(total - scheduled, 0)}

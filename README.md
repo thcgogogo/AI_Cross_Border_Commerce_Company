@@ -137,7 +137,7 @@ docker compose up -d      # nginx → gunicorn app + scheduler worker + PostgreS
 
 Set the production env (`SECRET_KEY`, `DATABASE_URL`, `ADMIN_EMAILS`, `SMTP_*`,
 `FERNET_KEYS`, payment merchant keys, spend caps — all documented in
-[.env.example](.env.example)), run `alembic upgrade head` (0001–0006), and schedule
+[.env.example](.env.example)), run `alembic upgrade head` (0001–0009), and schedule
 `scripts/backup.sh`. The full runbook — deploy, backup/restore, monitoring, and the
 per-phase ops notes — is **[docs/ops.md](docs/ops.md)**.
 
@@ -231,7 +231,8 @@ Company_Agent_Demo/
 │   ├── payments.py / reconciliation.py(9)
 │   └── onboarding.py / helpdocs.py / lifecycle.py(10)
 ├── admin/queries.py        ← the ops dashboard's SQL (unit-tested)          (10)
-├── migrations/             ← Alembic 0001–0006 (`alembic upgrade head`)
+├── agent_team/analytics.py ← first-party founder-only events (track/prune)  (12)
+├── migrations/             ← Alembic 0001–0009 (`alembic upgrade head`)
 ├── templates_industry/     ← industry packs as editable YAML                 (4)
 ├── docs/ops.md             ← the operations runbook   docs/help/ ← /help docs
 ├── docs/product-brief.md   ← what we sell & why it defends (the three moats)

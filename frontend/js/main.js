@@ -21,6 +21,7 @@ import * as fCosts from "./founder/costs.js";
 import * as fModels from "./founder/models.js";
 import * as fFusion from "./founder/fusion.js";
 import * as fUnified from "./founder/unified.js";
+import * as fAnalytics from "./founder/analytics.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -43,6 +44,7 @@ const FOUNDER_NAV = [
   { path: "/founder/costs", label: "成本控制台" },
   { path: "/founder/models", label: "模型与定价" },
   { path: "/founder/api", label: "开发者接口" },
+  { path: "/founder/analytics", label: "数据/经营分析" },
 ];
 // Note: Fusion is now the PUBLIC landing ("/"), so it's dropped from 内部工具. The
 // legacy founder /founder/fusion route + /api/fusion endpoint remain for direct access.
@@ -66,6 +68,7 @@ const ROUTES = [
   { pattern: /^\/founder\/models$/, view: () => fModels, auth: true },
   { pattern: /^\/founder\/fusion$/, view: () => fFusion, auth: true },
   { pattern: /^\/founder\/api$/, view: () => fUnified, auth: true },
+  { pattern: /^\/founder\/analytics$/, view: () => fAnalytics, auth: true },
 ];
 
 let cleanup = null;   // the mounted view's teardown (timers etc.)

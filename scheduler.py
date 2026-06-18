@@ -140,7 +140,7 @@ def main():
     # pack validation, legacy import), which is why we wait for the schema first.
     from app import _execute_scheduled_job
 
-    from agent_team import lifecycle, payments, reconciliation  # noqa: E402
+    from agent_team import analytics, lifecycle, payments, reconciliation  # noqa: E402
 
     scheduler = ReportScheduler(_make_locked_executor(_execute_scheduled_job))
     # Phase 9/10 system jobs (cron in Asia/Shanghai): renewal notices at a humane
@@ -152,6 +152,9 @@ def main():
                              reconciliation.nightly_reconciliation_tick, "30 3 * * *")
     scheduler.add_system_job("lifecycle-daily",
                              lifecycle.daily_lifecycle_tick, "0 10 * * *")
+    # Retention: prune analytics events older than 180 days (default of prune_events).
+    scheduler.add_system_job("events-prune-nightly",
+                             analytics.prune_events, "0 4 * * *")
     scheduler.start()
     _log(f"running ({len(scheduler.job_ids())} active job(s) loaded); "
          f"heartbeat every {HEARTBEAT_INTERVAL_SECS}s.")

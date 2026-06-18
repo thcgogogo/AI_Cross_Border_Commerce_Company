@@ -165,6 +165,14 @@ def secret_key():
     return _env("SECRET_KEY") or _env("FLASK_SECRET_KEY") or None
 
 
+def analytics_ip_salt():
+    """Salt for hashing client IPs in the founder-only analytics `events` table — IPs
+    are NEVER stored raw. ANALYTICS_IP_SALT env wins (so it can be rotated without
+    touching the session secret); else derived from SECRET_KEY; else a fixed dev
+    default (local dev IPs aren't sensitive)."""
+    return _env("ANALYTICS_IP_SALT") or secret_key() or "tangent-dev-analytics-salt"
+
+
 def sentry_dsn():
     """The Sentry DSN, or None. When None, error reporting stays fully disabled
     (sentry_sdk is never initialised) — nothing is sent anywhere."""

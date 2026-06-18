@@ -550,7 +550,33 @@ seeds, portable SQL (SQLite dev / Postgres prod):
 - the **onboarding funnel** (% of wizard-opening accounts completing each step)
   and the latest support requests.
 
-### 9.5 Lifecycle emails
+### 9.5 First-party analytics (founder-only)
+
+The head-of-funnel data `/admin` can't show: web visits, traffic sources, the
+visit→signup→paid funnel, and the **anonymous Fusion front door** (`/`, which
+creates no `Run`/`Order`). First-party + on-box — no third-party SDK, no off-box
+calls, no raw IPs, nothing on any customer surface.
+
+- One append-only `events` table (migration `0009_events`). `agent_team/analytics.track()`
+  writes a row **best-effort** (any failure is swallowed — analytics never breaks or
+  slows a request); IPs are stored **salted-SHA-256, never raw**; all counts are
+  DB-backed (correct under multiple workers).
+- Capture is limited to what has no other authoritative row: `page_view` (an
+  after_request hook, excluding `/healthz`, `/api/*`, and static assets), the
+  anonymous `fusion_query`, `phone_verified`, the `account_created` anon→account
+  link, and a thin `report_dim` breadcrumb (industry pack + specialists — **NOT** a
+  report count; reports/payments/subscriptions are read from `runs`/`orders`/
+  `subscriptions`). An `anon_id` cookie (HttpOnly, SameSite=Lax, 1 year) stitches
+  pre-signup activity to the account at signup.
+- Read at `GET /api/analytics` + the `/founder/analytics` view — both `ADMIN_EMAILS`-
+  gated via `_is_admin` (403 otherwise). Aggregations live in `admin/queries.py`
+  (same portable-SQL style as the ops dashboard).
+- Retention: the `events-prune-nightly` scheduler job deletes rows older than **180
+  days** (04:00 Beijing). Salt: **`ANALYTICS_IP_SALT`** (defaults to a SECRET_KEY-
+  derived value; set it to rotate the IP hash independently). Verify with
+  `tests/test_phase12_analytics.py`.
+
+### 9.6 Lifecycle emails
 
 Three touchpoints (plain, short Chinese; sent through the existing delivery
 layer; each deduped via `lifecycle_events`, so re-runs/replays NEVER spam):
@@ -566,7 +592,7 @@ registered in both `app.py` and the dedicated `scheduler.py` worker). It only
 considers accounts 3–14 days old, so enabling the feature never blasts the
 whole historical user base.
 
-### 9.6 Verify it (acceptance tests)
+### 9.7 Verify it (acceptance tests)
 
 ```bash
 .venv/bin/python -m pytest tests/test_phase10_onboarding.py -q
