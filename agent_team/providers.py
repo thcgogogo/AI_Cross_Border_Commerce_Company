@@ -44,6 +44,20 @@ def _provider_cfg(model_id):
     return pid, config.PROVIDERS.get(pid, {})
 
 
+# Some reasoning models (e.g. MiniMax-M3) emit their chain-of-thought INLINE as a
+# leading <think>…</think> block in `content` rather than a separate reasoning_content
+# field. Strip a block at the very start so the agent's real answer isn't prefixed with
+# raw reasoning (which would pollute deliverables / break SOURCES_JSON parsing). Only a
+# leading, closed block is removed — genuine later mentions of the tag are left intact.
+_THINK_RE = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_reasoning(text):
+    if not text:
+        return text
+    return _THINK_RE.sub("", text, count=1).strip()
+
+
 def provider_key(model_id):
     """The provider's API key from the environment, cleaned — or None if absent.
 
@@ -121,7 +135,7 @@ def _openai_chat(model_id, messages, max_tokens, max_retries=3):
 
     choice = (resp.choices or [None])[0]
     msg = getattr(choice, "message", None) if choice else None
-    text = ((getattr(msg, "content", "") if msg else "") or "").strip()
+    text = _strip_reasoning(((getattr(msg, "content", "") if msg else "") or "").strip())
     usage = getattr(resp, "usage", None)
     return {
         "text": text or "(The model returned no text.)",
