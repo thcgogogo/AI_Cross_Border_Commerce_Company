@@ -21,6 +21,10 @@ from agent_team import config, providers  # noqa: E402
 def _clean_env(monkeypatch):
     for v in ("LOCAL_MODEL_MODE", "LOCAL_MODEL_ID", "TEAM_MODEL_PRESET", "OLLAMA_API_KEY"):
         monkeypatch.delenv(v, raising=False)
+    # Isolate from any persisted per-agent overrides (app import loads
+    # memory_store/model_overrides.json into this global) so the precedence
+    # assertions below test the static default, not a deployment's real config.
+    monkeypatch.setattr(config, "MODEL_OVERRIDES", {})
 
 
 def test_ollama_provider_registered():

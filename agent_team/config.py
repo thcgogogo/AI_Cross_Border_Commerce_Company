@@ -753,6 +753,10 @@ MODEL_CHOICES = [
      "blurb": "DeepSeek's most capable model — for hard reasoning, coding, and agent workflows."},
 
     # ---- Alibaba Qwen ----
+    {"id": "qwen3.7-max", "label": "Qwen 3.7 Max", "provider": "qwen", "tier": "Flagship",
+     "input_per_mtok": 1.20, "output_per_mtok": 6.00, "context": "256K tokens", "approx": True,
+     "blurb": "Alibaba's current flagship Qwen — top-tier Chinese writing, long context, "
+              "and strong instruction-following."},
     {"id": "qwen-max", "label": "Qwen Max", "provider": "qwen", "tier": "Flagship",
      "input_per_mtok": 1.60, "output_per_mtok": 6.40, "context": "32K tokens", "approx": True,
      "blurb": "Alibaba's most capable Qwen — strong multilingual and reasoning performance."},
@@ -761,6 +765,10 @@ MODEL_CHOICES = [
      "blurb": "A balanced, affordable Qwen for general-purpose work."},
 
     # ---- MiniMax ----
+    {"id": "MiniMax-M3", "label": "MiniMax M3", "provider": "minimax", "tier": "Flagship",
+     "input_per_mtok": 0.30, "output_per_mtok": 1.20, "context": "1M tokens", "approx": True,
+     "blurb": "MiniMax's current flagship — strong agentic / tool-use behaviour over a very "
+              "large context window."},
     {"id": "MiniMax-Text-01", "label": "MiniMax Text-01", "provider": "minimax", "tier": "Flagship",
      "input_per_mtok": 0.20, "output_per_mtok": 1.10, "context": "1M tokens", "approx": True,
      "blurb": "MiniMax's flagship text model with an extremely large context window."},
