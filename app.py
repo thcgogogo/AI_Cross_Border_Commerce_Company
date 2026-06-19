@@ -715,6 +715,15 @@ def agents_page():
     return _spa_shell()
 
 
+@app.route("/fusion")
+def fusion_page():
+    """The public Fusion chat (the multi-model front door). Anonymous, no login —
+    `/` now serves the marketing landing, which funnels here. The Fusion API enforces
+    its own per-IP rate limits + platform spend caps, so the shell is safe to serve
+    to everyone."""
+    return _spa_shell()
+
+
 @app.route("/company-brain")
 def company_brain_page():
     """The "企业大脑" page. Logged-out visitors are redirected to /login (302); the

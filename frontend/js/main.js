@@ -11,6 +11,7 @@ import { esc } from "./components.js";
 import * as api from "./api.js";
 import * as auth from "./views/auth.js";
 import * as onboarding from "./views/onboarding.js";
+import * as landing from "./views/landing.js";
 import * as fusion from "./views/fusion.js";
 import * as reportView from "./views/report_view.js";
 import * as workflow from "./views/workflow.js";
@@ -32,10 +33,6 @@ const $ = (id) => document.getElementById(id);
 // ONE page ("数据分析+报告生成") under the "工作流" nav tab. The old per-view paths
 // (/new /reports /schedule /brain /account) still route to that page with the matching
 // in-page tab pre-selected (see ROUTES + views/workflow.js), so deep links keep working.
-const WORKFLOW_NAV = [
-  { path: "/agents", label: "数据分析+报告生成" },
-  { path: "/recon", label: "对账核对" },
-];
 // Every sub-path the one workflow page owns — used to light the 工作流 nav as active.
 const AGENTS_PATHS = ["/workflow", "/agents", "/new", "/reports", "/schedule", "/brain",
   "/account", "/recon"];
@@ -46,11 +43,13 @@ const FOUNDER_NAV = [
   { path: "/founder/api", label: "开发者接口" },
   { path: "/founder/analytics", label: "数据/经营分析" },
 ];
-// Note: Fusion is now the PUBLIC landing ("/"), so it's dropped from 内部工具. The
-// legacy founder /founder/fusion route + /api/fusion endpoint remain for direct access.
+// Note: the marketing landing is "/" and the public Fusion chat is "/fusion", so
+// Fusion is dropped from 内部工具. The legacy founder /founder/fusion route +
+// /api/fusion endpoint remain for direct access.
 
 const ROUTES = [
-  { pattern: /^\/$/, view: () => fusion },                       // public Fusion chat (the landing)
+  { pattern: /^\/$/, view: () => landing, chromeless: true },    // public marketing landing (its own nav/footer)
+  { pattern: /^\/fusion$/, view: () => fusion },                 // public Fusion chat — the multi-model front door
   // 工作流 hub: a page presenting the two work surfaces (reports + 对账) as cards.
   { pattern: /^\/workflow$/, view: () => workflowHub, auth: true, params: () => ({}) },
   // The whole report workflow on one page; each legacy path selects its in-page tab.
@@ -82,6 +81,15 @@ export function navigate(path, { replace = false } = {}) {
   render();
 }
 
+// The topbar 返回 button: go back through in-app history; on a direct load with no
+// history, fall back to a sensible parent (/x/y → /x; an agents sub-path → the hub).
+function goBack() {
+  if (history.length > 1) { history.back(); return; }
+  const p = location.pathname;
+  const m = p.match(/^(\/[^/]+)\/[^/]+$/);
+  navigate(m ? m[1] : (AGENTS_PATHS.includes(p) ? "/workflow" : "/"));
+}
+
 async function render() {
   const seq = ++renderSeq;
   const el = $("view");
@@ -102,7 +110,13 @@ async function render() {
     if (m) { matched = r; params = r.params ? r.params(m) : {}; break; }
   }
 
+  // The marketing landing renders its own nav + footer — hide the shared app
+  // chrome on chromeless routes (CSS: body.landing-mode .topbar/.footer { none }).
+  document.body.classList.toggle("landing-mode", !!(matched && matched.chromeless));
   renderNav();
+  // Show 返回 on every page except the home landing (where there's nowhere back to).
+  const backBtn = $("backBtn");
+  if (backBtn) backBtn.hidden = (path === "/");
   window.scrollTo(0, 0);
 
   if (!matched) {
@@ -145,7 +159,7 @@ function mountAgentsGate(el) {
         <button type="button" class="run-btn" id="agentsSignup">免费体验</button>
         <button type="button" class="btn-ghost" id="agentsLogin">登录</button>
       </div>
-      <p class="muted" style="margin-top:18px">想先试试 AI？<a href="/" data-nav>回到 Fusion 对话 →</a></p>
+      <p class="muted" style="margin-top:18px">想先试试 AI？<a href="/fusion" data-nav>回到 Fusion 对话 →</a></p>
     </div>
   </div>`;
   const s = $("agentsSignup"); if (s) s.addEventListener("click", () => auth.openSignupModal());
@@ -173,18 +187,14 @@ function navLinkHTML(item, current) {
 function renderNav() {
   const nav = $("mainNav");
   const current = location.pathname;
-  // Fusion is the public home — always shown. 工作流 is a dropdown holding the single
-  // consolidated workflow page when logged in, a single link (→ the sign-in gate) out.
-  let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
+  // Fusion (the chat front door) is at /fusion — always shown. 工作流 is a dropdown
+  // holding the single consolidated workflow page when logged in, a single link
+  // (→ the sign-in gate) out. The brand mark (→ /) returns to the marketing landing.
+  let html = navLinkHTML({ path: "/fusion", label: "Fusion" }, current);
   if (state.account) {
     const open = AGENTS_PATHS.some((p) => (p === "/agents" ? current === "/agents" : current.startsWith(p)));
-    // 工作流 opens the hub PAGE on click; the menu (the two sub-pages) reveals on
-    // hover/focus (.nav-drop-hover) so the dropdown is kept as a quick jump.
-    html += `<div class="nav-drop nav-drop-hover" id="agentsDrop">
-      <a class="nav-link ${open ? "active" : ""}" href="/workflow" data-nav
-         aria-haspopup="true">工作流 <span class="nav-drop-caret">▾</span></a>
-      <div class="nav-drop-menu">${WORKFLOW_NAV.map((i) => `<a class="nav-link ${open ? "active" : ""}" href="${esc(i.path)}" data-nav>${esc(i.label)}</a>`).join("")}</div>
-    </div>`;
+    // 工作流 is a plain link to the hub page; the two sub-pages live on the hub.
+    html += `<a class="nav-link ${open ? "active" : ""}" href="/workflow" data-nav>工作流</a>`;
   } else {
     html += navLinkHTML({ path: "/agents", label: "工作流" }, current);
   }
@@ -222,9 +232,7 @@ function renderNavSheet() {
   const current = location.pathname;
   let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
   if (state.account) {
-    html += `<div class="nav-sheet-group">工作流</div>`
-      + navLinkHTML({ path: "/workflow", label: "工作流主页" }, current)
-      + WORKFLOW_NAV.map((i) => navLinkHTML(i, current)).join("");
+    html += navLinkHTML({ path: "/workflow", label: "工作流" }, current);
   } else {
     html += navLinkHTML({ path: "/agents", label: "工作流" }, current);
   }
@@ -332,8 +340,12 @@ async function boot() {
 
   auth.init({
     onLogin() {
-      if (location.pathname === "/login") history.replaceState({}, "", "/");
-      render();
+      // A fresh login from the public surfaces (marketing landing / the /login
+      // entry) takes the member into the product; a re-auth (session expired on a
+      // protected page) re-renders in place so they keep their spot.
+      const fromPublic = location.pathname === "/" || location.pathname === "/login";
+      if (fromPublic) navigate("/workflow", { replace: true });
+      else render();
       const wantsDemo = new URLSearchParams(location.search).get("onboarding") === "demo";
       if (wantsDemo) onboarding.openOnboarding({ demo: true });
       else onboarding.maybeAutoOpenOnboarding();
@@ -346,6 +358,7 @@ async function boot() {
   onboarding.init();
   renderShell();
   wireSupport();
+  $("backBtn").addEventListener("click", goBack);
 
   // Shell chrome reacts to session / badge changes.
   bus.addEventListener("account", renderShell);

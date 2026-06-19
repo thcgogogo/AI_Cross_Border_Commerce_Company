@@ -1,202 +1,401 @@
 // ===========================================================================
-// landing.js — 营销首页 (logged-out home), the full §3.1 page (Phase 3).
+// views/landing.js — the PUBLIC marketing landing ("/").
 //
-// Sells the RESULT, never the machinery: hero → 三步 → 示例报告 (a real
-// pipeline-generated sample) → 数字可溯源 → 行业模板 → 企业大脑 → 定价 (flat,
-// from /api/plans) → 安全与隐私 → FAQ → final CTA. Sample assets are read from
-// /assets/sample/manifest.json so the section degrades gracefully if the
-// sample has not been generated yet (scripts/make_sample_assets.py).
+// Recreated from the Tangent AI design handoff (Claude Design "Landing"): a
+// long-scroll marketing home — hero + static product mock, a dark "Fusion"
+// concept band, two product pillars (工作流 / Fusion), a dark 技术与算法 section
+// (five core-capability cards), an enterprise trust strip, a dark CTA, and the
+// footer.
+//
+// This page renders its OWN nav + footer; main.js hides the shared app chrome on
+// this route (body.landing-mode). Everything is styled by the .lp-* namespace in
+// style.css. The only behaviours ported from the design's runtime are the
+// --accent theming (now plain CSS) and the data-reveal scroll-in (below).
+//
+// CTAs funnel to the live surfaces: 免费开始 / 开始使用 → /fusion (the chat front
+// door); 登录 → the auth modal; 了解工作流 → /agents. Model names are shown here by
+// design (Fusion is the one surface that names the council); never a ¥ cost.
 // ===========================================================================
 import { state } from "../state.js";
-import { esc, cny, planCard, singleReportCard } from "../components.js";
-import * as api from "../api.js";
-import { openLoginModal, openSignupModal } from "./auth.js";
+import { openLoginModal } from "./auth.js";
 
-const FAQ = [
-  ["我完全不懂 AI，能用吗？",
-   "能。你只需要把平时就有的 Excel / CSV 表格拖进来——系统不要求任何配置，也没有「提示词」这回事。订阅后连上传都可以省掉：到点报告自动送到企业微信和邮箱。"],
-  ["报告里的数字可信吗？",
-   "每个关键数字都带一个【N】角标，对应文末「数据来源与核验」表——指明它来自哪个文件、哪个表、哪些行；趋势数字由确定性程序计算并标注「机器核验」。任何无法溯源的数字都会被审查环节标记出来。"],
-  ["我的数据安全吗？",
-   "上传文件与报告 PDF 加密存储，下载需要登录并校验归属。你的数据只用于生成你自己的报告——绝不用于训练，也绝不会出现在其他账号面前。"],
-  ["怎么收费？会不会越用越贵？",
-   "固定价格：基础版 ¥199/月，企业版 ¥599/月，也可以 ¥29 单买一份。价格与「用量」无关，成本透明，绝不超支。对比一下：一位初级分析师月薪约 ¥8000。"],
-  ["可以开发票吗？",
-   "可以。支付宝 / 微信支付付款后，在「账户与套餐」里一键申请发票。"],
-  ["不想要了怎么办？",
-   "随时取消，服务保留到当期结束，不扣后续费用。你的历史报告与企业大脑数据仍可导出。"],
-];
+const MARK = `<span class="lp-logo-mark" aria-hidden="true">T</span>`;
 
-export async function mount(el) {
-  const meta = state.meta || {};
-  const tagline = meta.product_tagline || "你的 AI 经营分析团队";
-  const single = meta.single_report_price_yuan;
+function navActions() {
+  // Logged-in members skip 登录 — they get a direct way into the workspace.
+  if (state.account) return `<a class="lp-pill" href="/workflow" data-nav>进入工作台&nbsp;→</a>`;
+  return `<button type="button" class="lp-login" id="lpLogin">登录</button>
+        <a class="lp-pill" href="/fusion" data-nav>开始使用</a>`;
+}
 
-  el.innerHTML = `
-    <section class="hero">
-      <span class="hero-kicker">${esc(tagline)}</span>
-      <h1 class="hero-title">周一早上，<br/>报告自己到。</h1>
-      <p class="hero-sub">把杂乱的 Excel 交给你的 AI 经营分析团队；每周一 08:00，
-        一页可转发的经营报告准时送到企业微信和邮箱。不用配置，不写提示词。</p>
-      <div class="hero-actions">
-        <button type="button" class="hero-btn primary" id="landingSignup">免费体验（送 2 份报告）</button>
-        <button type="button" class="hero-btn" id="landingSample" hidden>看一份示例报告</button>
+function html() {
+  return `<div class="lp" id="lpRoot">
+
+  <!-- NAV -->
+  <header class="lp-nav">
+    <nav class="lp-nav-inner" aria-label="主导航">
+      <a class="lp-logo" href="/" data-nav>${MARK}<span class="lp-logo-name">Tangent&nbsp;AI</span></a>
+      <div class="lp-nav-links">
+        <a href="#fusion">Fusion</a>
+        <a href="#workflows">工作流</a>
+        <a href="#tech">技术</a>
+        <a href="#enterprise">企业版</a>
       </div>
-      <p class="hero-note">注册需手机号验证 · 无需绑定支付方式</p>
-    </section>
+      <div class="lp-nav-actions">${navActions()}</div>
+    </nav>
+  </header>
 
-    <div class="steps3">
-      <div class="step3">
-        <div class="step3-num">1</div>
-        <div class="step3-title">上传数据</div>
-        <div class="step3-sub">销售导出、订单表、费用表 — 乱一点也没关系。</div>
+  <!-- HERO -->
+  <section class="lp-hero" id="top">
+    <div class="lp-hero-glow"></div>
+    <div class="lp-container lp-hero-inner">
+      <div class="lp-eyebrow"><span class="lp-dot"></span>Tangent 融合引擎</div>
+      <h1 class="lp-hero-title">把 token 变成企业可信赖的工作流。</h1>
+      <p class="lp-hero-sub">Tangent 让你的难题在多个前沿模型间并行作答、交叉核验，最终给出一个经过验证的结果 —— 每个数字都可溯源。</p>
+      <div class="lp-hero-cta">
+        <a class="lp-btn lp-btn-primary" href="/fusion" data-nav>免费开始</a>
+        <a class="lp-btn lp-btn-ghost" href="#fusion">预约演示&nbsp;→</a>
       </div>
-      <div class="step3">
-        <div class="step3-num">2</div>
-        <div class="step3-title">AI 团队分析</div>
-        <div class="step3-sub">多重交叉核验，每个数字都能溯源到原始表格。</div>
-      </div>
-      <div class="step3">
-        <div class="step3-num">3</div>
-        <div class="step3-title">准时送达</div>
-        <div class="step3-sub">企业微信 + 邮箱自动送达，老板看完即可转发。</div>
+      <p class="lp-hero-note">无需绑卡 · 匿名试用 · SOC 2 Type II</p>
+
+      <!-- PRODUCT MOCK -->
+      <div class="lp-mock" data-reveal>
+        <div class="lp-mock-card">
+          <div class="lp-mock-input">
+            <div class="lp-mock-input-text">帮我分析这个季度的销售数据，并标出对不上账的地方……</div>
+            <span class="lp-mock-send" aria-hidden="true">↑</span>
+          </div>
+          <div class="lp-mock-panel">
+            <div class="lp-mock-prow">
+              <div class="lp-mock-tiers">
+                <span class="lp-tier">高质量</span>
+                <span class="lp-tier off">经济</span>
+              </div>
+              <span class="lp-mock-custom">自定义模型 ▾</span>
+            </div>
+            <div class="lp-mock-models">
+              <span class="lp-chip">Opus 4.7&nbsp;&nbsp;×</span>
+              <span class="lp-chip">GPT-5.1&nbsp;&nbsp;×</span>
+              <span class="lp-chip">DeepSeek V4 Pro&nbsp;&nbsp;×</span>
+              <span class="lp-mut">最多 3 个</span>
+            </div>
+          </div>
+        </div>
+        <div class="lp-mock-float">
+          <span class="lp-check" aria-hidden="true">✓</span>
+          <div>
+            <div class="lp-float-t">3 个模型一致</div>
+            <div class="lp-float-s">已核验 · 可溯源</div>
+          </div>
+        </div>
       </div>
     </div>
+  </section>
 
-    <section class="lsec" id="sampleSec" hidden>
-      <h2 class="lsec-h2">这就是你每周收到的报告</h2>
-      <p class="lsec-lead">下面是一份真实生成的示例（数据来自虚构的「晨光贸易有限公司」）：
-        核心结论、关键指标、风险异常、下周行动 — 一页讲清，老板直接转发。</p>
-      <div class="sample-strip" id="sampleStrip"></div>
-      <p class="sample-note">
-        <a id="samplePdfLink" href="#" target="_blank" rel="noopener">下载示例 PDF ↗</a>
-        · 带公司 logo 与品牌色 · 文末附「数据来源与核验」</p>
-    </section>
-
-    <section class="lsec lsec-alt" id="traceSec">
-      <div class="trace-grid">
-        <div>
-          <h2 class="lsec-h2">每个数字，都能问一句「哪来的？」</h2>
-          <ul class="trace-points">
-            <li><strong>【N】溯源角标</strong> — 报告里每个关键数字都标注来源：哪个文件、哪个表、哪些行。</li>
-            <li><strong>机器核验的趋势</strong> — 环比、连续变化、异常波动由确定性程序计算，不靠 AI 心算。</li>
-            <li><strong>独立审查</strong> — 出稿后还有一道审查：任何无法溯源的数字都会被标记出来。</li>
-          </ul>
-          <p class="trace-foot">一份要被转发给老板的报告，容不下一个编造的数字 — 这是我们的底线。</p>
+  <!-- CONCEPT BAND (dark) -->
+  <section class="lp-band" id="fusion" data-reveal>
+    <div class="lp-container">
+      <div class="lp-band-head">
+        <div class="lp-eyebrow-d">Fusion</div>
+        <h2>一个模型答错，<br>其它模型会纠正它。</h2>
+        <p class="lp-band-sub">问一次，几位顶级模型并行作答、相互辩证、最终收敛。你不必看到中间的噪音 —— 只看到经得起推敲的结论。</p>
+      </div>
+      <div class="lp-flow">
+        <div class="lp-flow-col">
+          <div class="lp-flow-row"><span class="lp-flow-name">Opus 4.7</span><span class="lp-flow-tag ok">一致</span></div>
+          <div class="lp-flow-row"><span class="lp-flow-name">GPT-5.1</span><span class="lp-flow-tag ok">一致</span></div>
+          <div class="lp-flow-row"><span class="lp-flow-name">DeepSeek V4</span><span class="lp-flow-tag warn">质疑 Q3</span></div>
         </div>
-        <div class="trace-figure" id="traceFigure"></div>
+        <span class="lp-flow-arrow" aria-hidden="true">→</span>
+        <div class="lp-flow-fuse">
+          <div class="lp-flow-fuse-k">共识</div>
+          <div class="lp-flow-fuse-t">交叉核验 · 化解分歧</div>
+        </div>
+        <span class="lp-flow-arrow" aria-hidden="true">→</span>
+        <div class="lp-flow-out">
+          <div class="lp-check" aria-hidden="true">✓</div>
+          <div class="lp-flow-out-t">已验证答案</div>
+          <div class="lp-flow-out-s">附审计轨迹</div>
+        </div>
       </div>
-    </section>
+    </div>
+  </section>
 
-    <section class="lsec" id="industrySec">
-      <h2 class="lsec-h2">懂你的行业</h2>
-      <p class="lsec-lead">每个行业有自己的模板：该看的指标、该有的章节、该提醒的风险，开箱即用。</p>
-      <div class="chip-row" id="industryChips"></div>
-    </section>
-
-    <section class="lsec lsec-alt" id="brainSec">
-      <h2 class="lsec-h2">它记住你的公司</h2>
-      <p class="lsec-lead">企业大脑：只属于你公司的经营记忆，每份报告都让它更聪明。</p>
-      <div class="brain3">
-        <div class="card"><div class="card-title">记住指标与口径</div>
-          <p>你的表格列名、KPI 定义、财务周口径 — 确认一次，永久生效。</p></div>
-        <div class="card"><div class="card-title">术语问一次，记一辈子</div>
-          <p>「华东大区」指哪几个省？内部黑话一次确认，以后每份报告都懂。</p></div>
-        <div class="card"><div class="card-title">和自己的历史比</div>
-          <p>「华东区已连续三周下滑，环比 −12.4%」— 这种话只有记得你全年数据的分析师说得出。</p></div>
+  <!-- FEATURES -->
+  <section class="lp-features" id="workflows">
+    <div class="lp-container">
+      <div class="lp-section-head" data-reveal>
+        <div class="lp-eyebrow-c">产品矩阵</div>
+        <h2>三块基石，一条可信流水线。</h2>
       </div>
-    </section>
 
-    <section class="lsec" id="pricing">
-      <h2 class="lsec-h2">定价 · 像雇人一样简单</h2>
-      <p class="lsec-lead">固定价格，按价值计费。成本透明，绝不超支。</p>
-      <div class="pricing-grid" id="pricingGrid"></div>
-      <p class="pricing-note">支付宝 / 微信支付 · 可开发票${single ? ` · 不想订阅？${esc(cny(single, 0))} 单买一份` : ""}</p>
-    </section>
-
-    <section class="lsec lsec-alt" id="secSec">
-      <h2 class="lsec-h2">安全与隐私</h2>
-      <div class="sec-strip">
-        <div class="sec-item">🔒 上传与报告加密存储</div>
-        <div class="sec-item">👤 下载需登录并校验归属</div>
-        <div class="sec-item">🚫 绝不用于训练</div>
-        <div class="sec-item">📄 数据仅用于生成你自己的报告</div>
+      <!-- Feature 1: Workflows → email delivery -->
+      <div class="lp-feature" data-reveal>
+        <div class="lp-feature-text">
+          <div class="lp-feature-k">工作流</div>
+          <h3>把 token 变成企业可信赖的工作流。</h3>
+          <p>我们通过 Tangent 引擎把 token 转换成企业能够依赖的工作流。比如，直接把 token 变成发到你邮箱里的报告 —— 涵盖大量通用专业工作流，以及为各行业量身定制的独有工作流。</p>
+          <div class="lp-feature-list">
+            <div><span class="d">—</span> token 直达成品，自动送进你的邮箱</div>
+            <div><span class="d">—</span> 覆盖广泛的通用专业工作流</div>
+            <div><span class="d">—</span> 面向各行业的独有工作流</div>
+          </div>
+          <a class="lp-feature-link" href="/agents" data-nav>了解工作流&nbsp;→</a>
+        </div>
+        <div class="lp-feature-visual">
+          <div class="lp-panel">
+            <div class="lp-panel-head">
+              <span class="lp-panel-title">📧 收件箱 · Tangent</span>
+              <span class="lp-badge-ok">已送达</span>
+            </div>
+            <div class="lp-mail">
+              <div class="lp-mail-subject">您的 Q3 销售复盘报告已生成</div>
+              <div class="lp-mail-meta">Tangent 引擎 · 今天 08:00 自动发送</div>
+              <div class="lp-mail-body">已分析 3 份上传材料，生成 6 页报告并完成对账核验。分销渠道存在 1 处异常，详见正文。</div>
+              <div class="lp-mail-attach">
+                <span class="lp-mail-file">📄 Q3_销售复盘.pdf</span>
+                <span class="lp-mail-size">1.2 MB</span>
+              </div>
+            </div>
+            <div class="lp-panel-note">同一套工作流也可输出结算核对、董事会摘要等成品 —— 全部自动送达。</div>
+          </div>
+        </div>
       </div>
-    </section>
 
-    <section class="lsec" id="faqSec">
-      <h2 class="lsec-h2">常见问题</h2>
-      <div class="faq" id="faqList">
-        ${FAQ.map(([q, a]) => `<details class="faq-item">
-            <summary>${esc(q)}</summary><p>${esc(a)}</p>
-          </details>`).join("")}
+      <!-- Feature 2: Fusion -->
+      <div class="lp-feature lp-feature-rev" data-reveal>
+        <div class="lp-feature-text">
+          <div class="lp-feature-k">Fusion</div>
+          <h3>多个前沿模型，一个站得住脚的答案。</h3>
+          <p>选择质量档位或你自己的模型组合。Tangent 融合它们的推理，指出分歧所在并加以化解 —— 让单次幻觉永远到不了你的桌面。</p>
+          <div class="lp-feature-list">
+            <div><span class="d">—</span> 高质量与经济档位</div>
+            <div><span class="d">—</span> 每次最多 3 个模型</div>
+            <div><span class="d">—</span> 自动择优融合</div>
+          </div>
+          <a class="lp-feature-link" href="/fusion" data-nav>了解 Fusion 如何运作&nbsp;→</a>
+        </div>
+        <div class="lp-feature-visual">
+          <div class="lp-panel lp-panel-flex">
+            <div class="lp-fbar"><span class="lp-fbar-name">Opus 4.7</span><span class="lp-fbar-meter" style="width:64%"></span></div>
+            <div class="lp-fbar"><span class="lp-fbar-name">GPT-5.1</span><span class="lp-fbar-meter" style="width:78%"></span></div>
+            <div class="lp-fbar"><span class="lp-fbar-name">DeepSeek V4 Pro</span><span class="lp-fbar-meter" style="width:52%"></span></div>
+            <div class="lp-fbar-out">
+              <span class="lp-check" aria-hidden="true">✓</span>
+              <div>
+                <div class="lp-fbar-out-t">融合答案已就绪</div>
+                <div class="lp-fbar-out-s">择优 · 已化解 1 处分歧</div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-    </section>
+    </div>
+  </section>
 
-    <section class="cta-final">
-      <h2>下周一早上 8 点，收到第一份？</h2>
-      <p>注册即送 2 份完整报告 — 用你自己的数据试，或一键体验示例数据。</p>
-      <button type="button" class="run-btn" id="landingSignup2">免费体验（送 2 份报告）</button>
-      <p class="hero-note">已有账号？<button type="button" class="link-btn" id="landingLogin">登录</button></p>
-    </section>`;
+  <!-- TECH & ALGORITHM (dark) -->
+  <section class="lp-tech" id="tech">
+    <div class="lp-container">
+      <div class="lp-tech-head" data-reveal>
+        <div class="lp-eyebrow-d">技术与算法</div>
+        <h2>引擎背后的五项核心能力。</h2>
+        <p>不只是把模型拼在一起。Tangent 在架构、记忆、溯源、行业理解与数据安全上做了深一层的工程。</p>
+      </div>
 
-  // CTA wiring
-  el.querySelector("#landingSignup").addEventListener("click", openSignupModal);
-  el.querySelector("#landingSignup2").addEventListener("click", openSignupModal);
-  el.querySelector("#landingLogin").addEventListener("click", openLoginModal);
+      <div class="lp-tech-grid" data-reveal>
 
-  // Sample showcase — only when the generated assets exist (manifest 404 → stay hidden).
-  fetch("/assets/sample/manifest.json").then((r) => (r.ok ? r.json() : null)).then((man) => {
-    if (!man || !man.pages) return;
-    const sec = el.querySelector("#sampleSec");
-    const strip = el.querySelector("#sampleStrip");
-    if (!sec || !strip) return; // view was unmounted meanwhile
-    strip.innerHTML = Array.from({ length: man.pages }, (_, i) => `
-      <a class="sample-page" href="/assets/sample/${esc(man.pdf)}" target="_blank" rel="noopener"
-         aria-label="示例报告第 ${i + 1} 页">
-        <img src="/assets/sample/page-${i + 1}.png" alt="示例报告第 ${i + 1} 页"
-             loading="${i ? "lazy" : "eager"}"></a>`).join("");
-    el.querySelector("#samplePdfLink").href = `/assets/sample/${man.pdf}`;
-    sec.hidden = false;
-    const btn = el.querySelector("#landingSample");
-    btn.hidden = false;
-    btn.addEventListener("click", () => sec.scrollIntoView({ behavior: "smooth" }));
-    // 溯源 block illustration = the sources-appendix page, when the manifest marks one.
-    if (man.sources_page) {
-      el.querySelector("#traceFigure").innerHTML = `
-        <img src="/assets/sample/page-${man.sources_page}.png"
-             alt="数据来源与核验附录示例" loading="lazy">`;
-    }
-  }).catch(() => { /* sample assets absent — section stays hidden */ });
+        <!-- 0. Fusion architecture / reasoning -->
+        <div class="lp-tech-hero">
+          <div>
+            <div class="lp-tech-tagrow">
+              <span class="lp-tech-tag">Fusion 引擎架构</span>
+              <span class="lp-tech-badge">更强推理</span>
+            </div>
+            <h3>更少的 token，比肩顶尖大模型的推理。</h3>
+            <p>Fusion 架构为模型带来被强化的推理能力 —— 在消耗更少 token 的前提下，推理水平比肩国外顶尖大语言模型。更高的智能，更低的成本。</p>
+          </div>
+          <div class="lp-tech-meters">
+            <div>
+              <div class="lp-tech-meter-l"><span>推理能力</span><span class="v blue">比肩顶尖</span></div>
+              <div class="lp-tech-track"><span class="lp-tech-fill blue" style="width:96%"></span></div>
+            </div>
+            <div>
+              <div class="lp-tech-meter-l"><span>token 消耗</span><span class="v green">↓ 显著更低</span></div>
+              <div class="lp-tech-track"><span class="lp-tech-fill green" style="width:42%"></span></div>
+            </div>
+          </div>
+        </div>
 
-  // 行业模板 chips (config-driven packs).
-  api.getIndustries().then((rows) => {
-    const chips = el.querySelector("#industryChips");
-    if (!chips) return;
-    chips.innerHTML = (rows || [])
-      .map((r) => `<span class="chip">${esc(r.display_name_cn || r.key)}</span>`)
-      .join("") + `<span class="chip chip-soon">更多行业陆续上线</span>`;
-  }).catch(() => { /* strip is decorative */ });
+        <!-- 1. Compounding memory -->
+        <div class="lp-tech-card">
+          <div class="lp-tech-tagrow">
+            <span class="lp-tech-tag">复利记忆通道</span>
+            <span class="lp-tech-badge">越用越聪明</span>
+          </div>
+          <h3>从过去的每一次运行中积累经验。</h3>
+          <p>Tangent 引擎会总结过往工作流的经验，让之后的任务更高效；当它检测到与以往相同的错误时，会主动发出警告，避免你重蹈覆辙。</p>
+          <div class="lp-tech-warn">
+            <span class="lp-tech-warn-i" aria-hidden="true">⚠</span>
+            <div>
+              <div class="lp-tech-warn-t">检测到与 3 月相同的对账偏差</div>
+              <div class="lp-tech-warn-s">上次因发票口径不一致导致 —— 已自动预警</div>
+            </div>
+          </div>
+        </div>
 
-  // 定价 cards from /api/plans (+ the 单次 card from meta) — the shared
-  // planCard/singleReportCard atoms (components.js), signup CTAs here.
-  api.getPlans().then((data) => {
-    const grid = el.querySelector("#pricingGrid");
-    if (!grid) return;
-    const plans = (data && data.plans) || [];
-    const byCode = Object.fromEntries(plans.map((p) => [p.code, p]));
-    const signupCta = (label) => ({ label, attrs: "data-signup" });
-    const cards = [
-      planCard(byCode.free, { cta: signupCta("立即免费体验") }),
-      singleReportCard(single, { cta: signupCta("注册后购买") }),
-      planCard(byCode.basic, { featured: true, cta: signupCta("免费体验后订阅") }),
-      planCard(byCode.pro, { cta: signupCta("免费体验后订阅") }),
-    ];
-    grid.innerHTML = cards.join("");
-    grid.querySelectorAll("[data-signup]").forEach((b) =>
-      b.addEventListener("click", openSignupModal));
-  }).catch(() => {
-    const grid = el.querySelector("#pricingGrid");
-    if (grid) grid.innerHTML = `<p class="lsec-lead">价格信息加载失败，请刷新重试。</p>`;
+        <!-- 2. Traceability -->
+        <div class="lp-tech-card" id="trace">
+          <div class="lp-tech-tag">溯源</div>
+          <h3>每个数字都能回到它的来源。</h3>
+          <p>没有黑箱。点击任意数字，直接追溯到它来自的单元格、文档与模型运行记录。</p>
+          <div class="lp-tech-trace">
+            <div class="lp-tech-trace-q">Q3 净营收达到 <span class="lp-tech-hl">$3.21M</span>，环比 Q2 增长 9%。</div>
+            <div class="lp-tech-trace-rows">
+              <div><span class="k">文件</span><span class="v">finance_q3.xlsx</span></div>
+              <div><span class="k">单元格</span><span class="v">Summary!F14</span></div>
+              <div><span class="k">运行</span><span class="v blue">#a3f9 · 3 个模型</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Industry workflows -->
+        <div class="lp-tech-card">
+          <div class="lp-tech-tag">行业工作流</div>
+          <h3>懂你的行业，成品自动送到手里。</h3>
+          <p>Tangent 内置对行业流程的理解。你只需上传材料，引擎自动完成处理，把可交付的成品直接送到你手里。</p>
+          <div class="lp-tech-flow">
+            <div class="lp-tech-flow-step">
+              <div class="lp-tech-flow-emoji" aria-hidden="true">📤</div>
+              <div class="lp-tech-flow-l">上传材料</div>
+            </div>
+            <span class="lp-tech-flow-arrow" aria-hidden="true">→</span>
+            <div class="lp-tech-flow-step b">
+              <div class="lp-tech-flow-emoji" aria-hidden="true">⚙️</div>
+              <div class="lp-tech-flow-l">自动处理</div>
+            </div>
+            <span class="lp-tech-flow-arrow" aria-hidden="true">→</span>
+            <div class="lp-tech-flow-step g">
+              <div class="lp-tech-flow-emoji" aria-hidden="true">📦</div>
+              <div class="lp-tech-flow-l">成品送达</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. Data privacy -->
+        <div class="lp-tech-card">
+          <div class="lp-tech-tag">数据完全保密</div>
+          <h3>你的数据，连我们也看不到。</h3>
+          <p>数据在隔离环境中运行，全程加密。我们看不到你上传了什么内容、用了什么技术 —— 数据始终只属于你。</p>
+          <div class="lp-tech-priv">
+            <span class="lp-tech-priv-i" aria-hidden="true">🔒</span>
+            <div class="lp-tech-chips">
+              <span class="lp-tech-chip">数据隔离</span>
+              <span class="lp-tech-chip">端到端加密</span>
+              <span class="lp-tech-chip">零数据留存</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ENTERPRISE -->
+  <section class="lp-ent" id="enterprise" data-reveal>
+    <div class="lp-container">
+      <div class="lp-eyebrow-c">企业版</div>
+      <h2>为必须做对的团队而打造。</h2>
+      <div class="lp-ent-grid">
+        <div class="lp-ent-tile">SOC 2 Type II</div>
+        <div class="lp-ent-tile">SSO / SAML</div>
+        <div class="lp-ent-tile">数据隔离</div>
+        <div class="lp-ent-tile">私有化 / VPC</div>
+        <div class="lp-ent-tile">审计日志</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="lp-cta" id="cta" data-reveal>
+    <div class="lp-container">
+      <div class="lp-cta-card">
+        <div class="lp-cta-glow"></div>
+        <div class="lp-cta-inner">
+          <h2>把你最棘手的问题交给它。</h2>
+          <p>用匿名试用免费开始。准备好了，随时接入你自己的模型与数据。</p>
+          <div class="lp-cta-actions">
+            <a class="lp-btn lp-btn-light" href="/fusion" data-nav>免费开始</a>
+            <a class="lp-btn lp-btn-dghost" href="#" id="lpSales">联系销售&nbsp;→</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="lp-footer">
+    <div class="lp-footer-grid">
+      <div>
+        <a class="lp-footer-logo" href="/" data-nav>${MARK}<span class="lp-logo-name">Tangent&nbsp;AI</span></a>
+        <p class="lp-footer-tag">把 token 变成企业可信赖的工作流产品。</p>
+      </div>
+      <div class="lp-footer-col">
+        <span class="h">产品</span>
+        <a href="#fusion">Fusion</a>
+        <a href="#workflows">工作流</a>
+        <a href="#trace">溯源</a>
+        <a href="#tech">技术</a>
+      </div>
+      <div class="lp-footer-col">
+        <span class="h">公司</span>
+        <a href="#">关于我们</a>
+        <a href="#">招聘</a>
+        <a href="#">联系我们</a>
+      </div>
+      <div class="lp-footer-col">
+        <span class="h">法律</span>
+        <a href="#">隐私</a>
+        <a href="#">条款</a>
+        <a href="#">安全</a>
+      </div>
+    </div>
+    <div class="lp-footer-bar">
+      <span>© 2026 Tangent AI. 每个数字可溯源。</span>
+      <span class="lp-float-s">状态：所有系统正常运行</span>
+    </div>
+  </footer>
+
+</div>`;
+}
+
+export async function mount(el) {
+  el.innerHTML = html();
+  const root = el.querySelector("#lpRoot");
+
+  // 登录 → the shared auth modal (lives outside this view, in #modalRoot).
+  const login = el.querySelector("#lpLogin");
+  if (login) login.addEventListener("click", () => openLoginModal());
+
+  // 联系销售 → reuse the shell's 联系支持 popover (not hidden on this route).
+  const sales = el.querySelector("#lpSales");
+  if (sales) sales.addEventListener("click", (e) => {
+    e.preventDefault();
+    const fab = document.getElementById("supportFab");
+    if (fab) fab.click();
   });
+
+  // Scroll-reveal — port of the design's IntersectionObserver. Armed only here, so
+  // a no-JS / unsupported browser keeps everything visible (.reveal-on absent).
+  let io = null;
+  if (root && "IntersectionObserver" in window) {
+    root.classList.add("reveal-on");
+    io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) { e.target.classList.add("is-in"); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.12 });
+    root.querySelectorAll("[data-reveal]").forEach((node) => io.observe(node));
+  }
+
+  return () => { if (io) io.disconnect(); };
 }
