@@ -98,7 +98,7 @@ def _openai_chat(model_id, messages, max_tokens, max_retries=3):
 
     client = openai.OpenAI(
         api_key=key,
-        base_url=p.get("base_url"),
+        base_url=config.provider_base_url(pid),
         timeout=120.0,
         max_retries=max_retries,
     )

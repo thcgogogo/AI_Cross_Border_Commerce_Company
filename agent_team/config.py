@@ -84,6 +84,24 @@ PROVIDERS = {
                   "base_url": "https://ark.cn-beijing.volces.com/api/v3"},
 }
 
+
+def provider_base_url(provider_id):
+    """The base_url a provider's OpenAI-compatible client should use.
+
+    The catalog defaults to each provider's INTERNATIONAL endpoint, but several
+    providers run separate mainland-China platforms whose keys ONLY work against
+    a different host (e.g. Qwen/DashScope intl vs cn, Moonshot api.moonshot.ai vs
+    .cn). Rather than hardcode one region, allow a per-provider override via env:
+    the provider's `*_API_KEY` name with `_API_KEY` swapped for `_BASE_URL` — e.g.
+    DASHSCOPE_BASE_URL, MOONSHOT_BASE_URL. Unset → the catalog default."""
+    p = PROVIDERS.get(provider_id, {})
+    env_key = p.get("env_key") or ""
+    if env_key.endswith("_API_KEY"):
+        override = _env(env_key[:-len("_API_KEY")] + "_BASE_URL")
+        if override:
+            return override
+    return p.get("base_url")
+
 # ---------------------------------------------------------------------------
 # MONEY — catalog prices are in US$ (how providers publish them), but the WHOLE
 # app shows money to customers in Chinese Yuan (¥). We convert at one rate.
@@ -751,7 +769,7 @@ MODEL_CHOICES = [
      "blurb": "MiniMax's reasoning-focused model — chain-of-thought over a very large context window."},
 
     # ---- Moonshot · Kimi ----
-    {"id": "kimi-k2-0711-preview", "label": "Kimi K2", "provider": "moonshot", "tier": "Flagship",
+    {"id": "kimi-k2.5", "label": "Kimi K2", "provider": "moonshot", "tier": "Flagship",
      "input_per_mtok": 0.60, "output_per_mtok": 2.50, "context": "128K tokens", "approx": True,
      "blurb": "Moonshot's Kimi K2 — a strong long-context model popular for agentic use."},
 
