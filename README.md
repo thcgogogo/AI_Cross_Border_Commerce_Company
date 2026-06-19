@@ -150,20 +150,67 @@ Leave it unset when the app is directly exposed (see [docs/ops.md](docs/ops.md) 
 
 ---
 
-## Running in mainland China (DeepSeek — no Anthropic key)
+## Running in mainland China (domestic models — no Anthropic key)
 
 The AI team defaults to Claude. For a mainland deployment — where `api.anthropic.com`
 isn't reliably reachable and a foreign LLM raises 生成式AI 算法备案 compliance issues —
-flip the **whole team and its internal calls onto DeepSeek V4** with two lines in `.env`:
+run the team on **domestic models** instead. No `ANTHROPIC_API_KEY` is required: the
+model router builds its Claude client lazily and never touches it.
+
+**Option A — the whole team on one model (simplest).** Two lines in `.env`:
 
 ```bash
 TEAM_MODEL_PRESET=domestic     # every agent + metric extraction + the audit → deepseek-v4-flash
 DEEPSEEK_API_KEY=sk-...        # the only model key you then need
 ```
 
-No `ANTHROPIC_API_KEY` is required — the model router builds its Claude client lazily
-and never touches it. Want Qwen instead, or `deepseek-v4-pro` for the report writer?
-See [docs/launch-checklist.md](docs/launch-checklist.md) §8.
+**Option B — a per-task domestic mix (best quality).** Assign each agent to the model
+that suits its job, live from **内部工具 → 团队与模型** (a per-agent override wins over
+the preset and is persisted to `memory_store/model_overrides.json`). A mix proven in
+this deployment, spread across three mainland providers:
+
+| Agent | Job | Model |
+|---|---|---|
+| 首席执行官 (orchestrate) · 数据分析师 (numbers) | hard reasoning / "thinking" | `deepseek-v4-pro` |
+| 文档分析师 (read CN docs) · 报告撰写人 (write 经营周报) | Chinese flagship | `qwen3.7-max` |
+| 资料管理员 (records) · 媒体制作人 (build files) | agentic / tool use | `MiniMax-M3` |
+
+Move the two internal utility calls off Claude as well, so a full run needs no Anthropic
+key at all:
+
+```bash
+EXTRACTION_MODEL=deepseek-v4-flash    # metric extraction
+AUDIT_MODEL=deepseek-v4-flash         # the verification audit
+```
+
+**Provider keys & endpoints — the mainland gotchas.** Each provider reads its key from a
+specific env var (the `env_key` in `agent_team/config.py` `PROVIDERS`); **the name must
+match exactly**, and mainland-console keys need their endpoint overridden because the
+catalog ships the *international* hosts by default:
+
+| Provider | Key env var | Mainland endpoint override |
+|---|---|---|
+| DeepSeek | `DEEPSEEK_API_KEY` | — (default works) |
+| Alibaba Qwen | `DASHSCOPE_API_KEY` *(not `QWEN_API_KEY`)* | `DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| Moonshot · Kimi | `MOONSHOT_API_KEY` *(not `KIMI_API_KEY`)* | `MOONSHOT_BASE_URL=https://api.moonshot.cn/v1` |
+| MiniMax | `MINIMAX_API_KEY` | — (`api.minimax.chat` default works) |
+
+A key registered on a mainland console (百炼 / platform.moonshot.cn) is rejected on the
+international endpoint with a `401`. Set the provider's `<PREFIX>_BASE_URL` (the `*_API_KEY`
+name with `_API_KEY` → `_BASE_URL`) to the mainland host — `config.provider_base_url()`
+reads it and falls back to the catalog default when unset.
+
+**实名认证 (real-name verification) is required.** Mainland AI platforms gate **API
+billing** on real-name verification — a positive balance alone is not enough, and calls
+return `402 insufficient_balance` until the account (个人, or 企业 for a company
+deployment) is verified. This is a per-account, console-side step, not a config change.
+
+**Reasoning models are handled automatically.** Some domestic reasoning models (e.g.
+`MiniMax-M3`) emit their chain-of-thought as a leading `<think>…</think>` block inline in
+the reply; the provider adapter strips it so raw reasoning never reaches a report,
+records register, or other deliverable.
+
+Want a different split? See [docs/launch-checklist.md](docs/launch-checklist.md) §8.
 
 ---
 
@@ -202,6 +249,8 @@ provider.
 | `No ANTHROPIC_API_KEY found` | Create `.env` from `.env.example` and paste your real key. |
 | `401` invalid key | An old key/redirect in your shell can shadow `.env`: `unset ANTHROPIC_API_KEY`, and note the app auto-ignores a non-Anthropic `ANTHROPIC_BASE_URL`. No quotes/spaces around the key. |
 | Run needs `DEEPSEEK_API_KEY` | You set `TEAM_MODEL_PRESET=domestic` (China mode) but no DeepSeek key — add `DEEPSEEK_API_KEY` to `.env`. In this mode no Anthropic key is needed. |
+| Kimi/Qwen `401` "invalid authentication" | Two causes: (1) the key env-var name must match `PROVIDERS[...]["env_key"]` — Qwen reads `DASHSCOPE_API_KEY` (not `QWEN_API_KEY`), Kimi reads `MOONSHOT_API_KEY` (not `KIMI_API_KEY`); (2) a mainland-console key needs the `*_BASE_URL` override to its `.cn` endpoint (see "Running in mainland China"). |
+| MiniMax `402 insufficient_balance` | Mainland API billing requires **实名认证** (real-name verification) on the MiniMax console — not just a top-up. Verify the account (企业 for a company), then retry. |
 | Signup asks for an SMS code | In local dev the code prints in the Terminal (console SMS provider). Set `PHONE_VERIFICATION=0` to disable entirely. |
 | Run "stopped early" | A founder ¥ budget (成本控制台) or the free trial's internal cost cap cut it off — raise the budget, or upgrade the account's plan. |
 | 「报告额度已用完」 | The plan quota (or the free trial's 2 reports) is spent — upgrade in 账户与套餐 or buy a 单次报告 (¥29). |
