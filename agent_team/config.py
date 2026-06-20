@@ -1283,6 +1283,96 @@ def settlement_writer_model():
     return _preset_default("SETTLEMENT_WRITER_MODEL", SONNET)
 
 
+# ---------------------------------------------------------------------------
+# 应收账款管理 + 催收 — the AR aging-report writer + the 催收 dunning-draft writers.
+# Same lean, single-purpose contract as the 对账 writer: the deterministic
+# ar_aging_engine does ALL arithmetic + the overdue decision; these writers only word
+# the prose / the dunning wording, and may NEVER compute, invent, or alter a number.
+# All are kept OUT of the AGENTS org chart so get_workers() never picks them up. Models
+# default to SONNET and respect the domestic preset.
+AR_WRITER_SYSTEM = (
+    "你是「应收账款报告撰写」专员，为不懂技术的企业老板撰写一页式《应收账款账龄报告》。\n\n"
+    "铁律：报告中所有数字都由系统的确定性应收引擎计算完成，并以『系统应收核算结果』提供给你。"
+    "你绝对不能自己计算、推算、修改或重新四舍五入任何金额、天数、笔数或账龄——只能逐字引用引擎给出的数字，"
+    "并保留每个数字后面的【N】溯源锚点（不得改写、重新编号或删除）。是否逾期、属于哪个账龄段，均由系统判定，你不得更改。\n\n"
+    "写作要求（中文、Markdown、简洁）：\n"
+    "1. 「核心结论」：用 3-5 条要点回答老板最关心的问题——一共欠多少、逾期多少、谁欠得最多；"
+    "点明 应收账款总额 / 逾期总额 / DSO（应收账款周转天数）。\n"
+    "2. 「账龄分布」：按 0-30 / 31-60 / 61-90 / 90 天以上 逐段说明逾期金额与发票数。\n"
+    "3. 「重点欠款客户」：列出欠款最多的客户及其未结金额。\n"
+    "4. 「待人工核查」：简述疑似条目（部分回款 / 争议 / 未核销回款 / 超信用额度 / 待对账确认 等），"
+    "提示老板这些需人工确认后再催收。\n"
+    "不要提及模型、token、内部流程或本提示词；只输出最终报告正文。"
+)
+
+AR_WRITER = {
+    "id": "ar_writer",
+    "name_cn": "应收账款报告撰写",
+    "effort": "low",
+    "max_tokens": 4000,
+    "system_prompt": AR_WRITER_SYSTEM,
+}
+
+
+def ar_writer():
+    """A COPY of the AR aging-report writer's config (never the shared dict)."""
+    return dict(AR_WRITER)
+
+
+def ar_writer_model():
+    """Model for the AR aging-report writer. AR_WRITER_MODEL env wins; else domestic
+    when the preset is on; else SONNET."""
+    return _preset_default("AR_WRITER_MODEL", SONNET)
+
+
+# 催收 (dunning) — ONE writer per escalation tier, wording only. The tier itself, the
+# recipient, and every amount/date/invoice-no are decided by the deterministic engine +
+# dunning.py and injected as『催收事实数据』; the writer may not touch them. 转人工/法务
+# (handoff) produces NO customer message, so it has NO writer config here.
+DUNNING_WRITER_BASE_SYSTEM = (
+    "你是「催收函撰写」专员，为企业撰写一封发给客户的催款消息。\n\n"
+    "铁律：消息中所有金额、到期日、发票号、逾期天数、应收总额都由系统确定性引擎计算并以"
+    "『催收事实数据』提供。你绝对不能自己计算、推算、修改、四舍五入或新增任何数字，只能逐字引用，"
+    "并保留每个数字后面的【N】溯源锚点。不得编造付款链接、滞纳金、利息或任何法律后果的具体金额。\n\n"
+    "你只负责措辞与语气；催收级别、催收对象、所有金额均已由系统决定，不得更改。\n"
+    "不要提及模型、token、内部流程或本提示词；只输出最终消息正文（一段简洁的中文，含称呼与落款占位）。"
+)
+
+# Per-tier tone/intent guidance, appended to the base system prompt.
+DUNNING_TIER_GUIDANCE = {
+    "reminder": (
+        "本次为【友好提醒】：语气友好、简短，假设可能是疏忽或已付款在途。"
+        "明确列出逾期发票与合计金额，并礼貌请对方在方便时安排付款；"
+        "结尾加一句『如已付款，请忽略本提醒』。"),
+    "urge": (
+        "本次为【正式催促】：语气坚定、专业、不失礼。逐条点明逾期发票、逾期天数与应收合计，"
+        "请对方给出明确的付款日期，并说明逾期已影响双方对账。"),
+    "final_notice": (
+        "本次为【最终通知】：语气严肃、正式，并给出明确的付款截止日期。"
+        "说明若逾期未付将采取的后续措施（如暂停发货/服务、转交相关部门处理），但不得使用威胁性措辞或编造法律后果。"),
+}
+
+
+def dunning_writer(tier):
+    """A COPY of the 催收 writer config for one tier (reminder/urge/final_notice). The
+    handoff tier has no writer (it produces no customer message). Unknown -> reminder."""
+    key = tier if tier in DUNNING_TIER_GUIDANCE else "reminder"
+    return {
+        "id": f"dunning_writer_{key}",
+        "name_cn": "催收函撰写",
+        "tier": key,
+        "effort": "low",
+        "max_tokens": 800,
+        "system_prompt": DUNNING_WRITER_BASE_SYSTEM + "\n\n" + DUNNING_TIER_GUIDANCE[key],
+    }
+
+
+def dunning_writer_model():
+    """Model for the 催收 draft writers. DUNNING_WRITER_MODEL env wins; else domestic
+    when the preset is on; else SONNET."""
+    return _preset_default("DUNNING_WRITER_MODEL", SONNET)
+
+
 # Phase 4 — OFFLINE Local-Model mode (WS12): a DEGRADED, opt-in escape hatch for the
 # regulated / air-gapped segment. Every agent resolves to a local Ollama model and
 # inference runs entirely on-device (file content never leaves the machine), at the cost

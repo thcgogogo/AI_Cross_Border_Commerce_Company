@@ -46,7 +46,9 @@ from admin import queries as admin_queries
 from agent_team import (
     alerts,
     analytics,
+    ar_templates,
     config,
+    crossborder_orchestrator,
     crypto,
     db,
     deliverables,
@@ -64,6 +66,7 @@ from agent_team import (
     settlement_templates,
     sms,
     trends,
+    workflow_chassis,
 )
 from agent_team.customers import CustomerStore
 from agent_team.devices import DeviceTokenStore
@@ -84,6 +87,10 @@ from agent_team.models import (
     EVENT_REPORT_DIM,
     DELIVERY_FAILED,
     DELIVERY_SENT,
+    DUNNING_STATE_APPROVED,
+    DUNNING_STATE_DISMISSED,
+    DUNNING_STATE_SENT,
+    DUNNING_TIER_HANDOFF,
     FAPIAO_ISSUED,
     FAPIAO_REJECTED,
     FAPIAO_REQUESTED,
@@ -100,6 +107,8 @@ from agent_team.models import (
     RUN_FAILED,
     RUN_KIND_DEVICE,
     RUN_KIND_IMPORT,
+    RUN_KIND_AR,
+    RUN_KIND_CROSSBORDER,
     RUN_KIND_RECON,
     RUN_KIND_REPORT,
     RUN_STOPPED_BUDGET,
@@ -109,6 +118,7 @@ from agent_team.models import (
     VOTE_DOWN,
     VOTE_VALUES,
 )
+from agent_team.ar_orchestrator import AROrchestrator
 from agent_team.orchestrator import Orchestrator
 from agent_team.providers import ModelRouter
 from agent_team.settlement_orchestrator import SettlementOrchestrator
@@ -352,9 +362,12 @@ def _request_start():
 _LOCAL_MODE_BLOCKED_PREFIXES = (
     "/api/pay", "/pay/", "/api/orders", "/api/plans",
     "/api/subscription", "/api/fapiao", "/api/scheduled-jobs",
-    # 对账 is cloud-only for the MVP (it ingests sensitive financial files through
-    # the cloud run path); revisit when the local-agents path takes it on.
+    # 对账 + 应收账款 are cloud-only for the MVP (they ingest sensitive financial files
+    # through the cloud run path); revisit when the local-agents path takes them on.
     "/api/recon",
+    "/api/ar",
+    "/api/crossborder",
+    "/api/cross-border",   # the hyphenated 贸易方式 settings route — same cloud-only surface
 )
 _LOCAL_MUTATING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
@@ -747,15 +760,25 @@ FOUNDER_SPA_PAGES = ("team", "costs", "models", "fusion", "api", "analytics")
 @app.route("/reports/<int:run_id>")
 @app.route("/recon")
 @app.route("/recon/<int:run_id>")
+@app.route("/ar")
+@app.route("/ar/<int:run_id>")
+@app.route("/cross-border")
+@app.route("/cross-border/<tab>")
+@app.route("/cross-border/<tab>/<int:run_id>")
 @app.route("/schedule")
 @app.route("/brain")
 @app.route("/account")
 @app.route("/founder/<founder_page>")
-def spa_page(run_id=None, founder_page=None):
+def spa_page(run_id=None, founder_page=None, tab=None):
     """Serve the SPA shell for the redesigned customer pages (and the founder
     machinery views — only the SHELL is UI-gated: the machinery DATA endpoints
     below are founder-gated server-side, and the sensitive /admin* pages keep
-    their own server-side checks)."""
+    their own server-side checks).
+
+    /cross-border[/<tab>[/<run_id>]] is the 跨境财务 hub; the legacy /recon + /ar are
+    kept here so a hard load / refresh / shared deep link still serves the shell (the
+    client router then rewrites them into the hub). `tab` is not validated — the SPA
+    decides which sub-tab to render — mirroring how /recon/<run_id> is shell-only."""
     if founder_page is not None and founder_page not in FOUNDER_SPA_PAGES:
         return jsonify({"error": "not found"}), 404
     if not _current_customer():
@@ -1422,6 +1445,37 @@ def _run_recon(memory, files_by_role, platform_key=None, period_label=None,
             memory.set_error(f"{type(e).__name__}: {e}")
 
 
+def _run_ar(memory, files_by_role, format_key=None, period_label=None,
+            customer_id=None, company_id=None, run_id=None, account_id=None):
+    """Background target for an 应收账款 run — the AR sibling of _run_recon. Bills
+    through the SAME per-account path (run_kind=RUN_KIND_AR folds into the report
+    quota/credits). Produces the aging report (auto-deliverable) + 催收 drafts that are
+    NEVER auto-sent (human approve-then-send only)."""
+    try:
+        AROrchestrator(
+            memory, files_by_role, format_key=format_key, period_label=period_label,
+            token_manager=TOKENS,
+            cost_listener=_make_biller(customer_id, run_kind=RUN_KIND_AR),
+            company_id=company_id, run_id=run_id, account_id=account_id).run()
+    except Exception as e:
+        if memory.snapshot().get("status") != "error":
+            memory.set_error(f"{type(e).__name__}: {e}")
+
+
+def _run_crossborder(memory, kind, files_by_role, period_label=None,
+                     company_id=None, run_id=None, account_id=None):
+    """Background target for a 跨境财务 evidence-engine run (三流合一 / 退税 / 发票审核 /
+    无票免税). These engines have NO LLM (every number is deterministic), so there is no
+    cost_listener — the run folds into the report quota via RUN_KIND_CROSSBORDER at 0 cost."""
+    try:
+        crossborder_orchestrator.CrossBorderRunner(
+            memory, kind, files_by_role, period_label=period_label,
+            company_id=company_id, run_id=run_id, account_id=account_id).run()
+    except Exception as e:
+        if memory.snapshot().get("status") != "error":
+            memory.set_error(f"{type(e).__name__}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Scheduled runs ("定时任务") — the product shows up on its own cadence.
 # A fire reuses the EXACT interactive billing/run path: the same plan gate
@@ -1530,6 +1584,54 @@ def _execute_scheduled_job(job, llm=None):
     if not plan_ok:
         status = ("skipped_no_balance" if gate_code == "no_balance"
                   else "skipped_plan_limit")
+        metrics_store.mark_job_run(job_id, status)
+        result["status"] = status
+        return result
+
+    # 跨境财务 auto-delivery: a job targeting an evidence engine (threeflow/rebate/invoice/
+    # vatexempt) runs THAT engine on its role-keyed source files and delivers the read-only
+    # report on the same rails. (AR 催收 is NOT a cross-border kind and never auto-sends.)
+    engine_kind = (job.get("engine_kind") or "").strip()
+    if crossborder_orchestrator.is_kind(engine_kind):
+        files_by_role = {}
+        for item in (job.get("fixed_file_paths") or []):
+            if isinstance(item, dict) and item.get("role") and item.get("path"):
+                files_by_role[item["role"]] = (item["path"], os.path.basename(item["path"]))
+        headless_job_id = "sched-%s-%s" % (job_id, uuid.uuid4().hex[:8])
+        memory = SharedMemory(headless_job_id, store_dir=MEMORY_DIR, goal=goal,
+                              output_dir=os.path.join(OUTPUT_DIR, headless_job_id))
+        try:
+            run_id = metrics_store.create_run(company_id, goal, kind=RUN_KIND_CROSSBORDER)
+        except Exception:
+            run_id = None
+        result["run_id"] = run_id
+        try:
+            crossborder_orchestrator.CrossBorderRunner(
+                memory, engine_kind, files_by_role, period_label=None,
+                company_id=company_id, run_id=run_id, account_id=customer["id"]).run()
+        except Exception as e:
+            if memory.snapshot().get("status") != "error":
+                memory.set_error("%s: %s" % (type(e).__name__, e))
+        result["ran"] = True
+        status = RUN_SUCCEEDED
+        if run_id:
+            try:
+                status = (metrics_store.get_run(run_id) or {}).get("status") or RUN_SUCCEEDED
+            except Exception:
+                status = RUN_FAILED
+        try:
+            report_md = memory.snapshot().get("final_report") or ""
+            pdf_path = (metrics_store.report_pdf_path(company_id, run_id)
+                        if (company_id and run_id) else None)
+            if pdf_path and not os.path.isfile(pdf_path):
+                pdf_path = None
+            delivery.deliver_report(
+                company_id=company_id, run_id=run_id, channels=channels,
+                pdf_path=pdf_path, report_markdown=report_md,
+                company_name=company_name, recipient_email=recipient_email,
+                job_id=job_id)
+        except Exception:
+            pass
         metrics_store.mark_job_run(job_id, status)
         result["status"] = status
         return result
@@ -2870,6 +2972,31 @@ def brain_profile():
     return jsonify({"profile": saved, "ok": True})
 
 
+@app.route("/api/cross-border/settings", methods=["GET", "POST"])
+def cross_border_settings():
+    """The 跨境财务 hub's durable seller identity — the selected 贸易方式 (trade mode)
+    + platforms + 收款工具 — which gates the mode-specific sub-tabs. Customer-safe and
+    stored in profile_json["cross_border"] (no machinery, no schema change). Mirrors
+    brain_profile: login-gated, ownership via _brain_company, round-trips unknown keys."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"error": "跨境财务设置暂不可用。"}), 503
+    if request.method == "GET":
+        return jsonify({"settings": metrics_store.get_cross_border_settings(company_id)})
+    data = request.get_json(silent=True) or {}
+    plats = data.get("platforms")
+    tools = data.get("payment_tools")
+    saved = metrics_store.save_cross_border_settings(
+        company_id,
+        mode=data.get("mode"),
+        platforms=plats if isinstance(plats, list) else None,
+        payment_tools=tools if isinstance(tools, list) else None,
+    )
+    return jsonify({"settings": saved, "ok": True})
+
+
 @app.route("/api/company-brain/glossary", methods=["GET", "POST"])
 def brain_glossary():
     """c. 术语表 — list (GET) or add/update one term (POST)."""
@@ -3158,6 +3285,28 @@ def _scheduling_plan_gate(customer):
     }), 402)
 
 
+def _cleanup_sched_pinned_files(job):
+    """GC the per-schedule pinned-file dir we created for a 跨境财务 定时任务 (under
+    UPLOAD_DIR/cbsched/<uuid>/). ONLY removes dirs WE created for that job — it never
+    touches user-pinned report files (those live elsewhere). Best-effort + path-guarded."""
+    import shutil
+    base = os.path.abspath(os.path.join(UPLOAD_DIR, "cbsched"))
+    dirs = set()
+    for item in (job.get("fixed_file_paths") or []):
+        path = item.get("path") if isinstance(item, dict) else None
+        if not path:
+            continue
+        ap = os.path.abspath(path)
+        if ap.startswith(base + os.sep):
+            dirs.add(os.path.dirname(ap))
+    for d in dirs:
+        if os.path.abspath(d).startswith(base + os.sep) and os.path.isdir(d):
+            try:
+                shutil.rmtree(d)
+            except OSError:
+                pass
+
+
 @app.route("/api/scheduled-jobs", methods=["GET", "POST"])
 def scheduled_jobs():
     """List (GET) or create (POST) the logged-in account's 定时任务. Creation is
@@ -3185,6 +3334,11 @@ def scheduled_jobs():
     # budget_cny is the internal per-run cost cap — machinery. It has been
     # read-redacted for customers since Phase 6 (E2); the WRITE is founder-only
     # too, or any logged-in account could set its own cap (Phase 7 A5).
+    # engine_kind targets a 跨境财务 evidence engine (else "" = the report team). Only
+    # the report-style kinds auto-deliver; an unknown kind is dropped to the default.
+    engine_kind = (data.get("engine_kind") or "").strip()
+    if engine_kind and not crossborder_orchestrator.is_kind(engine_kind):
+        engine_kind = ""
     job_id = metrics_store.create_scheduled_job(
         company_id, name_cn, cron_expr,
         goal_template=(data.get("goal_template") or "").strip(),
@@ -3194,6 +3348,7 @@ def scheduled_jobs():
         delivery_channels=_clean_channels(data.get("delivery_channels")),
         budget_cny=(data.get("budget_cny") if _is_admin(customer) else None),
         active=bool(data.get("active", True)),
+        engine_kind=engine_kind,
     )
     SCHEDULER.reload()
     return jsonify({"jobs": _jobs_payload(company_id, customer),
@@ -3211,7 +3366,10 @@ def scheduled_jobs_update():
     fields = {k: data[k] for k in (
         "name_cn", "cron_expr", "industry_override", "goal_template",
         "source_mode", "fixed_file_paths", "delivery_channels",
-        "budget_cny", "active") if k in data}
+        "budget_cny", "active", "engine_kind") if k in data}
+    if "engine_kind" in fields:
+        ek = (fields["engine_kind"] or "").strip()
+        fields["engine_kind"] = ek if crossborder_orchestrator.is_kind(ek) else None
     # budget_cny stays founder-only on write, same as the create route (A5).
     if not _is_admin(customer):
         fields.pop("budget_cny", None)
@@ -3240,10 +3398,15 @@ def scheduled_jobs_delete():
     if not company_id:
         return jsonify({"error": "公司大脑暂不可用。"}), 503
     data = request.get_json(silent=True) or {}
-    ok = metrics_store.delete_scheduled_job(company_id, data.get("id"))
+    job_id = data.get("id")
+    job = metrics_store.get_scheduled_job(job_id)     # read paths BEFORE the row is gone
+    ok = metrics_store.delete_scheduled_job(company_id, job_id)
     SCHEDULER.reload()
     if not ok:
         return jsonify({"error": "任务不存在或无权删除。"}), 404
+    # GC the cross-border 定时任务's pinned files — only after an ownership-checked delete.
+    if job and job.get("company_id") == company_id:
+        _cleanup_sched_pinned_files(job)
     return jsonify({"jobs": _jobs_payload(company_id, customer), "ok": True})
 
 
@@ -3594,21 +3757,15 @@ def recon_run():
     for role, field, required in _RECON_ROLE_FIELDS:
         f = request.files.get(field)
         if f and f.filename:
-            role_files.append((role, f))
+            role_files.append((role, _RECON_ROLE_CN[role], f))
         elif required:
             return jsonify({"error": f"请上传{_RECON_ROLE_CN[role]}文件。"}), 400
 
     # Validate BEFORE creating the job (exe magic-byte sniff + per-file size cap).
-    max_mb = config.MAX_UPLOAD_BYTES_PER_FILE // (1024 * 1024)
-    for role, f in role_files:
-        head = f.stream.read(16)
-        f.stream.seek(0, os.SEEK_END)
-        size = f.stream.tell()
-        f.stream.seek(0)
-        if security.looks_executable(head):
-            return jsonify({"error": f"文件 “{f.filename}” 看起来是可执行程序，已拒绝上传。"}), 400
-        if size > config.MAX_UPLOAD_BYTES_PER_FILE:
-            return jsonify({"error": f"文件 “{f.filename}” 超过单个文件 {max_mb} MB 的上限。"}), 400
+    try:
+        workflow_chassis.screen_uploads(role_files, config.MAX_UPLOAD_BYTES_PER_FILE)
+    except workflow_chassis.UploadError as e:
+        return jsonify({"error": e.message}), e.status
 
     job_id = uuid.uuid4().hex[:12]
     goal = (f"对账：{platform_key or '平台结算'} {period_label}").strip()
@@ -3616,16 +3773,9 @@ def recon_run():
                           output_dir=os.path.join(OUTPUT_DIR, job_id))
     JOBS[job_id] = memory
 
-    job_upload_dir = os.path.join(UPLOAD_DIR, job_id)
-    os.makedirs(job_upload_dir, exist_ok=True)
-    files_by_role = {}
-    for role, f in role_files:
-        safe_name = _inbox_safe_filename(f.filename)
-        path = os.path.join(job_upload_dir, safe_name)
-        f.save(path)
-        crypto.encrypt_file_in_place(path)   # at-rest; the engine decrypts in memory
-        files_by_role[role] = (path, f.filename)
-        memory.log("system", f"已接收{_RECON_ROLE_CN[role]}：{f.filename}", type="info")
+    files_by_role = workflow_chassis.save_role_uploads(
+        role_files, os.path.join(UPLOAD_DIR, job_id), _inbox_safe_filename,
+        memory=memory, role_labels=_RECON_ROLE_CN)
 
     company_id = run_id = None
     try:
@@ -3774,6 +3924,555 @@ def recon_ledger(run_id):
     return send_file(
         io.BytesIO(blob), as_attachment=True, download_name="对账明细-%s.xlsx" % run_id,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# ===========================================================================
+# 应收账款管理 + 催收 (AR aging + dunning) — a NEW, additive route group that
+# PARALLELS /api/recon/* (对账 is untouched). Same auth/breaker/plan-gate/upload
+# screening + customer-safe payloads. The aging report can auto-deliver; 催收 messages
+# NEVER auto-send — only the human-gated /api/ar/dunning/<id>/send route reaches 'sent'.
+# ===========================================================================
+_AR_ROLE_FIELDS = (("invoices", "invoices_file", True),
+                   ("payments", "payments_file", True),
+                   ("customers", "customers_file", False))
+_AR_ROLE_CN = {"invoices": "应收发票台账", "payments": "回款记录", "customers": "客户主数据"}
+
+
+@app.route("/api/ar/packs")
+def ar_packs():
+    """The AR format dropdown (customer-safe: key + Chinese label only)."""
+    if not _current_customer():
+        return jsonify({"error": "请先登录。"}), 401
+    return jsonify({"formats": ar_templates.available_formats()})
+
+
+@app.route("/api/ar/run", methods=["POST"])
+@limiter.limit(config.run_rate_limit, key_func=_run_rate_key)
+def ar_run():
+    """Start an 应收账款 run on uploaded invoice/payment/customer files. Clones
+    /api/recon/run's auth + breaker + plan gate + upload screening, then dispatches
+    _run_ar."""
+    load_dotenv(override=True)
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再核算应收。"}), 401
+    allowed, reason = platform_guard.check(customer["id"], customer.get("daily_cap_yuan"))
+    if not allowed:
+        return jsonify({"error": reason}), 503
+    plan_ok, plan_msg, _code = _plan_gate(customer)
+    if not plan_ok:
+        return jsonify({"error": plan_msg}), 402
+
+    format_key = (request.form.get("format_key") or "").strip()
+    period_label = (request.form.get("period") or "").strip()
+
+    role_files = []
+    for role, field, required in _AR_ROLE_FIELDS:
+        f = request.files.get(field)
+        if f and f.filename:
+            role_files.append((role, _AR_ROLE_CN[role], f))
+        elif required:
+            return jsonify({"error": f"请上传{_AR_ROLE_CN[role]}文件。"}), 400
+
+    try:
+        workflow_chassis.screen_uploads(role_files, config.MAX_UPLOAD_BYTES_PER_FILE)
+    except workflow_chassis.UploadError as e:
+        return jsonify({"error": e.message}), e.status
+
+    job_id = uuid.uuid4().hex[:12]
+    goal = (f"应收账款核算 {period_label}").strip()
+    memory = SharedMemory(job_id, store_dir=MEMORY_DIR, goal=goal,
+                          output_dir=os.path.join(OUTPUT_DIR, job_id))
+    JOBS[job_id] = memory
+
+    files_by_role = workflow_chassis.save_role_uploads(
+        role_files, os.path.join(UPLOAD_DIR, job_id), _inbox_safe_filename,
+        memory=memory, role_labels=_AR_ROLE_CN)
+
+    company_id = run_id = None
+    try:
+        company_id = metrics_store.get_or_create_company(
+            customer.get("email"),
+            company_name=customer.get("company") or customer.get("name"))
+        run_id = metrics_store.create_run(company_id, goal, kind=RUN_KIND_AR)
+    except Exception as e:
+        memory.log("system", f"企业大脑暂不可用（{e}）；继续运行。", type="info")
+
+    memory.set_company_id(company_id)
+    memory.set_run_id(run_id)
+
+    thread = threading.Thread(
+        target=_run_ar,
+        kwargs=dict(memory=memory, files_by_role=files_by_role, format_key=format_key,
+                    period_label=period_label, customer_id=customer["id"],
+                    company_id=company_id, run_id=run_id, account_id=customer["id"]),
+        daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id, "run_id": run_id})
+
+
+@app.route("/api/ar/result/<int:run_id>")
+def ar_result(run_id):
+    """One 应收账款 run as a CUSTOMER-SAFE document. NEVER returns ¥ COGS, model names,
+    or raw activity."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    run = metrics_store.get_run(run_id)
+    if not run:
+        return jsonify({"error": "应收记录不存在。"}), 404
+    if not company_id or run.get("company_id") != company_id:
+        return jsonify({"error": "无权访问该应收核算。"}), 403
+
+    has_pdf = os.path.isfile(metrics_store.report_pdf_path(company_id, run_id))
+    report = metrics_store.get_ar_report(company_id, run_id) or {}
+    out = {
+        "id": run_id,
+        "status": run.get("status"),
+        "started_at": run.get("started_at"),
+        "finished_at": run.get("finished_at"),
+        "format_key": report.get("format_key", ""),
+        "period_label": report.get("period_label", ""),
+        "summary": report.get("summary", {}),
+        "buckets": report.get("buckets", {}),
+        "customers": report.get("customers", []),
+        "attributions": report.get("attributions", []),
+        "bridge": report.get("bridge", {}),
+        "bridge_ok": report.get("bridge_ok", True),
+        "suspect_count": report.get("suspect_count", 0),
+        "has_pdf": has_pdf,
+        "download_url": ("/api/reports/%s/download" % run_id) if has_pdf else None,
+        "ledger_url": ("/api/ar/ledger/%s" % run_id) if report else None,
+    }
+    job_id = (run.get("report_path") or "").strip()
+    if job_id and re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+        memory = _load_job_memory(job_id)
+        if memory is not None:
+            snap = memory.snapshot()
+            out["final_report"] = snap.get("final_report") or ""
+            out["sources"] = snap.get("sources") or []
+            out["sources_status"] = snap.get("sources_status")
+    return jsonify(out)
+
+
+@app.route("/api/ar/reports")
+def ar_reports_list():
+    """This account's 应收账款 history (newest first)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"reports": []})
+    return jsonify({"reports": metrics_store.list_ar_reports(company_id)})
+
+
+@app.route("/api/ar/flags")
+def ar_flags():
+    """The AR 逾期/异常 worklist (optionally one run / status / grade)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"flags": []})
+    run_id = request.args.get("run_id", type=int)
+    status_filter = (request.args.get("status") or "").strip() or None
+    grade_filter = (request.args.get("grade") or "").strip() or None
+    return jsonify({"flags": metrics_store.list_ar_flags(
+        company_id, run_id=run_id, status=status_filter, grade=grade_filter)})
+
+
+@app.route("/api/ar/flags/<int:flag_id>/classify", methods=["POST"])
+def ar_flag_classify(flag_id):
+    """One-tap classify a worklist flag (已确认 / 已收款 / 争议 / 挂账). Ownership is
+    enforced in the store; a cross-account id gets 404. Writes a learned rule so the
+    NEXT run auto-classifies the same line."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"error": "功能暂不可用。"}), 503
+    label = ((request.get_json(silent=True) or {}).get("label") or "").strip()
+    if not label:
+        return jsonify({"error": "请选择分类。"}), 400
+    updated = metrics_store.classify_ar_flag(company_id, flag_id, label)
+    if not updated:
+        return jsonify({"error": "无权操作该条目，或条目不存在。"}), 404
+    return jsonify({"ok": True, "flag": updated})
+
+
+@app.route("/api/ar/ledger/<int:run_id>")
+def ar_ledger(run_id):
+    """Serve the audit-ready 应收账款 Excel ledger — login required, ownership-checked.
+    Built deterministically from the engine result + the live flag worklist status."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    run = metrics_store.get_run(run_id)
+    if not run:
+        return jsonify({"error": "应收记录不存在。"}), 404
+    if not company_id or run.get("company_id") != company_id:
+        return jsonify({"error": "无权访问该应收核算。"}), 403
+    result = metrics_store.get_ar_result(company_id, run_id)
+    if not result:
+        return jsonify({"error": "应收结果尚未生成。"}), 404
+    result["exceptions"] = metrics_store.list_ar_flags(company_id, run_id)
+    metrics_store.write_audit(customer["id"], AUDIT_DOWNLOAD, _client_ip(),
+                              detail="ar ledger run %s" % run_id)
+    import tempfile
+    tmp = os.path.join(tempfile.gettempdir(),
+                       f"yingshou-{run_id}-{uuid.uuid4().hex[:8]}.xlsx")
+    deliverables.build_ar_aging_ledger(result, tmp)
+    try:
+        with open(tmp, "rb") as fh:
+            blob = fh.read()
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return send_file(
+        io.BytesIO(blob), as_attachment=True, download_name="应收账款明细-%s.xlsx" % run_id,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.route("/api/ar/dunning")
+def ar_dunning_list():
+    """The 催收 draft worklist (optionally one run / one state). Each item carries the
+    editable draft, the tier, the grade, and the reviewer-only audit warning."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"messages": []})
+    run_id = request.args.get("run_id", type=int)
+    state = (request.args.get("state") or "").strip() or None
+    return jsonify({"messages": metrics_store.list_dunning_messages(
+        company_id, run_id=run_id, state=state)})
+
+
+@app.route("/api/ar/dunning/<int:msg_id>/edit", methods=["POST"])
+def ar_dunning_edit(msg_id):
+    """Human edits a 催收 draft's wording (-> EDITED). Never sends."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"error": "功能暂不可用。"}), 503
+    body = ((request.get_json(silent=True) or {}).get("body") or "").strip()
+    updated = metrics_store.save_dunning_edit(company_id, msg_id, body)
+    if not updated:
+        return jsonify({"error": "无权操作或草稿不存在/已发送。"}), 404
+    return jsonify({"ok": True, "message": updated})
+
+
+@app.route("/api/ar/dunning/<int:msg_id>/approve", methods=["POST"])
+def ar_dunning_approve(msg_id):
+    """Human approves a 催收 draft (-> APPROVED). Still does NOT send."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"error": "功能暂不可用。"}), 503
+    updated = metrics_store.set_dunning_state(company_id, msg_id, DUNNING_STATE_APPROVED)
+    if not updated:
+        return jsonify({"error": "无权操作或草稿不存在。"}), 404
+    return jsonify({"ok": True, "message": updated})
+
+
+@app.route("/api/ar/dunning/<int:msg_id>/dismiss", methods=["POST"])
+def ar_dunning_dismiss(msg_id):
+    """Human dismisses a 催收 draft (-> DISMISSED). It will not be sent."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"error": "功能暂不可用。"}), 503
+    updated = metrics_store.set_dunning_state(company_id, msg_id, DUNNING_STATE_DISMISSED)
+    if not updated:
+        return jsonify({"error": "无权操作或草稿不存在。"}), 404
+    return jsonify({"ok": True, "message": updated})
+
+
+@app.route("/api/ar/dunning/<int:msg_id>/send", methods=["POST"])
+def ar_dunning_send(msg_id):
+    """THE BLOCKING human approve-then-send action — the ONLY path that marks a 催收
+    message 'sent'. The orchestrator + scheduler NEVER reach this. Sends the (edited or
+    drafted) body over email (to a confirmed recipient) or the 企业微信 group relay,
+    logs a deliveries row, then stamps sent_at (the cadence anchor for no-double-dun)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"error": "功能暂不可用。"}), 503
+    msg = metrics_store.get_dunning_message(company_id, msg_id)
+    if not msg:
+        return jsonify({"error": "无权操作该草稿，或草稿不存在。"}), 404
+    if msg.get("tier") == DUNNING_TIER_HANDOFF or not (msg.get("body") or "").strip():
+        return jsonify({"error": "该条目为转人工/法务，无可发送的催收消息。"}), 400
+    if msg.get("state") == "sent":
+        return jsonify({"error": "该催收消息已发送，请勿重复发送。"}), 409
+
+    data = request.get_json(silent=True) or {}
+    channel = (data.get("channel") or "email").strip()
+    body = msg.get("body") or ""
+    if channel == "email":
+        to = (data.get("to") or "").strip()
+        if not to:
+            return jsonify({"error": "请填写收件人邮箱。"}), 400
+        subject = "应收账款付款提醒"
+        ok, err = delivery.send_email(to, subject, body)
+    elif channel == "wechat":
+        webhook = metrics_store.get_branding(company_id).get("wechat_webhook")
+        ok, err = delivery.send_wechat_webhook(webhook, body)
+    else:
+        return jsonify({"error": "不支持的发送渠道。"}), 400
+
+    did = metrics_store.record_delivery(
+        channel, DELIVERY_SENT if ok else DELIVERY_FAILED,
+        run_id=msg.get("run_id"), error=(None if ok else err))
+    if not ok:
+        return jsonify({"ok": False, "error": err or "发送失败"}), 502
+    updated = metrics_store.set_dunning_state(
+        company_id, msg_id, DUNNING_STATE_SENT, channel=channel, delivery_id=did)
+    return jsonify({"ok": True, "message": updated})
+
+
+# ---------------------------------------------------------------------------
+# 跨境财务 engines (三流合一 / 退税 / 发票审核 / 无票免税) — ONE shared, kind-parameterized
+# surface. Mirrors /api/ar/* (auth + breaker + plan gate + upload screening +
+# customer-safe payloads); the engines have NO LLM, so every number is the engine's.
+# ---------------------------------------------------------------------------
+def _cb_kind_or_404(kind):
+    if not crossborder_orchestrator.is_kind(kind):
+        return None
+    return kind
+
+
+@app.route("/api/crossborder/<kind>/config")
+def crossborder_config(kind):
+    """Customer-safe form/render config for a sub-tab (upload roles + summary cards)."""
+    if not _current_customer():
+        return jsonify({"error": "请先登录。"}), 401
+    if not _cb_kind_or_404(kind):
+        return jsonify({"error": "未知的核验类型。"}), 404
+    return jsonify(crossborder_orchestrator.public_config(kind))
+
+
+@app.route("/api/crossborder/<kind>/run", methods=["POST"])
+@limiter.limit(config.run_rate_limit, key_func=_run_rate_key)
+def crossborder_run(kind):
+    """Start a 跨境财务 engine run on the uploaded documents. Clones /api/ar/run's
+    auth + breaker + plan gate + upload screening, then dispatches _run_crossborder."""
+    load_dotenv(override=True)
+    if not _cb_kind_or_404(kind):
+        return jsonify({"error": "未知的核验类型。"}), 404
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再使用核验。"}), 401
+    allowed, reason = platform_guard.check(customer["id"], customer.get("daily_cap_yuan"))
+    if not allowed:
+        return jsonify({"error": reason}), 503
+    plan_ok, plan_msg, _code = _plan_gate(customer)
+    if not plan_ok:
+        return jsonify({"error": plan_msg}), 402
+
+    cfg = crossborder_orchestrator.REGISTRY[kind]
+    period_label = (request.form.get("period") or "").strip()
+
+    role_files = []
+    for role, field, required, cn in cfg["roles"]:
+        f = request.files.get(field)
+        if f and f.filename:
+            role_files.append((role, cn, f))
+        elif required:
+            return jsonify({"error": f"请上传{cn}文件。"}), 400
+
+    try:
+        workflow_chassis.screen_uploads(role_files, config.MAX_UPLOAD_BYTES_PER_FILE)
+    except workflow_chassis.UploadError as e:
+        return jsonify({"error": e.message}), e.status
+
+    job_id = uuid.uuid4().hex[:12]
+    goal = (f"{cfg['label']} {period_label}").strip()
+    memory = SharedMemory(job_id, store_dir=MEMORY_DIR, goal=goal,
+                          output_dir=os.path.join(OUTPUT_DIR, job_id))
+    JOBS[job_id] = memory
+
+    # role_prefix so two same-named uploads can't collide (a 跨境财务 run takes several).
+    files_by_role = workflow_chassis.save_role_uploads(
+        role_files, os.path.join(UPLOAD_DIR, job_id), _inbox_safe_filename,
+        role_prefix=True, memory=memory)
+
+    company_id = run_id = None
+    try:
+        company_id = metrics_store.get_or_create_company(
+            customer.get("email"),
+            company_name=customer.get("company") or customer.get("name"))
+        run_id = metrics_store.create_run(company_id, goal, kind=RUN_KIND_CROSSBORDER)
+    except Exception as e:
+        memory.log("system", f"企业大脑暂不可用（{e}）；继续运行。", type="info")
+
+    memory.set_company_id(company_id)
+    memory.set_run_id(run_id)
+
+    thread = threading.Thread(
+        target=_run_crossborder,
+        kwargs=dict(memory=memory, kind=kind, files_by_role=files_by_role,
+                    period_label=period_label, company_id=company_id, run_id=run_id,
+                    account_id=customer["id"]),
+        daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id, "run_id": run_id})
+
+
+@app.route("/api/crossborder/<kind>/result/<int:run_id>")
+def crossborder_result(kind, run_id):
+    """One 跨境财务 run as a CUSTOMER-SAFE document (never ¥ COGS / models / raw activity)."""
+    if not _cb_kind_or_404(kind):
+        return jsonify({"error": "未知的核验类型。"}), 404
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    run = metrics_store.get_run(run_id)
+    if not run:
+        return jsonify({"error": "核验记录不存在。"}), 404
+    if not company_id or run.get("company_id") != company_id:
+        return jsonify({"error": "无权访问该核验。"}), 403
+
+    has_pdf = os.path.isfile(metrics_store.report_pdf_path(company_id, run_id))
+    report = metrics_store.get_crossborder_report(company_id, run_id) or {}
+    out = {
+        "id": run_id, "kind": kind, "status": run.get("status"),
+        "started_at": run.get("started_at"), "finished_at": run.get("finished_at"),
+        "label": crossborder_orchestrator.REGISTRY[kind]["label"],
+        "summary_cards": crossborder_orchestrator.public_config(kind)["summary_cards"],
+        "period_label": report.get("period_label", ""),
+        "summary": report.get("summary", {}),
+        "bridge": report.get("bridge", {}),
+        "bridge_ok": report.get("bridge_ok", True),
+        "exception_count": report.get("exception_count", 0),
+        "has_pdf": has_pdf,
+        "download_url": ("/api/reports/%s/download" % run_id) if has_pdf else None,
+    }
+    job_id = (run.get("report_path") or "").strip()
+    if job_id and re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+        memory = _load_job_memory(job_id)
+        if memory is not None:
+            snap = memory.snapshot()
+            out["final_report"] = snap.get("final_report") or ""
+            out["sources"] = snap.get("sources") or []
+            out["sources_status"] = snap.get("sources_status")
+    return jsonify(out)
+
+
+@app.route("/api/crossborder/<kind>/reports")
+def crossborder_reports_list(kind):
+    """This account's 跨境财务 history for one engine kind (newest first)."""
+    if not _cb_kind_or_404(kind):
+        return jsonify({"error": "未知的核验类型。"}), 404
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"reports": []})
+    return jsonify({"reports": metrics_store.list_crossborder_reports(company_id, kind)})
+
+
+@app.route("/api/crossborder/<kind>/flags")
+def crossborder_flags(kind):
+    """One 跨境财务 engine's 不一致/异常 worklist (optionally one run / status)."""
+    if not _cb_kind_or_404(kind):
+        return jsonify({"error": "未知的核验类型。"}), 404
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"flags": []})
+    run_id = request.args.get("run_id", type=int)
+    status_filter = (request.args.get("status") or "").strip() or None
+    return jsonify({"flags": metrics_store.list_crossborder_flags(
+        company_id, engine_kind=kind, run_id=run_id, status=status_filter)})
+
+
+@app.route("/api/crossborder/flags/<int:flag_id>/classify", methods=["POST"])
+def crossborder_flag_classify(flag_id):
+    """One-tap classify a 跨境财务 worklist flag (已核实 / 无需处理 / 待处理 / 转人工).
+    Ownership enforced in the store; a cross-account id gets 404."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"error": "功能暂不可用。"}), 503
+    label = ((request.get_json(silent=True) or {}).get("label") or "").strip()
+    if not label:
+        return jsonify({"error": "请选择分类。"}), 400
+    updated = metrics_store.classify_crossborder_flag(company_id, flag_id, label)
+    if not updated:
+        return jsonify({"error": "无权操作该条目，或条目不存在。"}), 404
+    return jsonify({"ok": True, "flag": updated})
+
+
+@app.route("/api/crossborder/<kind>/schedule", methods=["POST"])
+@limiter.limit(config.run_rate_limit, key_func=_run_rate_key)
+def crossborder_schedule(kind):
+    """Create a 定时任务 that auto-runs this 跨境财务 engine on the uploaded role files and
+    delivers the read-only report on cadence. 企业版-only (scheduled_delivery). The files are
+    persisted (encrypted) and pinned to the job (fixed_file_paths = [{role,path}])."""
+    load_dotenv(override=True)
+    if not _cb_kind_or_404(kind):
+        return jsonify({"error": "未知的核验类型。"}), 404
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"error": "公司大脑暂不可用。"}), 503
+    allowed, refusal = _scheduling_plan_gate(customer)   # 企业版-only
+    if not allowed:
+        return refusal
+
+    cfg = crossborder_orchestrator.REGISTRY[kind]
+    name_cn = (request.form.get("name") or cfg["label"]).strip() or cfg["label"]
+    cron_expr = (request.form.get("cron") or "").strip()
+    if not _valid_cron(cron_expr):
+        return jsonify({"error": "频率无效（cron 表达式无法解析）。"}), 400
+    channels = _clean_channels((request.form.get("channels") or "").split(","))
+    if not channels:
+        return jsonify({"error": "请至少选择一个送达渠道。"}), 400
+
+    role_files = []
+    for role, field, required, cn in cfg["roles"]:
+        f = request.files.get(field)
+        if f and f.filename:
+            role_files.append((role, cn, f))
+        elif required:
+            return jsonify({"error": f"请上传{cn}文件（定时任务需要固定的数据文件）。"}), 400
+
+    try:
+        workflow_chassis.screen_uploads(role_files, config.MAX_UPLOAD_BYTES_PER_FILE)
+    except workflow_chassis.UploadError as e:
+        return jsonify({"error": e.message}), e.status
+
+    # Persist the role files to a STABLE per-schedule dir (not an ephemeral run dir) so
+    # every fire re-reads the same pinned, encrypted files. role_prefix avoids collisions.
+    sched_dir = os.path.join(UPLOAD_DIR, "cbsched", uuid.uuid4().hex[:16])
+    files_by_role = workflow_chassis.save_role_uploads(
+        role_files, sched_dir, _inbox_safe_filename, role_prefix=True)
+    fixed = [{"role": role, "path": path} for role, (path, _n) in files_by_role.items()]
+
+    job_id = metrics_store.create_scheduled_job(
+        company_id, name_cn, cron_expr,
+        source_mode=SOURCE_FIXED_FILES, fixed_file_paths=fixed,
+        delivery_channels=channels, engine_kind=kind, active=True)
+    if not job_id:
+        import shutil
+        try:
+            shutil.rmtree(sched_dir)        # don't orphan the files we just wrote
+        except OSError:
+            pass
+        return jsonify({"error": "定时任务创建失败。"}), 400
+    SCHEDULER.reload()
+    return jsonify({"ok": True, "job_id": job_id,
+                    "jobs": _jobs_payload(company_id, customer)})
 
 
 # ---- Report feedback (Phase 6 feedback loop) ------------------------------

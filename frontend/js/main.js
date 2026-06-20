@@ -16,7 +16,7 @@ import * as fusion from "./views/fusion.js";
 import * as reportView from "./views/report_view.js";
 import * as workflow from "./views/workflow.js";
 import * as workflowHub from "./views/workflow_hub.js";
-import * as recon from "./views/recon.js";
+import * as crossBorder from "./views/cross_border.js";
 import * as fTeam from "./founder/team.js";
 import * as fCosts from "./founder/costs.js";
 import * as fModels from "./founder/models.js";
@@ -35,7 +35,7 @@ const $ = (id) => document.getElementById(id);
 // in-page tab pre-selected (see ROUTES + views/workflow.js), so deep links keep working.
 // Every sub-path the one workflow page owns — used to light the 工作流 nav as active.
 const AGENTS_PATHS = ["/workflow", "/agents", "/new", "/reports", "/schedule", "/brain",
-  "/account", "/recon"];
+  "/account", "/cross-border"];
 const FOUNDER_NAV = [
   { path: "/founder/team", label: "团队与模型" },
   { path: "/founder/costs", label: "成本控制台" },
@@ -57,8 +57,12 @@ const ROUTES = [
   { pattern: /^\/new$/, view: () => workflow, auth: true, params: () => ({ tab: "generate" }) },
   { pattern: /^\/reports$/, view: () => workflow, auth: true, params: () => ({ tab: "history" }) },
   { pattern: /^\/reports\/(\d+)$/, view: () => reportView, auth: true, params: (m) => ({ runId: m[1] }) },
-  { pattern: /^\/recon$/, view: () => recon, auth: true, params: () => ({}) },
-  { pattern: /^\/recon\/(\d+)$/, view: () => recon, auth: true, params: (m) => ({ runId: m[1] }) },
+  // 跨境财务 hub: ONE section, 贸易方式 selector + mode-gated sub-tabs. The legacy
+  // /recon + /ar deep links are rewritten into its sub-tabs in render() (below).
+  { pattern: /^\/cross-border$/, view: () => crossBorder, auth: true, params: () => ({ tab: "recon" }) },
+  { pattern: /^\/cross-border\/([a-z]+)$/, view: () => crossBorder, auth: true, params: (m) => ({ tab: m[1] }) },
+  { pattern: /^\/cross-border\/([a-z]+)\/(\d+)$/, view: () => crossBorder, auth: true,
+    params: (m) => ({ tab: m[1], runId: m[2] }) },
   { pattern: /^\/schedule$/, view: () => workflow, auth: true, params: () => ({ tab: "schedule" }) },
   { pattern: /^\/brain$/, view: () => workflow, auth: true, params: () => ({ tab: "brain" }) },
   { pattern: /^\/account$/, view: () => workflow, auth: true, params: () => ({ tab: "account" }) },
@@ -100,6 +104,13 @@ async function render() {
   if (path === "/company-brain") { // legacy deep link → the new 企业大脑 path
     history.replaceState({}, "", "/brain");
     path = "/brain";
+  }
+  // Legacy 对账/应收 deep links → the consolidated 跨境财务 sub-tabs (preserve old
+  // URLs; replaceState so the redirect doesn't pollute back-history).
+  const cb = path.match(/^\/(recon|ar)(\/\d+)?$/);
+  if (cb) {
+    path = `/cross-border/${cb[1]}${cb[2] || ""}`;
+    history.replaceState({}, "", path);
   }
   if (path === "/login") path = "/"; // the landing renders; boot opens the modal
 

@@ -1,0 +1,61 @@
+# 通用 — the neutral fallback AR pack (应收账款管理 / 催收草拟).
+#
+# Used when the format is unknown or set to "通用 / 标准应收台账". It carries common
+# Chinese column defaults for the three source files; a customer supplies any column
+# overrides via company-brain overrides (profile_json["ar"]). All thresholds here are
+# PROVISIONAL pending a real ledger + the owner's dunning policy.
+display_name_cn: "通用应收台账"
+
+# Fallback 账期 (days) used to derive a due date only when an invoice gives neither a
+# due date nor its own terms, and the customer master has no terms either.
+default_terms_days: 30
+
+# Overdue aging-bucket day cutoffs (ascending): 0-30 / 31-60 / 61-90 / 90+.
+aging_boundaries: [30, 60, 90]
+
+# The fen tolerance for the self-audit identities.
+amount_tolerance: 0.01
+
+# Note substrings that mark an invoice 疑似 (disputed) — human review before dunning.
+dispute_keywords: ["争议", "纠纷", "质量", "退货", "暂缓", "待确认", "对账", "投诉"]
+
+# Raw column header -> canonical field, per source role.
+column_map:
+  invoices:                # 应收 / 已开票台账
+    invoice_no: "发票号"
+    customer_id: "客户编号"
+    customer_name: "客户名称"
+    issue_date: "开票日期"
+    due_date: "到期日"
+    terms_days: "账期天数"
+    gross_amount: "金额"
+    currency: "币种"
+    note: "备注"
+  payments:                # 回款 / 已收记录
+    payment_no: "流水号"
+    customer_id: "客户编号"
+    pay_date: "收款日期"
+    amount: "收款金额"
+    invoice_ref: "对应发票号"
+  customers:               # 客户主数据
+    customer_id: "客户编号"
+    customer_name: "客户名称"
+    terms_days: "账期天数"
+    credit_limit: "信用额度"
+    contact: "联系方式"
+
+# 催收 escalation thresholds + cadence lock (read by dunning.py). PROVISIONAL —
+# confirm against the owner's real dunning policy before relying on these.
+dunning:
+  reminder_max_dpd: 15       # 提醒: 1–15 days overdue
+  urge_max_dpd: 45           # 催促: 16–45
+  final_max_dpd: 90          # 最终通知: 46–90; >90 -> 转人工/法务
+  amount_large: 10000        # large balances escalate sooner
+  amount_legal: 100000       # at/above this -> 转人工/法务 regardless of dpd
+  cadence_lock_days: 7       # do not re-dun the same account within N days
+  cadence_lock_days_by_tier:
+    final_notice: 10
+  length_caps:               # per-channel draft length cap (chars)
+    email: 400
+    wechat: 200
+    sms: 70

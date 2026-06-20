@@ -84,13 +84,17 @@ RUN_KIND_REPORT = "report"   # interactive / scheduled pipeline run — quota-me
 RUN_KIND_IMPORT = "import"   # 历史数据导入 back-fill — free, hidden from 历史报告
 RUN_KIND_DEVICE = "device_run"  # Phase 11 — a run executed by a paired desktop device
 RUN_KIND_RECON = "recon"     # 对账 / 平台结算核对 — a settlement-reconciliation run
-RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT, RUN_KIND_DEVICE, RUN_KIND_RECON)
+RUN_KIND_AR = "ar"           # 应收账款管理 + 催收 — an AR aging + dunning-draft run
+RUN_KIND_CROSSBORDER = "crossborder"  # 跨境财务 三流合一/退税/发票/无票免税 — one shared kind
+RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT, RUN_KIND_DEVICE, RUN_KIND_RECON,
+             RUN_KIND_AR, RUN_KIND_CROSSBORDER)
 
 # Run kinds that count against the shared report quota / can consume a 单次 credit.
-# 对账 folds into the existing report quota (owner decision 2026-06-16) so it sits
-# here next to the weekly report; import + device runs never count. `runs.kind` is a
-# plain String(32), so adding RUN_KIND_RECON needs NO enum migration.
-QUOTA_RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_RECON)
+# 对账 and 应收账款 both fold into the existing report quota (owner decisions
+# 2026-06-16 / 2026-06-19) so they sit here next to the weekly report; import + device
+# runs never count. `runs.kind` is a plain String(32), so adding new kinds needs NO
+# enum migration.
+QUOTA_RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_RECON, RUN_KIND_AR, RUN_KIND_CROSSBORDER)
 
 # Where a scheduled run gets its input files from.
 SOURCE_LATEST_UPLOAD = "latest_upload"   # the most recent files the account uploaded
@@ -349,6 +353,10 @@ class ScheduledJob(Base):
                                                            # silently means TUESDAY here)
     industry_override = Column(String(64), nullable=True)  # None/"" => use the profile
     goal_template = Column(Text)                           # e.g. "生成上周经营周报"
+    # None/"" => the report team (default). A 跨境财务 kind (threeflow/rebate/invoice/
+    # vatexempt) auto-delivers that engine's read-only report on cadence; for those the
+    # role→path map lives in fixed_file_paths as [{"role","path"}]. (AR 催收 never auto-sends.)
+    engine_kind = Column(String(32), nullable=True)
     source_mode = Column(Enum(*SOURCE_MODES, name="source_mode"),
                          default=SOURCE_LATEST_UPLOAD, nullable=False)
     fixed_file_paths = Column(Text, nullable=True)         # JSON list, only for fixed_files
@@ -867,3 +875,181 @@ class Event(Base):
     path = Column(String(255), nullable=True)
     ip_hash = Column(String(64), nullable=True)                 # salted sha256, never raw
     props = Column(Text, nullable=True)                         # JSON-as-Text; no PII
+
+
+# ===========================================================================
+# 应收账款管理 + 催收 (AR aging + dunning) — Phase-0 MVP (2026-06-19).
+# A NEW, additive workflow that PARALLELS 对账 (settlement_*); the two share no code
+# today (a later chassis extraction will dedupe what is genuinely identical). These
+# tables mirror SettlementReport / SettlementException conventions, plus a fresh
+# DunningMessage table (the no-double-dun sent-state, which 对账 has no analog for).
+# ===========================================================================
+
+# 异常分级 — AR grade (NEW; 对账 has no grader).
+AR_GRADE_CONFIRMED = "确定"   # clearly overdue, clean fully-applied data
+AR_GRADE_SUSPECTED = "疑似"   # disputed / partial / unapplied / pending-recon / over-limit
+AR_GRADES = (AR_GRADE_CONFIRMED, AR_GRADE_SUSPECTED)
+
+# AR exception-worklist lifecycle (mirrors SETTLE_EXC_*).
+AR_FLAG_OPEN = "open"
+AR_FLAG_CLASSIFIED = "classified"
+AR_FLAG_RESOLVED = "resolved"
+AR_FLAG_STATUSES = (AR_FLAG_OPEN, AR_FLAG_CLASSIFIED, AR_FLAG_RESOLVED)
+
+# 催收 escalation tiers. The first three produce a customer draft; handoff is an
+# internal 转人工/法务 row that NEVER becomes an auto-message.
+DUNNING_TIER_REMINDER = "reminder"      # 提醒
+DUNNING_TIER_URGE = "urge"              # 催促
+DUNNING_TIER_FINAL = "final_notice"     # 最终通知
+DUNNING_TIER_HANDOFF = "handoff"        # 转人工/法务
+DUNNING_TIERS = (DUNNING_TIER_REMINDER, DUNNING_TIER_URGE, DUNNING_TIER_FINAL,
+                 DUNNING_TIER_HANDOFF)
+
+# 催收 draft lifecycle. The ONLY edge into SENT is a human approve-then-send action.
+DUNNING_STATE_DRAFT = "draft"
+DUNNING_STATE_EDITED = "edited"
+DUNNING_STATE_APPROVED = "approved"
+DUNNING_STATE_SENT = "sent"
+DUNNING_STATE_DISMISSED = "dismissed"
+DUNNING_STATES = (DUNNING_STATE_DRAFT, DUNNING_STATE_EDITED, DUNNING_STATE_APPROVED,
+                  DUNNING_STATE_SENT, DUNNING_STATE_DISMISSED)
+
+
+class ARReport(Base):
+    """One 应收账款 run's result summary (customer-scoped). One row per (company, run),
+    upserted on re-runs. `summary_json` holds the full engine output blob (headline
+    figures, aging buckets, per-invoice/-customer detail, applications, bridge); the
+    headline figures are denormalized for the AR history list. `format_key` is the AR
+    pack key (e.g. "generic")."""
+    __tablename__ = "ar_reports"
+    __table_args__ = (UniqueConstraint("company_id", "run_id",
+                                       name="uq_ar_report_company_run"),)
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("runs.id"), nullable=False, index=True)
+    account_id = Column(String(32), nullable=True, index=True)   # loose ref accounts.id
+    format_key = Column(String(32), nullable=True)
+    period_label = Column(String(64), nullable=True)
+    summary_json = Column(Text, nullable=True)
+    bridge_ok = Column(Boolean, nullable=False, default=True, server_default="1")
+    total_outstanding = Column(Numeric(12, 2), nullable=False, default=0,
+                               server_default="0")
+    overdue_total = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
+    dso = Column(Numeric(10, 1), nullable=True)          # None when 数据不足
+    suspect_count = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ARFlag(Base):
+    """One row of the non-blocking AR 异常/逾期工作清单. Every overdue invoice lands here
+    (确定 = the collection list; 疑似 = verify first), plus customer-level 疑似 flags. The
+    customer's one-tap classify (这是争议 / 已确认 / 已收款) flips `status` + records
+    `user_label`; a generalized rule is written to the company brain so the NEXT run
+    auto-classifies the same line (mirrors SettlementException)."""
+    __tablename__ = "ar_flags"
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("runs.id"), nullable=False, index=True)
+    layer = Column(String(16), nullable=True)        # "AR"
+    bucket = Column(String(24), nullable=True)       # aging bucket or "客户"
+    grade = Column(String(8), nullable=True)         # 确定 | 疑似
+    cause = Column(String(48), nullable=True)        # 逾期应收 | a 疑似 reason | learned
+    suspect_reasons = Column(String(255), nullable=True)  # comma-joined reasons
+    amount = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
+    customer_ref = Column(String(128), nullable=True)
+    invoice_ref = Column(String(128), nullable=True)
+    status = Column(String(16), nullable=False, default=AR_FLAG_OPEN,
+                    server_default=AR_FLAG_OPEN)
+    user_label = Column(String(48), nullable=True)   # the one-tap classification
+    detail_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# 跨境财务 worklist lifecycle (mirrors SETTLE_EXC_* / AR_FLAG_*).
+CB_FLAG_OPEN = "open"
+CB_FLAG_CLASSIFIED = "classified"
+CB_FLAG_RESOLVED = "resolved"
+CB_FLAG_STATUSES = (CB_FLAG_OPEN, CB_FLAG_CLASSIFIED, CB_FLAG_RESOLVED)
+
+
+class CrossBorderReport(Base):
+    """One 跨境财务 engine run's result (三流合一 / 退税 / 发票审核 / 无票免税). ONE shared
+    table for the new evidence engines — `engine_kind` distinguishes them — keyed
+    (company, run), upserted on re-runs. `summary_json` holds the full deterministic
+    engine output; `exception_count` / `bridge_ok` are denormalized for the history
+    list. These engines compute every number; no LLM writes a figure."""
+    __tablename__ = "crossborder_reports"
+    __table_args__ = (UniqueConstraint("company_id", "run_id",
+                                       name="uq_crossborder_report_company_run"),)
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("runs.id"), nullable=False, index=True)
+    account_id = Column(String(32), nullable=True, index=True)   # loose ref accounts.id
+    engine_kind = Column(String(32), nullable=False, index=True)  # threeflow|rebate|invoice|vatexempt
+    period_label = Column(String(64), nullable=True)
+    summary_json = Column(Text, nullable=True)
+    bridge_ok = Column(Boolean, nullable=False, default=True, server_default="1")
+    exception_count = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CrossBorderFlag(Base):
+    """One row of a 跨境财务 engine's 不一致/异常 worklist (the engine `exceptions`). The
+    customer's one-tap classify flips `status` + records `user_label` (no learned-rule
+    loop yet — these engines are stateless re-checks). `engine_kind` scopes the worklist
+    to its sub-tab. Mirrors SettlementException / ARFlag conventions."""
+    __tablename__ = "crossborder_flags"
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("runs.id"), nullable=False, index=True)
+    engine_kind = Column(String(32), nullable=False, index=True)
+    ref = Column(String(128), nullable=True)         # the transaction/invoice reference
+    cause = Column(String(64), nullable=True)        # the inconsistency cause (中文)
+    severity = Column(String(8), nullable=True)      # 高 | 中 | 低
+    amount = Column(Numeric(14, 2), nullable=False, default=0, server_default="0")
+    detail = Column(Text, nullable=True)
+    status = Column(String(16), nullable=False, default=CB_FLAG_OPEN,
+                    server_default=CB_FLAG_OPEN)
+    user_label = Column(String(48), nullable=True)   # the one-tap classification
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class DunningMessage(Base):
+    """One 催收 draft (per customer/invoice/tier). The no-double-dun sent-state: `sent_at`
+    is the cadence anchor a re-run reads to decide NEW / ESCALATED / LOCKED. The ONLY
+    edge into state='sent' is a human approve-then-send action — the orchestrator and
+    scheduler never send. `facts_json` carries the engine-injected verbatim numbers;
+    `draft_body` is the LLM wording, `edited_body` the human edit. No 对账 analog."""
+    __tablename__ = "dunning_messages"
+    __table_args__ = (Index("ix_dunning_company_customer_tier_sent",
+                            "company_id", "customer_key", "tier", "sent_at"),)
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("runs.id"), nullable=True, index=True)
+    account_id = Column(String(32), nullable=True, index=True)
+    customer_key = Column(String(128), nullable=False, index=True)
+    invoice_key = Column(String(128), nullable=True)   # NULL = account-level (all overdue)
+    tier = Column(String(16), nullable=False)          # DUNNING_TIER_*
+    channel = Column(String(16), nullable=True)        # email | wechat (picked at send)
+    grade = Column(String(8), nullable=True)           # 确定 | 疑似 snapshot at draft time
+    state = Column(String(16), nullable=False, default=DUNNING_STATE_DRAFT,
+                   server_default=DUNNING_STATE_DRAFT)
+    days_overdue_at_draft = Column(Integer, nullable=False, default=0, server_default="0")
+    amount_at_draft = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
+    facts_json = Column(Text, nullable=True)
+    draft_body = Column(Text, nullable=True)
+    edited_body = Column(Text, nullable=True)
+    audit_warning = Column(Text, nullable=True)        # reviewer-only number-audit flag
+    drafted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    approved_at = Column(DateTime, nullable=True)
+    sent_at = Column(DateTime, nullable=True, index=True)   # the cadence-lock anchor
+    delivery_id = Column(Integer, nullable=True)       # loose ref deliveries.id
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)

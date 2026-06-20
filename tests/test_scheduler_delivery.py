@@ -393,3 +393,73 @@ def test_cross_account_report_download_is_forbidden(
     # An unauthenticated request is rejected outright (401).
     anon = app.app.test_client()
     assert anon.get("/api/reports/%s/download" % run_id).status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# (e) A 跨境财务 scheduled job auto-delivers its evidence-engine report (no LLM):
+#     the engine runs on role-keyed source files, persists a CrossBorderReport,
+#     and the read-only report is delivered on the same rails. (AR 催收 never
+#     auto-sends — it isn't a cross-border kind.)
+# ---------------------------------------------------------------------------
+def test_crossborder_scheduled_job_runs_and_delivers(
+        fresh_db, tmp_storage, tmp_path, monkeypatch):
+    from agent_team import crypto
+
+    cid = metrics_store.get_or_create_company("cb@corp.com", company_name="CBCo")
+    store = _fund_account(tmp_path / "customers.json", "cb@corp.com", 50_000.0)
+    _subscribe_pro(store.find_by_email("cb@corp.com")["id"])   # 企业版-only
+    monkeypatch.setattr(app, "CUSTOMERS", store)
+
+    updir = tmp_path / "cbfiles"
+    updir.mkdir()
+
+    def role_file(name, header, row):
+        p = str(updir / name)
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            f.write(",".join(header) + "\n" + ",".join(row) + "\n")
+        crypto.encrypt_file_in_place(p)        # files are encrypted at rest
+        return p
+
+    files = [
+        {"role": "orders", "path": role_file(
+            "o.csv", ["订单号", "卖方", "买方", "金额", "币种", "数量", "日期"],
+            ["O1", "甲公司", "客户", "1000", "USD", "10", "2026-06-10"])},
+        {"role": "receipts", "path": role_file(   # 1200 ≠ others → forces 金额不一致
+            "r.csv", ["订单号", "收款主体", "收款金额", "币种", "收款日期"],
+            ["O1", "甲公司", "1200", "USD", "2026-06-20"])},
+        {"role": "customs", "path": role_file(
+            "c.csv", ["报关单号", "订单号", "经营单位", "成交金额", "数量", "报关日期"],
+            ["BG1", "O1", "甲公司", "1000", "10", "2026-06-12"])},
+        {"role": "invoices", "path": role_file(
+            "i.csv", ["发票号", "订单号", "销售方", "价税合计", "数量", "开票日期"],
+            ["FP1", "O1", "甲公司", "1000", "10", "2026-06-11"])},
+    ]
+
+    captured = {}
+
+    def _fake_deliver(**kw):
+        captured.update(kw)
+        return {"email": True}
+
+    monkeypatch.setattr(app.delivery, "deliver_report", _fake_deliver)
+
+    job_id = metrics_store.create_scheduled_job(
+        cid, "每周三流核验", "*/5 * * * *",
+        source_mode=SOURCE_LATEST_UPLOAD, fixed_file_paths=files,
+        delivery_channels=["email"], engine_kind="threeflow")
+    assert job_id
+    job = metrics_store.get_scheduled_job(job_id)
+    assert job["engine_kind"] == "threeflow"
+
+    result = app._execute_scheduled_job(job)        # no llm needed — engine is deterministic
+    assert result["ran"] is True
+    assert result["status"] == RUN_SUCCEEDED
+
+    # the cross-border report auto-delivered on the same rails
+    assert captured.get("channels") == ["email"]
+    assert "三流合一" in (captured.get("report_markdown") or "")
+
+    # a CrossBorderReport(threeflow) was persisted and the engine actually ran
+    rep = metrics_store.get_crossborder_report(cid, result["run_id"])
+    assert rep and rep["engine_kind"] == "threeflow"
+    assert rep["exception_count"] >= 1               # the 金额不一致 was flagged

@@ -85,6 +85,51 @@ export const classifyReconException = (excId, label) =>
   postJSON(`/api/recon/exceptions/${encodeURIComponent(excId)}/classify`, { label });
 export const reconLedgerUrl = (runId) => `/api/recon/ledger/${encodeURIComponent(runId)}`;
 
+// ---- 应收账款管理 + 催收 (AR aging + dunning) ----------------------------------
+export const getArPacks = () => getJSON("/api/ar/packs");
+export const startAr = (formData) => postForm("/api/ar/run", formData);
+export const getArResult = (runId) => getJSON(`/api/ar/result/${encodeURIComponent(runId)}`);
+export const getArHistory = () => getJSON("/api/ar/reports");
+export const getArFlags = (params = {}) => {
+  const q = new URLSearchParams(params).toString();
+  return getJSON(`/api/ar/flags${q ? "?" + q : ""}`);
+};
+export const classifyArFlag = (flagId, label) =>
+  postJSON(`/api/ar/flags/${encodeURIComponent(flagId)}/classify`, { label });
+export const arLedgerUrl = (runId) => `/api/ar/ledger/${encodeURIComponent(runId)}`;
+export const getArDunning = (params = {}) => {
+  const q = new URLSearchParams(params).toString();
+  return getJSON(`/api/ar/dunning${q ? "?" + q : ""}`);
+};
+export const editArDunning = (id, body) =>
+  postJSON(`/api/ar/dunning/${encodeURIComponent(id)}/edit`, { body });
+export const approveArDunning = (id) =>
+  postJSON(`/api/ar/dunning/${encodeURIComponent(id)}/approve`, {});
+export const dismissArDunning = (id) =>
+  postJSON(`/api/ar/dunning/${encodeURIComponent(id)}/dismiss`, {});
+export const sendArDunning = (id, payload) =>
+  postJSON(`/api/ar/dunning/${encodeURIComponent(id)}/send`, payload);
+
+// ---- 跨境财务 (cross-border finance hub) — 贸易方式 settings --------------------
+export const getCrossBorderSettings = () => getJSON("/api/cross-border/settings");
+export const saveCrossBorderSettings = (payload) => postJSON("/api/cross-border/settings", payload);
+
+// ---- 跨境财务 evidence engines (三流合一 / 退税 / 发票审核 / 无票免税) ------------
+// One kind-parameterized surface; `kind` ∈ threeflow|rebate|invoice|vatexempt.
+export const getCbConfig = (kind) => getJSON(`/api/crossborder/${encodeURIComponent(kind)}/config`);
+export const startCb = (kind, formData) => postForm(`/api/crossborder/${encodeURIComponent(kind)}/run`, formData);
+export const getCbResult = (kind, runId) =>
+  getJSON(`/api/crossborder/${encodeURIComponent(kind)}/result/${encodeURIComponent(runId)}`);
+export const getCbHistory = (kind) => getJSON(`/api/crossborder/${encodeURIComponent(kind)}/reports`);
+export const getCbFlags = (kind, params = {}) => {
+  const q = new URLSearchParams(params).toString();
+  return getJSON(`/api/crossborder/${encodeURIComponent(kind)}/flags${q ? "?" + q : ""}`);
+};
+export const classifyCbFlag = (flagId, label) =>
+  postJSON(`/api/crossborder/flags/${encodeURIComponent(flagId)}/classify`, { label });
+export const scheduleCb = (kind, formData) =>
+  postForm(`/api/crossborder/${encodeURIComponent(kind)}/schedule`, formData);
+
 // ---- token manager (founder 成本控制台) ---------------------------------------
 export const getTokens = () => getJSON("/api/tokens");
 export const setTokensTotal = (limit) => postJSON("/api/tokens/total", { limit });

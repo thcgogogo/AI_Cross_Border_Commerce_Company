@@ -63,7 +63,17 @@ from .models import (
     AGENT_RUN_RUNNING,
     AGENT_RUN_STATUSES,
     QUOTA_RUN_KINDS,
+    AR_FLAG_CLASSIFIED,
+    AR_FLAG_OPEN,
+    AR_FLAG_RESOLVED,
+    DUNNING_STATE_APPROVED,
+    DUNNING_STATE_DRAFT,
+    DUNNING_STATE_EDITED,
+    DUNNING_STATE_SENT,
+    DUNNING_STATE_DISMISSED,
+    DUNNING_TIER_HANDOFF,
     RUN_FAILED,
+    RUN_KIND_AR,
     RUN_KIND_DEVICE,
     RUN_KIND_IMPORT,
     RUN_KIND_RECON,
@@ -107,6 +117,14 @@ from .models import (
     SchedulerHeartbeat,
     SettlementException,
     SettlementReport,
+    ARReport,
+    ARFlag,
+    CrossBorderReport,
+    CrossBorderFlag,
+    CB_FLAG_OPEN,
+    CB_FLAG_CLASSIFIED,
+    CB_FLAG_RESOLVED,
+    DunningMessage,
     Subscription,
     SupportRequest,
 )
@@ -1275,6 +1293,7 @@ def _job_to_dict(j):
         "cron_expr": j.cron_expr,
         "industry_override": j.industry_override or "",
         "goal_template": j.goal_template or "",
+        "engine_kind": j.engine_kind or "",
         "source_mode": j.source_mode,
         "fixed_file_paths": _loads_list(j.fixed_file_paths),
         "delivery_channels": _loads_list(j.delivery_channels),
@@ -1289,7 +1308,7 @@ def _job_to_dict(j):
 def create_scheduled_job(company_id, name_cn, cron_expr, goal_template="",
                          source_mode=SOURCE_LATEST_UPLOAD, industry_override=None,
                          fixed_file_paths=None, delivery_channels=None,
-                         budget_cny=None, active=True):
+                         budget_cny=None, active=True, engine_kind=None):
     """Insert a 定时任务 row and return its id (None if no company / no name)."""
     if not company_id:
         return None
@@ -1306,6 +1325,7 @@ def create_scheduled_job(company_id, name_cn, cron_expr, goal_template="",
             cron_expr=cron_expr,
             industry_override=(industry_override or "").strip() or None,
             goal_template=goal_template or "",
+            engine_kind=(engine_kind or "").strip() or None,
             source_mode=source_mode,
             fixed_file_paths=json.dumps(fixed_file_paths or [], ensure_ascii=False),
             delivery_channels=json.dumps(delivery_channels or [], ensure_ascii=False),
@@ -1377,7 +1397,7 @@ def update_scheduled_job(company_id, job_id, **fields):
         return False
     allowed = {"name_cn", "cron_expr", "industry_override", "goal_template",
                "source_mode", "fixed_file_paths", "delivery_channels",
-               "budget_cny", "active"}
+               "budget_cny", "active", "engine_kind"}
     with db.session_scope() as s:
         j = s.query(ScheduledJob).filter_by(id=job_id, company_id=company_id).one_or_none()
         if j is None:
@@ -2455,6 +2475,48 @@ def _append_learned_rule(company_id, rule):
     merge_profile(company_id, {"recon": settings})
 
 
+# ---- 跨境财务 (cross-border finance) per-account settings ----------------------
+# The durable seller identity for the 跨境财务 hub: the selected 贸易方式 (trade
+# mode), the platforms in play, and the 收款工具 (收款服务商). Stored under
+# profile_json["cross_border"] alongside the per-workflow namespaces above
+# (["recon"]/["ar"]); JSON column, so no schema change. Drives which mode-gated
+# sub-tabs render and seeds the per-engine settings the later phases add.
+
+CROSS_BORDER_MODES = ("9810", "general", "9710", "9610", "1210")
+CROSS_BORDER_DEFAULT_MODE = "9810"   # 海外仓 / Amazon FBA — the first customer
+
+
+def get_cross_border_settings(company_id):
+    """This account's 跨境财务 settings ({mode, platforms, payment_tools}) from the
+    company brain. Defaults to the 9810 海外仓 profile when unset (mirrors
+    get_recon_settings / get_ar_settings)."""
+    cb = (get_profile(company_id) or {}).get("cross_border", {}) or {}
+    mode = cb.get("mode")
+    if mode not in CROSS_BORDER_MODES:
+        mode = CROSS_BORDER_DEFAULT_MODE
+    return {
+        "mode": mode,
+        "platforms": list(cb.get("platforms") or []),
+        "payment_tools": list(cb.get("payment_tools") or []),
+    }
+
+
+def save_cross_border_settings(company_id, *, mode=None, platforms=None,
+                               payment_tools=None):
+    """Persist the 跨境财务 seller identity into profile_json["cross_border"]
+    (shallow-merge, preserving any per-engine sub-keys a later phase stores).
+    Only the provided fields are touched. Returns the saved, normalized settings."""
+    cb = dict((get_profile(company_id) or {}).get("cross_border", {}) or {})
+    if mode is not None:
+        cb["mode"] = mode if mode in CROSS_BORDER_MODES else CROSS_BORDER_DEFAULT_MODE
+    if platforms is not None:
+        cb["platforms"] = [str(p).strip() for p in platforms if str(p).strip()]
+    if payment_tools is not None:
+        cb["payment_tools"] = [str(t).strip() for t in payment_tools if str(t).strip()]
+    merge_profile(company_id, {"cross_border": cb})
+    return get_cross_border_settings(company_id)
+
+
 def _recon_decimal(x):
     try:
         return Decimal(str(x if x is not None else 0))
@@ -2636,6 +2698,577 @@ def classify_settlement_exception(company_id, exception_id, label):
     if cause and learn:
         _append_learned_rule(company_id, learn)
     return result
+
+
+# ===========================================================================
+# 应收账款管理 + 催收 (AR aging + dunning) — CUSTOMER-scoped persistence.
+# A NEW, additive sibling of the 对账 helpers above (the two share no code today).
+# Durable per-account AR settings (账期/column overrides + learned grading rules) live
+# in company_profile.profile_json under the "ar" key (no migration); per-run results +
+# the flag worklist live in ar_reports / ar_flags; 催收 sent-state in dunning_messages.
+# ===========================================================================
+def get_ar_settings(company_id):
+    """This account's AR settings ({formats, learned_rules, ...}) from the company
+    brain, or {} (mirrors get_recon_settings)."""
+    return (get_profile(company_id) or {}).get("ar", {}) or {}
+
+
+def learned_ar_rules(company_id):
+    """The learned flag-classification rules the engine applies before grading, so a
+    prior one-tap classify improves the next run."""
+    return list(get_ar_settings(company_id).get("learned_rules") or [])
+
+
+def ar_format_overrides(company_id, format_key):
+    """This account's per-format overrides (账期/列名映射), merged into the shared pack by
+    ar_templates.apply_overrides. {} when none."""
+    fmts = get_ar_settings(company_id).get("formats") or {}
+    return fmts.get(format_key, {}) or {}
+
+
+def _append_ar_learned_rule(company_id, rule):
+    """Non-destructively append one learned rule to profile_json["ar"]."""
+    settings = dict(get_ar_settings(company_id))
+    rules = list(settings.get("learned_rules") or [])
+    rules.append(rule)
+    settings["learned_rules"] = rules
+    merge_profile(company_id, {"ar": settings})
+
+
+def read_reconciled_received(company_id, period_label=None, platform=None):
+    """The 对账-OUTPUT dependency: read the reconciled received TOTAL (到账, fallback
+    实收) for a platform+period from the newest matching SettlementReport, as an
+    AGGREGATE cross-check input for the AR engine. Returns {到账, 实收, platform,
+    period_label} or None when no 对账 has run (graceful fallback — AR runs anyway).
+
+    This is a per-platform-period aggregate, NOT per-invoice — AR uses it only to flag a
+    discrepancy vs its own applied-payments total, never to source payments."""
+    if not company_id:
+        return None
+    with db.session_scope() as s:
+        q = s.query(SettlementReport).filter_by(company_id=company_id)
+        if period_label:
+            q = q.filter_by(period_label=period_label)
+        if platform:
+            q = q.filter_by(platform=platform)
+        row = q.order_by(SettlementReport.id.desc()).first()
+        if row is None:
+            return None
+        try:
+            summary = (json.loads(row.summary_json) if row.summary_json else {}).get(
+                "summary") or {}
+        except ValueError:
+            summary = {}
+        arrived = summary.get("到账")
+        settled = summary.get("实收")
+        if arrived is None and settled is None:
+            return None
+        return {"到账": arrived, "实收": settled, "platform": row.platform or "",
+                "period_label": row.period_label or ""}
+
+
+def save_ar_report(company_id, run_id, result, *, account_id=None, format_key=None,
+                   period_label=None):
+    """Upsert one AR run's result (keyed company_id+run_id) and REPLACE its flag
+    worklist rows (idempotent on re-run). `result` is the ar_aging_engine output dict.
+    Returns the saved report dict. Mirrors save_settlement_report."""
+    if not company_id or not run_id:
+        return None
+    result = result or {}
+    summary = result.get("summary") or {}
+    bridge = result.get("bridge") or {}
+    flags = result.get("exceptions") or []
+    payload = json.dumps(result, ensure_ascii=False)
+    dso = summary.get("DSO")
+    with db.session_scope() as s:
+        row = (s.query(ARReport)
+               .filter_by(company_id=company_id, run_id=run_id)
+               .with_for_update().one_or_none())
+        if row is None:
+            row = ARReport(company_id=company_id, run_id=run_id)
+            s.add(row)
+        row.account_id = account_id
+        row.format_key = format_key or summary.get("platform")
+        row.period_label = period_label or summary.get("period_label")
+        row.summary_json = payload
+        row.bridge_ok = bool(bridge.get("ok", True))
+        row.total_outstanding = _recon_decimal(summary.get("应收账款总额", 0))
+        row.overdue_total = _recon_decimal(summary.get("逾期总额", 0))
+        row.dso = (_recon_decimal(dso) if dso is not None else None)
+        row.suspect_count = int(summary.get("疑似条目数", 0) or 0)
+        # created_at stamped once on insert — never reset on an upsert.
+        (s.query(ARFlag).filter_by(company_id=company_id, run_id=run_id).delete())
+        for e in flags:
+            reasons = e.get("suspect_reasons") or []
+            s.add(ARFlag(
+                company_id=company_id, run_id=run_id,
+                layer=(e.get("layer") or "")[:16], bucket=(e.get("bucket") or "")[:24],
+                grade=(e.get("grade") or "")[:8], cause=(e.get("cause") or "")[:48],
+                suspect_reasons=("，".join(reasons))[:255],
+                amount=_recon_decimal(e.get("amount", 0)),
+                customer_ref=(e.get("customer_ref") or "")[:128],
+                invoice_ref=(e.get("invoice_ref") or "")[:128],
+                status=e.get("status") or AR_FLAG_OPEN,
+                user_label=(e.get("user_label") or None),
+                detail_json=json.dumps({"detail": e.get("detail", "")},
+                                       ensure_ascii=False),
+            ))
+        s.flush()
+        return _ar_report_to_dict(row)
+
+
+def _ar_report_to_dict(r):
+    try:
+        result = json.loads(r.summary_json) if r.summary_json else {}
+    except ValueError:
+        result = {}
+    return {
+        "id": r.id, "run_id": r.run_id, "company_id": r.company_id,
+        "format_key": r.format_key or "", "period_label": r.period_label or "",
+        "bridge_ok": bool(r.bridge_ok),
+        "total_outstanding": float(r.total_outstanding or 0),
+        "overdue_total": float(r.overdue_total or 0),
+        "dso": (float(r.dso) if r.dso is not None else None),
+        "suspect_count": int(r.suspect_count or 0),
+        "summary": result.get("summary") or {},
+        "buckets": result.get("buckets") or {},
+        "customers": result.get("customers") or [],
+        "attributions": result.get("attributions") or [],
+        "bridge": result.get("bridge") or {},
+        "source_rows": result.get("source_rows") or [],
+        "created_at": _iso(r.created_at),
+    }
+
+
+def get_ar_result(company_id, run_id):
+    """The FULL engine-output blob for an AR run (incl. invoices/applications/
+    source_rows), ownership-filtered. Used to build the audit-ready ledger export."""
+    if not company_id or not run_id:
+        return None
+    with db.session_scope() as s:
+        row = (s.query(ARReport)
+               .filter_by(company_id=company_id, run_id=run_id).one_or_none())
+        if row is None:
+            return None
+        try:
+            return json.loads(row.summary_json) if row.summary_json else {}
+        except ValueError:
+            return {}
+
+
+def get_ar_report(company_id, run_id):
+    """One AR result as a customer-safe dict (no ¥ COGS — none stored), ownership
+    filtered. None if missing or not this company's."""
+    if not company_id or not run_id:
+        return None
+    with db.session_scope() as s:
+        row = (s.query(ARReport)
+               .filter_by(company_id=company_id, run_id=run_id).one_or_none())
+        return _ar_report_to_dict(row) if row is not None else None
+
+
+def list_ar_reports(company_id, limit=60):
+    """This account's AR history, newest first."""
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        rows = (s.query(ARReport).filter_by(company_id=company_id)
+                .order_by(ARReport.id.desc()).limit(int(limit)).all())
+        return [_ar_report_to_dict(r) for r in rows]
+
+
+def _ar_flag_to_dict(e):
+    try:
+        detail = (json.loads(e.detail_json) if e.detail_json else {}).get("detail", "")
+    except ValueError:
+        detail = ""
+    return {
+        "id": e.id, "run_id": e.run_id, "layer": e.layer or "", "bucket": e.bucket or "",
+        "grade": e.grade or "", "cause": e.cause or "",
+        "suspect_reasons": [r for r in (e.suspect_reasons or "").split("，") if r],
+        "amount": float(e.amount or 0),
+        "customer_ref": e.customer_ref or "", "invoice_ref": e.invoice_ref or "",
+        "status": e.status or AR_FLAG_OPEN, "user_label": e.user_label or "",
+        "detail": detail,
+        "created_at": _iso(e.created_at), "updated_at": _iso(e.updated_at),
+    }
+
+
+def list_ar_flags(company_id, run_id=None, status=None, grade=None, limit=500):
+    """The AR flag worklist for an account (optionally one run / status / grade)."""
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        q = s.query(ARFlag).filter_by(company_id=company_id)
+        if run_id:
+            q = q.filter_by(run_id=run_id)
+        if status:
+            q = q.filter_by(status=status)
+        if grade:
+            q = q.filter_by(grade=grade)
+        rows = q.order_by(ARFlag.id.asc()).limit(int(limit)).all()
+        return [_ar_flag_to_dict(e) for e in rows]
+
+
+# The one-tap classification labels the AR worklist offers -> (canonical cause, status).
+_AR_LABELS = {
+    "confirmed": ("已确认应收", AR_FLAG_RESOLVED),
+    "已确认": ("已确认应收", AR_FLAG_RESOLVED),
+    "paid": ("已收款", AR_FLAG_RESOLVED),
+    "已收款": ("已收款", AR_FLAG_RESOLVED),
+    "dispute": ("争议", AR_FLAG_CLASSIFIED),
+    "争议": ("争议", AR_FLAG_CLASSIFIED),
+    "pending": ("挂账", AR_FLAG_CLASSIFIED),
+    "挂账": ("挂账", AR_FLAG_CLASSIFIED),
+}
+
+
+def classify_ar_flag(company_id, flag_id, label):
+    """One-tap classify an AR flag: flip status/cause AND write a learned rule so the
+    NEXT run auto-classifies the same line. Ownership-enforced. Returns the updated flag
+    dict, or None if not found. Mirrors classify_settlement_exception."""
+    if not company_id or not flag_id:
+        return None
+    key = (label or "").strip()
+    cause, status = _AR_LABELS.get(key, (None, AR_FLAG_CLASSIFIED))
+    learn = None
+    with db.session_scope() as s:
+        e = (s.query(ARFlag).filter_by(id=flag_id, company_id=company_id).one_or_none())
+        if e is None:
+            return None
+        e.status = status
+        e.user_label = key[:48]
+        if cause:
+            e.cause = cause
+        e.updated_at = datetime.utcnow()
+        result = _ar_flag_to_dict(e)
+        # Build the learned rule from the strongest identifying ref this flag has.
+        for field in ("invoice_ref", "customer_ref"):
+            val = getattr(e, field, None)
+            if val:
+                learn = {"match": {field: val}, "cause": cause or e.cause, "label": key}
+                break
+    if cause and learn:
+        _append_ar_learned_rule(company_id, learn)
+    return result
+
+
+# ---- 跨境财务 engines (三流合一 / 退税 / 发票审核 / 无票免税) persistence -----------
+# ONE shared table pair; `engine_kind` scopes each engine's reports + worklist.
+def save_crossborder_report(company_id, run_id, engine_kind, result, *,
+                            account_id=None, period_label=None):
+    """Upsert one 跨境财务 engine run's result (keyed company+run) and REPLACE its
+    worklist flags from result["exceptions"] (idempotent on re-run). Returns the saved
+    report dict. Mirrors save_ar_report; these engines compute every number (no LLM)."""
+    if not company_id or not run_id:
+        return None
+    result = result or {}
+    summary = result.get("summary") or {}
+    bridge = result.get("bridge") or {}
+    flags = result.get("exceptions") or []
+    payload = json.dumps(result, ensure_ascii=False)
+    kind = (engine_kind or "")[:32]
+    with db.session_scope() as s:
+        row = (s.query(CrossBorderReport)
+               .filter_by(company_id=company_id, run_id=run_id)
+               .with_for_update().one_or_none())
+        if row is None:
+            row = CrossBorderReport(company_id=company_id, run_id=run_id)
+            s.add(row)
+        row.account_id = account_id
+        row.engine_kind = kind
+        row.period_label = period_label or summary.get("period_label")
+        row.summary_json = payload
+        row.bridge_ok = bool(bridge.get("ok", True))
+        row.exception_count = len(flags)
+        (s.query(CrossBorderFlag)
+         .filter_by(company_id=company_id, run_id=run_id).delete())
+        for e in flags:
+            s.add(CrossBorderFlag(
+                company_id=company_id, run_id=run_id, engine_kind=kind,
+                ref=(str(e.get("ref") or ""))[:128],
+                cause=(e.get("cause") or "")[:64],
+                severity=(e.get("severity") or "")[:8],
+                amount=_recon_decimal(e.get("amount", 0)),
+                detail=(e.get("detail") or ""),
+                status=e.get("status") or CB_FLAG_OPEN,
+                user_label=(e.get("user_label") or None),
+            ))
+        s.flush()
+        return _crossborder_report_to_dict(row)
+
+
+def _crossborder_report_to_dict(r):
+    try:
+        result = json.loads(r.summary_json) if r.summary_json else {}
+    except ValueError:
+        result = {}
+    return {
+        "id": r.id, "run_id": r.run_id, "company_id": r.company_id,
+        "engine_kind": r.engine_kind or "", "period_label": r.period_label or "",
+        "bridge_ok": bool(r.bridge_ok), "exception_count": int(r.exception_count or 0),
+        "summary": result.get("summary") or {},
+        "bridge": result.get("bridge") or {},
+        "source_rows": result.get("source_rows") or [],
+        "created_at": _iso(r.created_at),
+    }
+
+
+def get_crossborder_report(company_id, run_id):
+    """One 跨境财务 result as a customer-safe dict (no ¥ COGS — none stored)."""
+    if not company_id or not run_id:
+        return None
+    with db.session_scope() as s:
+        row = (s.query(CrossBorderReport)
+               .filter_by(company_id=company_id, run_id=run_id).one_or_none())
+        return _crossborder_report_to_dict(row) if row is not None else None
+
+
+def list_crossborder_reports(company_id, engine_kind=None, limit=60):
+    """This account's 跨境财务 history for one engine kind, newest first."""
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        q = s.query(CrossBorderReport).filter_by(company_id=company_id)
+        if engine_kind:
+            q = q.filter_by(engine_kind=engine_kind)
+        rows = q.order_by(CrossBorderReport.id.desc()).limit(int(limit)).all()
+        return [_crossborder_report_to_dict(r) for r in rows]
+
+
+def latest_settlement_orders(company_id, period_label=None, platform=None):
+    """The newest 对账 run's compact per-order list ([{ref, amount, net, date}]) for a
+    period — the 三流合一 sub-tab imports this as its 订单 leg so the seller needn't
+    re-upload. Returns [] when no 对账 ran for the period (graceful)."""
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        q = s.query(SettlementReport).filter_by(company_id=company_id)
+        if period_label:
+            q = q.filter_by(period_label=period_label)
+        if platform:
+            q = q.filter_by(platform=platform)
+        row = q.order_by(SettlementReport.id.desc()).first()
+        if row is None:
+            return []
+        try:
+            return (json.loads(row.summary_json) if row.summary_json else {}).get(
+                "orders") or []
+        except ValueError:
+            return []
+
+
+def latest_crossborder_summary(company_id, engine_kind, period_label=None):
+    """The newest CrossBorderReport summary for one engine kind (+ optional period) — an
+    AGGREGATE cross-read input for a DOWNSTREAM sub-tab (e.g. 退税 reading 发票审核's
+    有效进项税额). Returns the summary dict, or None when that engine hasn't run for the
+    period (graceful — the downstream engine runs anyway). Mirrors read_reconciled_received."""
+    if not company_id or not engine_kind:
+        return None
+    with db.session_scope() as s:
+        q = s.query(CrossBorderReport).filter_by(company_id=company_id,
+                                                 engine_kind=engine_kind)
+        if period_label:
+            q = q.filter_by(period_label=period_label)
+        row = q.order_by(CrossBorderReport.id.desc()).first()
+        if row is None:
+            return None
+        try:
+            return (json.loads(row.summary_json) if row.summary_json else {}).get(
+                "summary") or None
+        except ValueError:
+            return None
+
+
+def _crossborder_flag_to_dict(e):
+    return {
+        "id": e.id, "run_id": e.run_id, "engine_kind": e.engine_kind or "",
+        "ref": e.ref or "", "cause": e.cause or "", "severity": e.severity or "",
+        "amount": float(e.amount or 0), "detail": e.detail or "",
+        "status": e.status or CB_FLAG_OPEN, "user_label": e.user_label or "",
+        "created_at": _iso(e.created_at), "updated_at": _iso(e.updated_at),
+    }
+
+
+def list_crossborder_flags(company_id, engine_kind=None, run_id=None, status=None,
+                           limit=500):
+    """One 跨境财务 engine's 不一致/异常 worklist (optionally one run / status)."""
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        q = s.query(CrossBorderFlag).filter_by(company_id=company_id)
+        if engine_kind:
+            q = q.filter_by(engine_kind=engine_kind)
+        if run_id:
+            q = q.filter_by(run_id=run_id)
+        if status:
+            q = q.filter_by(status=status)
+        rows = q.order_by(CrossBorderFlag.id.asc()).limit(int(limit)).all()
+        return [_crossborder_flag_to_dict(e) for e in rows]
+
+
+# One-tap labels the 跨境财务 worklist offers -> (canonical label, status).
+_CB_LABELS = {
+    "resolved": ("已核实", CB_FLAG_RESOLVED), "已核实": ("已核实", CB_FLAG_RESOLVED),
+    "ok": ("无需处理", CB_FLAG_RESOLVED), "无需处理": ("无需处理", CB_FLAG_RESOLVED),
+    "pending": ("待处理", CB_FLAG_CLASSIFIED), "待处理": ("待处理", CB_FLAG_CLASSIFIED),
+    "followup": ("转人工核查", CB_FLAG_CLASSIFIED), "转人工": ("转人工核查", CB_FLAG_CLASSIFIED),
+}
+
+
+def classify_crossborder_flag(company_id, flag_id, label):
+    """One-tap classify a 跨境财务 worklist flag. Ownership-enforced; returns the updated
+    flag dict or None. No learned-rule loop (these engines are stateless re-checks)."""
+    if not company_id or not flag_id:
+        return None
+    key = (label or "").strip()
+    new_label, status = _CB_LABELS.get(key, (key or None, CB_FLAG_CLASSIFIED))
+    with db.session_scope() as s:
+        e = (s.query(CrossBorderFlag)
+             .filter_by(id=flag_id, company_id=company_id).one_or_none())
+        if e is None:
+            return None
+        e.status = status
+        e.user_label = (new_label or "")[:48] or None
+        e.updated_at = datetime.utcnow()
+        s.flush()
+        return _crossborder_flag_to_dict(e)
+
+
+# ---- 催收 (dunning) sent-state — the no-double-dun machinery -----------------
+def _dunning_to_dict(m):
+    try:
+        facts = json.loads(m.facts_json) if m.facts_json else []
+    except ValueError:
+        facts = []
+    return {
+        "id": m.id, "run_id": m.run_id, "customer_key": m.customer_key,
+        "invoice_key": m.invoice_key or "", "tier": m.tier, "channel": m.channel or "",
+        "grade": m.grade or "", "state": m.state,
+        "days_overdue": int(m.days_overdue_at_draft or 0),
+        "amount": float(m.amount_at_draft or 0), "facts": facts,
+        "draft_body": m.draft_body or "", "edited_body": m.edited_body or "",
+        "body": (m.edited_body or m.draft_body or ""),
+        "audit_warning": m.audit_warning or "",
+        "drafted_at": _iso(m.drafted_at), "approved_at": _iso(m.approved_at),
+        "sent_at": _iso(m.sent_at),
+    }
+
+
+def last_dunning(company_id, customer_key):
+    """The most-recent SENT 催收 message for a customer (any tier) — the cadence anchor
+    a re-run reads to decide NEW / ESCALATED / LOCKED. None if never dunned."""
+    if not company_id or not customer_key:
+        return None
+    with db.session_scope() as s:
+        m = (s.query(DunningMessage)
+             .filter_by(company_id=company_id, customer_key=customer_key,
+                        state=DUNNING_STATE_SENT)
+             .order_by(DunningMessage.sent_at.desc(), DunningMessage.id.desc()).first())
+        return _dunning_to_dict(m) if m is not None else None
+
+
+def record_dunning_draft(company_id, customer_key, tier, *, run_id=None, account_id=None,
+                         invoice_key=None, grade=None, facts=None, draft_body="",
+                         audit_warning="", days_overdue=0, amount=0):
+    """Upsert the OPEN draft for (company, customer_key, invoice_key, tier). A re-run
+    that re-enters a NEW/ESCALATED case REPLACES a stale unsent DRAFT rather than piling
+    up duplicates; an EDITED/APPROVED draft (human-touched) is left intact. Returns the
+    draft dict."""
+    if not company_id or not customer_key or not tier:
+        return None
+    with db.session_scope() as s:
+        m = (s.query(DunningMessage)
+             .filter_by(company_id=company_id, customer_key=customer_key,
+                        invoice_key=invoice_key, tier=tier)
+             .filter(DunningMessage.state.in_(
+                 (DUNNING_STATE_DRAFT, DUNNING_STATE_EDITED, DUNNING_STATE_APPROVED)))
+             .with_for_update().order_by(DunningMessage.id.desc()).first())
+        if m is not None and m.state != DUNNING_STATE_DRAFT:
+            return _dunning_to_dict(m)        # human already acting on it — don't clobber
+        if m is None:
+            m = DunningMessage(company_id=company_id, customer_key=customer_key,
+                               invoice_key=invoice_key, tier=tier)
+            s.add(m)
+        m.run_id = run_id
+        m.account_id = account_id
+        m.grade = (grade or "")[:8] or None
+        m.facts_json = json.dumps(facts or [], ensure_ascii=False)
+        m.draft_body = draft_body or ""
+        m.audit_warning = audit_warning or ""
+        m.days_overdue_at_draft = int(days_overdue or 0)
+        m.amount_at_draft = _recon_decimal(amount)
+        m.state = DUNNING_STATE_DRAFT
+        m.updated_at = datetime.utcnow()
+        s.flush()
+        return _dunning_to_dict(m)
+
+
+def get_dunning_message(company_id, message_id):
+    if not company_id or not message_id:
+        return None
+    with db.session_scope() as s:
+        m = (s.query(DunningMessage)
+             .filter_by(id=message_id, company_id=company_id).one_or_none())
+        return _dunning_to_dict(m) if m is not None else None
+
+
+def list_dunning_messages(company_id, run_id=None, state=None, limit=500):
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        q = s.query(DunningMessage).filter_by(company_id=company_id)
+        if run_id:
+            q = q.filter_by(run_id=run_id)
+        if state:
+            q = q.filter_by(state=state)
+        rows = q.order_by(DunningMessage.id.asc()).limit(int(limit)).all()
+        return [_dunning_to_dict(m) for m in rows]
+
+
+def save_dunning_edit(company_id, message_id, body):
+    """Human edited a draft's wording. -> state EDITED, edited_body set. Never sends."""
+    if not company_id or not message_id:
+        return None
+    with db.session_scope() as s:
+        m = (s.query(DunningMessage)
+             .filter_by(id=message_id, company_id=company_id)
+             .with_for_update().one_or_none())
+        if m is None or m.state == DUNNING_STATE_SENT:
+            return None
+        m.edited_body = body or ""
+        m.state = DUNNING_STATE_EDITED
+        m.updated_at = datetime.utcnow()
+        return _dunning_to_dict(m)
+
+
+def set_dunning_state(company_id, message_id, state, *, channel=None, delivery_id=None):
+    """Transition a draft (approve / dismiss / sent). The ONLY path to SENT — called by
+    the human approve-then-send route, NEVER the orchestrator/scheduler. Stamps
+    approved_at on APPROVED and sent_at (the cadence anchor) on SENT."""
+    if not company_id or not message_id or state not in (
+            DUNNING_STATE_APPROVED, DUNNING_STATE_DISMISSED, DUNNING_STATE_SENT):
+        return None
+    with db.session_scope() as s:
+        m = (s.query(DunningMessage)
+             .filter_by(id=message_id, company_id=company_id)
+             .with_for_update().one_or_none())
+        if m is None:
+            return None
+        now = datetime.utcnow()
+        if state == DUNNING_STATE_APPROVED:
+            m.approved_at = now
+        if channel:
+            m.channel = channel[:16]
+        if state == DUNNING_STATE_SENT:
+            if m.approved_at is None:
+                m.approved_at = now
+            m.sent_at = now
+            if delivery_id is not None:
+                m.delivery_id = int(delivery_id)
+        m.state = state
+        m.updated_at = now
+        return _dunning_to_dict(m)
 
 
 # ===========================================================================

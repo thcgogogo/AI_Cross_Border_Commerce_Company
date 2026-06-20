@@ -189,6 +189,13 @@ def apply_overrides(pack, overrides):
     for scalar in ("fee_rate", "settlement_lag_days", "amount_tolerance"):
         if overrides.get(scalar) is not None:
             merged[scalar] = overrides[scalar]
+    # Cross-border: per-account FX (rate / 点差) + reserve params fold into the pack's
+    # `fx` block, so a seller's real settlement rate beats the pack default. PROVISIONAL.
+    fx_ov = overrides.get("fx")
+    if isinstance(fx_ov, dict):
+        base_fx = dict(pack.get("fx") or {})
+        base_fx.update(fx_ov)
+        merged["fx"] = base_fx
     ov_cols = overrides.get("column_map")
     if isinstance(ov_cols, dict):
         base_cols = {role: dict(cols) for role, cols in (pack.get("column_map") or {}).items()}

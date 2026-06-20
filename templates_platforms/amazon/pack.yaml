@@ -1,0 +1,96 @@
+# Amazon — Settlement Report Flat File V2 parsing template (对账 / 平台结算核对,
+# 跨境财务 sub-tab 1 回款核对+收汇结汇).
+#
+# PROVISIONAL — grounded in the DOCUMENTED Amazon Settlement Report Flat File V2
+# structure (Reports → Payments), NOT a real seller export. Confirm against a real
+# file before trusting any number:
+#   - ONE order spans MANY rows (one per amount-type/charge component); the
+#     `amazon_ffv2` adapter (crossborder_adapters.py) aggregates them into one
+#     synthetic per-order row BEFORE the engine sees it.
+#   - amounts are in the marketplace LOCAL currency → converted to CNY at `fx.rate`
+#     (a per-account override via company-brain profile_json["recon"]["fx"]).
+#   - reserves are HELD money (not paid out) → surfaced as 在途, never 未解释差异.
+# The fee taxonomy + FX rate are deliberately in this file so they're tunable
+# without code. A seller's real rate/columns belong in their company-brain overrides.
+display_name_cn: "Amazon（亚马逊·海外仓 FBA）"
+
+# The pre-normalization adapter (crossborder_adapters._REGISTRY key). Its presence is
+# what turns on cross-border aggregation; a pack without `adapter` reconciles as before.
+adapter: amazon_ffv2
+
+amount_tolerance: 0.01
+settlement_lag_days: 7        # Amazon settles ~bi-weekly; bank 结汇 lands days later
+
+# FX — single per-period rate (PROVISIONAL). Override per account with the real
+# settlement / 结汇 rate. point_spread is the 汇兑点差 cost surfaced as an attribution.
+fx:
+  rate: 7.20                  # USD -> CNY (PROVISIONAL — confirm per period/account)
+  point_spread: 0.005         # 0.5% 汇兑点差 (PROVISIONAL)
+  base_currency: "CNY"
+
+# Raw FF V2 column headers the adapter reads (override if your export differs).
+ffv2_columns:
+  order_id: "order-id"
+  settlement_id: "settlement-id"
+  transaction_type: "transaction-type"
+  amount_type: "amount-type"
+  amount_description: "amount-description"
+  amount: "amount"
+  currency: "currency"
+  posted_date: "posted-date"
+
+# amount-type / amount-description → canonical bucket. Matched as lower-cased
+# substrings; more-specific buckets win (reserve/commission/tax before fee/principal).
+ffv2_taxonomy:
+  principal: ["principal", "itemprice", "商品", "商品价格"]
+  commission: ["commission", "referralfee", "referral fee", "佣金"]
+  tax: ["marketplacefacilitatortax", "facilitatortax", "tax", "代扣", "代缴"]
+  promo: ["promotion", "promorebates", "promo", "discount", "优惠", "折扣"]
+  fee: ["fba", "fbaperunitfulfillmentfee", "fulfillment", "storage", "shipping",
+        "giftwrap", "fee", "费用", "仓储", "物流"]
+  reserve: ["reserve", "current reserve amount", "previous reserve amount", "准备金", "保留"]
+
+# The adapter emits synthetic rows already keyed by canonical fields, so the platform
+# column_map is identity. Bank/ledger keep human column defaults (override per account).
+column_map:
+  platform:
+    merchant_order_no: "merchant_order_no"
+    status: "status"
+    event_time: "event_time"
+    batch_no: "batch_no"
+    currency: "currency"
+    gross_amount: "gross_amount"
+    net_amount: "net_amount"
+    fee: "fee"
+    commission: "commission"
+    coupon_amount: "coupon_amount"
+    refund_amount: "refund_amount"
+  bank:                        # 境内银行 结汇到账流水 (CNY) — provisional defaults
+    event_time: "交易日期"
+    net_amount: "收入金额"
+    counterparty: "对方户名"
+    batch_no: "凭证号"
+  ledger:                      # 订单台账 / ERP 导出 (provisional defaults)
+    merchant_order_no: "订单号"
+    event_time: "下单时间"
+    gross_amount: "订单金额"
+
+status_map:
+  SUCCESS: "SUCCESS"
+  REFUND: "REFUND"
+
+# Ordered causes the engine walks. commission / reserve_held / fx_spread are the
+# cross-border kinds (handled in settlement_engine._build_attributions).
+attribution_rules:
+  - cause: "亚马逊平台费用(FBA/仓储/物流)"
+    kind: "fee"
+  - cause: "平台佣金(referral)"
+    kind: "commission"
+  - cause: "退款/退货"
+    kind: "refund"
+  - cause: "在途/未结算"
+    kind: "in_transit"
+  - cause: "账户准备金(reserve)"
+    kind: "reserve_held"
+  - cause: "汇兑点差(FX)"
+    kind: "fx_spread"

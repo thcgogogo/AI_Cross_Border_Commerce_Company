@@ -15,6 +15,7 @@
 import * as api from "../api.js";
 import { state } from "../state.js";
 import { cny, esc, renderMarkdown, skeleton, statusPillHTML } from "../components.js";
+import { pollJobStatus } from "../poll.js";
 
 const CLASSIFY_OPTS = [
   { label: "refund", text: "这是退款" },
@@ -30,6 +31,9 @@ export async function mount(el, ctx) {
 
 // ---- the run form + history -----------------------------------------------
 async function mountForm(el, ctx) {
+  // base path for this view's own links — "/recon" standalone, or the 跨境财务
+  // sub-tab path ("/cross-border/recon") when re-homed under the hub.
+  const base = (ctx && ctx.base) || "/recon";
   el.innerHTML = `<div class="page page-narrow"><div class="card">${skeleton({ title: true, lines: 4 })}</div></div>`;
 
   let platforms = [];
@@ -40,7 +44,7 @@ async function mountForm(el, ctx) {
   const opts = platforms.map((p) =>
     `<option value="${esc(p.key)}">${esc(p.display_name_cn || p.key)}</option>`).join("");
   const histHTML = history.length ? history.map((r) => `
-      <a class="recon-hist-row" href="/recon/${esc(r.run_id)}" data-nav>
+      <a class="recon-hist-row" href="${esc(base)}/${esc(r.run_id)}" data-nav>
         <span class="rh-period">${esc(r.period_label || ("对账 #" + r.run_id))}</span>
         <span class="rh-plat">${esc(r.platform || "")}</span>
         <span class="rh-diff ${r.unexplained_count ? "warn" : "ok"}">未解释 ${esc(r.unexplained_count)} 笔</span>
@@ -121,38 +125,18 @@ async function mountForm(el, ctx) {
       return;
     }
     $("reconProgress").hidden = false;
-    pollTimer = pollStatus(res.job_id, $("reconFeed"), (ok) => {
-      if (ok && res.run_id) ctx.navigate(`/recon/${res.run_id}`);
+    pollTimer = pollJobStatus(res.job_id, $("reconFeed"), (ok) => {
+      if (ok && res.run_id) ctx.navigate(`${base}/${res.run_id}`);
       else { btn.disabled = false; btn.textContent = "重新对账"; }
-    });
+    }, { errorText: "对账失败。" });
   });
 
   return () => { if (pollTimer) clearInterval(pollTimer); };
 }
 
-// Poll /api/status until the run finishes; render the live activity feed. Returns
-// the interval id so the caller can clear it on teardown.
-function pollStatus(jobId, feedEl, done) {
-  const tick = async () => {
-    let snap;
-    try { snap = await api.getJobStatus(jobId); } catch (e) { return; }
-    const acts = (snap.activity || []).slice(-8);
-    feedEl.innerHTML = acts.map((a) =>
-      `<div class="recon-feed-line ${esc(a.type || "info")}">${esc(a.message || "")}</div>`).join("");
-    if (snap.status === "done") { clearInterval(timer); done(true); }
-    else if (snap.status === "error") {
-      clearInterval(timer);
-      feedEl.innerHTML += `<div class="recon-feed-line error">${esc(snap.error || "对账失败。")}</div>`;
-      done(false);
-    }
-  };
-  const timer = setInterval(tick, 1500);
-  tick();
-  return timer;
-}
-
 // ---- the result view ------------------------------------------------------
 async function mountResult(el, ctx, runId) {
+  const base = (ctx && ctx.base) || "/recon";
   el.innerHTML = `<div class="page page-narrow"><div class="card">${skeleton({ title: true, lines: 6 })}</div></div>`;
 
   let r;
@@ -164,7 +148,7 @@ async function mountResult(el, ctx, runId) {
         <button type="button" class="ghost-btn" id="rvBack">返回对账</button>
       </div></div>`;
     const b = el.querySelector("#rvBack");
-    if (b) b.addEventListener("click", () => ctx.navigate("/recon"));
+    if (b) b.addEventListener("click", () => ctx.navigate(base));
     return;
   }
 
@@ -186,7 +170,7 @@ async function mountResult(el, ctx, runId) {
 
   el.innerHTML = `<div class="page page-narrow recon-result">
     <header class="page-head">
-      <a class="back-link" href="/recon" data-nav>← 对账</a>
+      <a class="back-link" href="${esc(base)}" data-nav>← 对账</a>
       <h1>对账报告</h1>
       <p class="muted">${esc(r.platform || "")}${r.period_label ? " · " + esc(r.period_label) : ""}
         · ${statusPillHTML(r.status)}</p>

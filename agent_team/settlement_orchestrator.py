@@ -18,10 +18,8 @@ figure is the engine's; the LLM never computes, matches, or alters a number — 
 the entire reliability story, identical to the weekly report's trends.py moat.
 """
 
-from datetime import datetime
-
-from . import (config, crypto, metrics_store, settlement_engine,
-               settlement_templates, verification)
+from . import (config, metrics_store, settlement_engine, settlement_templates,
+               verification, workflow_chassis)
 from .models import RUN_FAILED, RUN_STOPPED_BUDGET, RUN_SUCCEEDED
 from .providers import ModelRouter
 from .token_manager import BudgetExceededError
@@ -242,58 +240,12 @@ class SettlementOrchestrator:
         except Exception as e:
             self.memory.log("ceo", f"对账结果保存时出现问题（{e}）。", type="info")
 
-    def _finish_run(self, status, result):
-        if not self.run_id:
-            return
-        try:
-            metrics_store.finish_run(
-                self.run_id, status, total_cost_yuan=round(self._run_cost, 6),
-                report_path=self.memory.job_id)
-        except Exception:
-            pass
-        self._render_report_pdf()
-
-    def _render_report_pdf(self):
-        """Render the 对账报告 markdown into a branded, CJK-correct, encrypted PDF —
-        same path as the report flow, only the title differs. Best-effort."""
-        if not (self.company_id and self.run_id):
-            return
-        snap = self.memory.snapshot()
-        final = (snap.get("final_report") or "").strip()
-        if not final:
-            return
-        try:
-            import os
-
-            from . import pdf_report
-            branding = metrics_store.get_branding(self.company_id)
-            profile = metrics_store.get_profile(self.company_id)
-            company_name = (profile.get("company_name") or "").strip() or "本公司"
-            logo = branding.get("logo_path") or None
-            if logo and not os.path.isabs(logo):
-                logo = os.path.join(metrics_store.PROJECT_ROOT, logo)
-            if logo and not os.path.isfile(logo):
-                logo = None
-            period = ("对账期间：" + self.period_label) if self.period_label else (
-                "报告生成时间：" + datetime.now().strftime("%Y-%m-%d %H:%M"))
-            out = metrics_store.report_pdf_path(self.company_id, self.run_id)
-            pdf_report.build_report_pdf(
-                out_path=out,
-                markdown_text=final,
-                company_name=company_name,
-                report_title="对账报告",
-                period_label=period,
-                logo_path=logo,
-                brand_color=branding.get("brand_color") or pdf_report.DEFAULT_BRAND_COLOR,
-                sources=snap.get("sources") or [],
-                sources_status=snap.get("sources_status"),
-                product_domain=(os.environ.get("PRODUCT_DOMAIN") or "").strip(),
-            )
-            crypto.encrypt_file_in_place(out)
-            self.memory.log("ceo", f"已生成对账报告 PDF（{os.path.basename(out)}）。",
-                            type="success")
-        except Exception as e:
-            self.memory.log("ceo", f"PDF 生成已跳过（{e}）。", type="info")
+    def _finish_run(self, status, result=None):
+        # record the run + render the branded PDF (the shared linear-workflow finish tail).
+        workflow_chassis.finish_workflow_run(
+            self.memory, self.company_id, self.run_id, status,
+            cost_yuan=self._run_cost, report_title="对账报告",
+            period_label=self.period_label, period_prefix="对账期间：")
 
     def _handle_cutoff(self, err):
         """Budget ran out during the writer call: assemble a deterministic report from

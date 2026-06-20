@@ -1,0 +1,86 @@
+# PingPong — 收款服务商 对账单 parsing template (对账 / 跨境财务 sub-tab 1 回款核对+收汇结汇).
+#
+# PROVISIONAL — grounded in the DOCUMENTED PingPong account-statement (对账单) model, NOT a
+# real seller export. Confirm against a real statement before trusting any number:
+#   - the statement is a TRANSACTION LEDGER (one row per movement): 收款 (platform→PingPong,
+#     USD), 结汇/提现 (PingPong→境内银行, CNY), 退款, 手续费, and an 未结汇余额. The `pingpong`
+#     adapter (crossborder_adapters.py) normalizes the 收款 income into per-transaction CNY
+#     order rows, separates 退款, surfaces 未结汇 as 在途 + the FX 点差, and IGNORES the
+#     结汇/提现 rows (the bank role carries the 结汇到账 leg).
+#   - 收款 are in USD → converted to CNY at `fx.rate` (override per account with the real
+#     结汇 rate via company-brain profile_json["recon"]["fx"]).
+# This answers: did PingPong's 收款 all reach the 境内银行, and what is 未结汇/在途?
+display_name_cn: "PingPong（收款服务商）"
+
+adapter: pingpong
+
+amount_tolerance: 0.01
+settlement_lag_days: 3        # 结汇 to 境内银行 lands a few days after 收款 (PROVISIONAL)
+
+# FX — single per-period 结汇 rate (PROVISIONAL). point_spread is the 汇兑点差 surfaced
+# as an attribution.
+fx:
+  rate: 7.15                  # USD -> CNY 结汇 rate (PROVISIONAL — confirm per period/account)
+  point_spread: 0.004         # 0.4% 汇兑点差 (PROVISIONAL)
+  base_currency: "CNY"
+
+# Raw PingPong 对账单 column headers the adapter reads (override if your export differs).
+pingpong_columns:
+  txn_time: "交易时间"
+  txn_type: "交易类型"
+  txn_no: "交易号"
+  order_ref: "关联订单号"
+  amount: "金额"
+  currency: "币种"
+  fee: "手续费"
+  status: "状态"
+
+# 交易类型 → canonical bucket. Matched as lower-cased substrings; more-specific buckets
+# win (reserve/refund/settle/fee before income).
+pingpong_taxonomy:
+  reserve: ["未结汇", "账户余额", "期末余额", "balance", "未提现"]
+  refund: ["退款", "退单", "refund", "chargeback", "拒付"]
+  settle: ["结汇", "提现", "withdraw", "settlement", "汇出"]
+  fee: ["手续费", "服务费", "fee", "charge"]
+  income: ["收款", "入账", "platform", "payment", "deposit", "回款"]
+
+# The adapter emits synthetic rows already keyed by canonical fields → platform
+# column_map is identity. Bank keeps human column defaults (override per account).
+column_map:
+  platform:
+    merchant_order_no: "merchant_order_no"
+    status: "status"
+    event_time: "event_time"
+    batch_no: "batch_no"
+    currency: "currency"
+    gross_amount: "gross_amount"
+    net_amount: "net_amount"
+    fee: "fee"
+    commission: "commission"
+    coupon_amount: "coupon_amount"
+    refund_amount: "refund_amount"
+  bank:                        # 境内银行 结汇到账流水 (CNY) — provisional defaults
+    event_time: "交易日期"
+    net_amount: "收入金额"
+    counterparty: "对方户名"
+    batch_no: "凭证号"
+  ledger:
+    merchant_order_no: "订单号"
+    event_time: "下单时间"
+    gross_amount: "订单金额"
+
+status_map:
+  SUCCESS: "SUCCESS"
+  REFUND: "REFUND"
+
+attribution_rules:
+  - cause: "收款服务商手续费"
+    kind: "fee"
+  - cause: "退款/退单"
+    kind: "refund"
+  - cause: "在途/未结算"
+    kind: "in_transit"
+  - cause: "未结汇余额"
+    kind: "reserve_held"
+  - cause: "汇兑点差(FX)"
+    kind: "fx_spread"

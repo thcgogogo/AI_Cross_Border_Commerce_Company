@@ -1602,6 +1602,45 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 }
 
 /* ===========================================================================
+   跨境财务 (cross-border finance hub) — cross_border.js section shell
+   The 贸易方式 selector + sub-tab bar sit in a topbar above the re-homed
+   recon/ar sub-view (which brings its own .page wrapper).
+   =========================================================================== */
+/* center the header/selector/tabs to line up with the centered body (.page-narrow),
+   matching .page's max-width + auto margins + horizontal padding (it was flush-left). */
+.cbf-topbar { max-width: 760px; margin: 0 auto; padding: 30px 24px 0; }
+.cbf-head { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.cbf-head-text { flex: 1 1 320px; min-width: 0; }
+.cbf-title { margin: 0 0 6px; font-size: 22px; }
+.cbf-lead { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.cbf-mode { flex: none; display: flex; flex-direction: column; gap: 4px; }
+.cbf-mode-label { font-size: 12px; font-weight: 700; color: var(--muted); }
+.cbf-mode .field-input { width: auto; min-width: 150px; }
+.cbf-tabs { margin-top: 14px; }
+/* severity chip on a 跨境财务 worklist row (reuses the recon .exc-row scaffolding) */
+.exc-sev { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 1px 8px; }
+.exc-sev.sev-高 { color: #c0392b; background: #fdecea; }
+.exc-sev.sev-中 { color: #b9770e; background: #fff5e6; }
+.exc-sev.sev-低 { color: var(--muted); background: var(--accent-soft, #f0f2f7); }
+.cbf-upstream { margin: -8px 0 14px; font-size: 13px; }
+/* 定时任务 panel on the cross-border run form */
+.cbf-sched-grid { display: flex; gap: 12px; flex-wrap: wrap; }
+.cbf-sched-grid .field { flex: 1 1 180px; }
+.cbf-sched-chans { display: flex; gap: 16px; margin: 4px 0 12px; font-size: 14px; }
+.cbf-sched-chans label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.cbf-sched-list { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.cbf-sched-job { display: flex; gap: 10px; align-items: center; justify-content: space-between;
+  border: 1px solid var(--line, #e6e8ee); border-radius: 10px; padding: 10px 12px; flex-wrap: wrap; }
+.cbf-sched-job-txt { display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+.cbf-sched-acts { display: flex; gap: 8px; flex: none; }
+.form-msg { font-size: 13px; color: #c0392b; margin: 8px 0 0; }
+.form-msg.ok { color: var(--accent, #2563eb); }
+@media (max-width: 640px) {
+  .cbf-mode { flex: 1 1 100%; }
+  .cbf-mode .field-input { width: 100%; }
+}
+
+/* ===========================================================================
    对账 / 平台结算核对 (settlement reconciliation) — recon.js view
    =========================================================================== */
 .page-head { margin: 8px 0 18px; }

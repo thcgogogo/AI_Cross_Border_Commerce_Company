@@ -28,9 +28,9 @@ const CARDS = [
     desc: "上传数据，AI 团队生成可溯源的经营报告，并按时送达。",
   },
   {
-    path: "/recon", icon: RECON_ICON,
-    title: "对账 / 平台结算核对",
-    desc: "上传结算单、银行流水与账本，核对每一笔钱是否都到账。",
+    path: "/cross-border", icon: RECON_ICON,
+    title: "跨境财务",
+    desc: "出口跨境电商一站核对：回款核对·收汇结汇·三流合一·进项发票·退税，可溯源交付。",
   },
 ];
 

@@ -30,6 +30,7 @@ import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
+from . import crossborder_adapters
 from . import settlement_templates as templates
 
 # Amount equality tolerance (the fen). Two amounts match within ±1 分 by default.
@@ -174,9 +175,14 @@ def _is_refund(txn):
 # ---------------------------------------------------------------------------
 # The reconciliation core (pure — operates on NormalizedTxn lists)
 # ---------------------------------------------------------------------------
-def reconcile(platform, bank, ledger, *, pack, learned_rules=None, period_label=None):
+def reconcile(platform, bank, ledger, *, pack, learned_rules=None, period_label=None,
+              cross_border=None):
     """Reconcile the three normalized source lists. Returns the engine output dict
-    (see module docstring). Pure: no DB, no LLM, no file IO."""
+    (see module docstring). Pure: no DB, no LLM, no file IO.
+
+    `cross_border` (optional) carries a platform adapter's extras — reserve (held →
+    在途) and the FX 点差. It is None for every domestic pack, so the arithmetic below
+    is identical to the original in that case."""
     platform = platform or []
     bank = bank or []
     ledger = ledger or []
@@ -195,7 +201,13 @@ def reconcile(platform, bank, ledger, *, pack, learned_rules=None, period_label=
         if not p.get("_fee_known") and eff_fee_rate:
             fee = (p.get("net_amount") or _ZERO) * Decimal(str(eff_fee_rate))
         p["_fee"] = fee
-        p["_net_settle"] = (p.get("net_amount") or _ZERO) - fee  # what reaches the bank
+        # what actually reaches the bank — net of fee AND commission, consistent with the
+        # headline `settled` below. (Domestic packs carry commission=0, so they are
+        # unchanged; cross-border packs, e.g. Amazon, emit a separate commission, and
+        # omitting it here would over-state L3 batch totals + 在途 and push 未解释差异
+        # negative by exactly the commission.)
+        p["_net_settle"] = ((p.get("net_amount") or _ZERO) - fee
+                            - (p.get("commission") or _ZERO))
 
     # --- Headline aggregates (every figure deterministic) ---
     gross = sum((p.get("gross_amount") or _ZERO for p in success), _ZERO)        # 应收
@@ -216,11 +228,21 @@ def reconcile(platform, bank, ledger, *, pack, learned_rules=None, period_label=
             et = p.get("event_time")
             if et is not None and _add_days(et, lag) > bank_end:
                 in_transit_orders.append(p)
-    in_transit = sum((p["_net_settle"] for p in in_transit_orders), _ZERO)
+    in_transit_lag = sum((p["_net_settle"] for p in in_transit_orders), _ZERO)
     withdraw_diff = _ZERO  # MVP: no 提现 row type yet (later phase)
 
+    # Cross-border extras (from a platform adapter, e.g. Amazon FF V2). 准备金/reserve is
+    # money the platform is HOLDING — legitimately not yet arrived → folded into 在途 so
+    # it never inflates 未解释差异. The FX 点差 is a surfaced cost (attribution only). Both
+    # are 0 for every domestic pack (no adapter), so the residual below is unchanged.
+    cb = cross_border or {}
+    reserve_amount = _money(cb.get("reserve"))
+    reserve_count = int(cb.get("reserve_count") or 0)
+    fx_spread = _money(cb.get("fx_spread"))
+    in_transit = in_transit_lag + reserve_amount
+
     # Residual the boss cares about: platform-settled money that did NOT arrive and
-    # isn't legitimately in transit. Independent of in_transit (NOT a plug).
+    # isn't legitimately in transit (lag) or held in reserve. Independent (NOT a plug).
     unexplained_amount = settled - arrived - in_transit - withdraw_diff
 
     # --- L1 订单匹配 (账本 ↔ 平台) ---
@@ -234,9 +256,14 @@ def reconcile(platform, bank, ledger, *, pack, learned_rules=None, period_label=
     unexplained_count = sum(1 for e in exceptions if e["cause"] == CAUSE_UNEXPLAINED)
 
     # --- Attributions (explained reductions), driven by the pack's rule order ---
+    # The 在途 line is the lag-based in-transit; 准备金 is its own line. commission /
+    # reserve_held / fx_spread only render if the pack declares those kinds (cross-border
+    # packs do; domestic packs don't → identical output).
     attributions = _build_attributions(
         rules, fee_total, len(success), refund_total, len(refunds),
-        in_transit, len(in_transit_orders), withdraw_diff)
+        in_transit_lag, len(in_transit_orders), withdraw_diff,
+        commission=commission, n_commission=len(success),
+        reserve=reserve_amount, n_reserve=reserve_count, fx_spread=fx_spread)
 
     # --- Bridge-balance self-audit (pure Python; independent of the residual) ---
     # Checks the platform statement is internally consistent: Σ应结金额 == 应收 − 优惠.
@@ -265,9 +292,22 @@ def reconcile(platform, bank, ledger, *, pack, learned_rules=None, period_label=
     name = (pack.get("display_name_cn") or pack.get("_key") or "结算平台")
     source_rows, facts = _build_provenance(
         name, gross, len(success), settled, fee_total, refund_total, len(refunds),
-        in_transit, len(in_transit_orders), arrived, len(bank),
+        in_transit_lag, len(in_transit_orders), arrived, len(bank),
         unexplained_amount, unexplained_count, lag,
-        platform_file=_first_file(platform), bank_file=_first_file(bank))
+        platform_file=_first_file(platform), bank_file=_first_file(bank),
+        reserve=reserve_amount, n_reserve=reserve_count, fx_spread=fx_spread,
+        currency_in=cb.get("currency_in"), fx_rate=cb.get("fx_rate"))
+
+    # A compact per-order list (success orders only), persisted in the result blob for
+    # DOWNSTREAM 跨境财务 sub-tabs to read (三流合一 imports the 订单 leg from here so the
+    # seller needn't re-upload). NOT exposed in the customer-safe recon payload
+    # (_settlement_report_to_dict selects keys), and capped so a huge run can't bloat it.
+    orders_out = [{
+        "ref": (p.get("merchant_order_no") or p.get("platform_txn_no") or ""),
+        "amount": _f2(p.get("gross_amount") or _ZERO),
+        "net": _f2(p.get("_net_settle") or _ZERO),
+        "date": (p["event_time"].isoformat() if p.get("event_time") else ""),
+    } for p in success[:5000] if (p.get("merchant_order_no") or p.get("platform_txn_no"))]
 
     return {
         "summary": summary,
@@ -277,6 +317,7 @@ def reconcile(platform, bank, ledger, *, pack, learned_rules=None, period_label=
         "bridge": bridge,
         "source_rows": source_rows,
         "facts_block": facts,
+        "orders": orders_out,
     }
 
 
@@ -436,15 +477,24 @@ def _apply_learned_rules(exceptions, learned_rules):
 
 
 def _build_attributions(rules, fee_total, n_fee, refund_total, n_refund,
-                        in_transit, n_transit, withdraw_diff):
+                        in_transit, n_transit, withdraw_diff,
+                        *, commission=_ZERO, n_commission=0,
+                        reserve=_ZERO, n_reserve=0, fx_spread=_ZERO):
     """Build the explained-reduction list in the pack's declared rule order. Each
     entry is {cause, kind, amount, count, human_cn}. Zero-amount rules are kept
-    (so the report can say 本期无退款) but flagged."""
+    (so the report can say 本期无退款) but flagged. The `commission` / `reserve_held` /
+    `fx_spread` kinds are cross-border additions — only the packs that declare them
+    (e.g. Amazon) emit them; domestic packs never reference these kinds."""
     handlers = {
         "fee": (fee_total, n_fee, lambda a, n: f"支付手续费合计 ¥{_fmt(a)}（{n} 笔）"),
+        "commission": (commission, n_commission,
+                       lambda a, n: f"平台佣金合计 ¥{_fmt(a)}（{n} 笔）"),
         "refund": (refund_total, n_refund, lambda a, n: f"退款/退货合计 ¥{_fmt(a)}（{n} 笔）"),
         "in_transit": (in_transit, n_transit,
                        lambda a, n: f"在途/未结算 ¥{_fmt(a)}（{n} 笔）"),
+        "reserve_held": (reserve, n_reserve,
+                         lambda a, n: f"账户准备金(reserve) ¥{_fmt(a)}（{n} 笔）"),
+        "fx_spread": (fx_spread, 0, lambda a, n: f"汇兑点差(FX) ¥{_fmt(a)}"),
         "withdraw_diff": (withdraw_diff, 0, lambda a, n: f"提现差额 ¥{_fmt(a)}"),
     }
     out = []
@@ -467,10 +517,13 @@ def _build_attributions(rules, fee_total, n_fee, refund_total, n_refund,
 def _build_provenance(platform_name, gross, n_success, settled, fee_total,
                       refund_total, n_refund, in_transit, n_transit, arrived, n_bank,
                       unexplained_amount, unexplained_count, lag,
-                      platform_file, bank_file):
+                      platform_file, bank_file,
+                      *, reserve=_ZERO, n_reserve=0, fx_spread=_ZERO,
+                      currency_in=None, fx_rate=None):
     """Return (source_rows, facts). source_rows are verification.py-shaped 5-key
     dicts the orchestrator renders into the 数据来源与核验 table; facts are the
-    `human_cn`-with-【N】 lines the writer must reproduce verbatim."""
+    `human_cn`-with-【N】 lines the writer must reproduce verbatim. The reserve / FX
+    facts are appended only for a cross-border run (both 0 otherwise)."""
     rows, facts = [], []
     anchor = [0]
 
@@ -484,12 +537,18 @@ def _build_provenance(platform_name, gross, n_success, settled, fee_total,
         facts.append(f"{claim_cn} ¥{_fmt(value)}【{n}】（{detail}）")
         return n
 
-    add("应收（订单总额）", gross, f"{platform_name}结算单 {n_success} 笔成功订单求和")
+    cur = (currency_in or "").strip()
+    fx_note = f"，原币 {cur}，汇率 {fx_rate}" if (cur and fx_rate is not None) else ""
+    add("应收（订单总额）", gross, f"{platform_name}结算单 {n_success} 笔成功订单求和{fx_note}")
     add("实收（平台应结净额）", settled, "已扣手续费/退款/佣金")
     add("总手续费", fee_total, f"{n_success} 笔成功订单手续费求和")
     if n_refund or refund_total:
         add("总退款", refund_total, f"{n_refund} 笔退款求和")
     add("在途/未结算", in_transit, f"{n_transit} 笔，预计 T+{lag} 到账")
+    if reserve or n_reserve:
+        add("账户准备金(reserve)", reserve, f"{n_reserve} 笔，平台保留未结算（计入在途）")
+    if fx_spread:
+        add("汇兑点差(FX)", fx_spread, f"按汇率 {fx_rate} 折算的汇兑点差成本")
     add("银行实际到账", arrived, f"{n_bank} 笔银行到账求和", source=bank_file)
     # The amount is the bank-arrival gap (实收 − 到账 − 在途); the worklist count is a
     # SEPARATE figure (it also includes order-level 单边/部分匹配 items), so the fact must
@@ -507,14 +566,23 @@ def reconcile_records(records_by_role, pack, *, learned_rules=None, period_label
     `records_by_role` = {"platform": [...], "bank": [...], "ledger": [...]} with raw
     rows keyed by each source's own column headers."""
     names = file_names or {}
-    plat = normalize_rows(records_by_role.get("platform"), "platform", pack,
+    # Cross-border seam: a pack may name a pre-normalization adapter (e.g. Amazon FF V2)
+    # that aggregates a multi-row-per-order export into one synthetic per-order record
+    # (in CNY) and returns the reserve/FX extras reconcile folds in. None for domestic
+    # packs (no `adapter` key) → the path below is byte-for-byte the original.
+    raw_platform = records_by_role.get("platform")
+    cross_border = None
+    adapter = crossborder_adapters.get_adapter(pack)
+    if adapter:
+        raw_platform, cross_border = adapter(raw_platform, pack)
+    plat = normalize_rows(raw_platform, "platform", pack,
                           names.get("platform", "平台结算单"))
     bank = normalize_rows(records_by_role.get("bank"), "bank", pack,
                           names.get("bank", "银行流水"))
     ledger = normalize_rows(records_by_role.get("ledger"), "ledger", pack,
                             names.get("ledger", "账本"))
     return reconcile(plat, bank, ledger, pack=pack, learned_rules=learned_rules,
-                     period_label=period_label)
+                     period_label=period_label, cross_border=cross_border)
 
 
 def run_settlement(files_by_role, pack, *, learned_rules=None, period_label=None):

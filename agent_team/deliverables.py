@@ -607,6 +607,69 @@ def build_settlement_ledger(result, out_path):
     return out_path
 
 
+def build_ar_aging_ledger(result, out_path):
+    """Build the audit-ready 应收账款 ledger .xlsx from an ar_aging_engine result dict —
+    DETERMINISTICALLY (engine numbers go straight in, never re-typed by an LLM). Sheets:
+    账龄汇总 / 客户应收 / 逾期发票清单 / 回款核销 / 未核销回款 / 异常清单(确定·疑似) /
+    数据来源与核验. Writes an UNENCRYPTED workbook (served as an ephemeral download)."""
+    result = result or {}
+    summary = result.get("summary") or {}
+    order = ["应收账款总额", "逾期总额", "current", "0-30", "31-60", "61-90", "90+",
+             "DSO", "未核销超额回款", "未结发票数", "逾期发票数", "疑似条目数"]
+    summary_rows = [[k, summary.get(k)] for k in order if k in summary]
+
+    cust_rows = [[c.get("customer_id"), c.get("customer_name"), c.get("outstanding"),
+                  c.get("credit"), c.get("grade"),
+                  "，".join(c.get("suspect_reasons") or [])]
+                 for c in (result.get("customers") or [])]
+
+    inv_rows = [[i.get("invoice_no"), i.get("customer_name"), i.get("due_date"),
+                 i.get("dpd"), i.get("bucket"), i.get("open_balance"), i.get("grade"),
+                 "，".join(i.get("suspect_reasons") or [])]
+                for i in (result.get("invoices") or []) if i.get("overdue")]
+
+    app_rows = [[a.get("payment_no"), a.get("invoice_no"), a.get("customer_id"),
+                 a.get("amount"), a.get("applied_via"), a.get("pay_date")]
+                for a in (result.get("applications") or [])]
+
+    unapplied_rows = [[u.get("payment_no"), u.get("customer_id"), u.get("amount"),
+                       u.get("kind"), u.get("invoice_ref")]
+                      for u in (result.get("unapplied") or [])]
+
+    flag_rows = [[e.get("layer"), e.get("bucket"), e.get("grade"), e.get("cause"),
+                  e.get("amount"), e.get("customer_ref"), e.get("invoice_ref"),
+                  e.get("status"), e.get("detail")]
+                 for e in (result.get("exceptions") or [])]
+
+    src_rows = [[s.get("anchor"), s.get("claim_cn"), s.get("source_file"),
+                 s.get("source_detail"), s.get("computed_by")]
+                for s in (result.get("source_rows") or [])]
+
+    data = {"sheets": [
+        {"name": "账龄汇总", "headers": ["项目", "金额 / 天数 / 数量"], "rows": summary_rows},
+        {"name": "客户应收",
+         "headers": ["客户编号", "客户名称", "未结金额", "账户余款", "分级", "疑似原因"],
+         "rows": cust_rows},
+        {"name": "逾期发票清单",
+         "headers": ["发票号", "客户", "到期日", "逾期天数", "账龄段", "未结金额",
+                     "分级", "疑似原因"], "rows": inv_rows},
+        {"name": "回款核销",
+         "headers": ["回款流水", "核销发票", "客户", "金额", "核销方式", "收款日期"],
+         "rows": app_rows},
+        {"name": "未核销回款",
+         "headers": ["回款流水", "客户", "金额", "类型", "原对应发票"],
+         "rows": unapplied_rows},
+        {"name": "异常清单",
+         "headers": ["层级", "账龄段", "分级", "归因", "金额", "客户", "发票",
+                     "状态", "说明"], "rows": flag_rows},
+        {"name": "数据来源与核验",
+         "headers": ["锚点", "数据 / 结论", "来源文件", "定位", "核验方式"],
+         "rows": src_rows},
+    ]}
+    _build_xlsx(data, out_path)
+    return out_path
+
+
 def _drive_xlsx(src_path, dest_path, edits):
     """IN-PLACE Excel editor: load an existing .xlsx, apply targeted edits, save to
     dest_path (a *_edited.xlsx copy by default; the same path when overwriting).
