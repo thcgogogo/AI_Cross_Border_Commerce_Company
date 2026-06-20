@@ -61,15 +61,34 @@ export async function mount(el, ctx) {
   await loadFusionModels();
   if (!selected.length) applyPreset(preset);
   if (state.account) {
-    // Reset the open chat when the signed-in account changes (no cross-account leakage).
     const aid = state.account.email || state.account.id || "?";
     if (aid !== lastAccountId) {
-      lastAccountId = aid; conversationId = null; messages = []; gated = false;
+      // First mount under this account. If we arrived here from an anonymous teaser
+      // chat (lastAccountId was null + we hold unsaved turns), CARRY it into per-account
+      // memory: persist the transcript as a new conversation and continue inside it.
+      const carry = (lastAccountId === null && !conversationId && messages.length)
+        ? messages.slice() : [];
+      lastAccountId = aid;
+      gated = false;
+      if (carry.length) {
+        try {
+          const r = await api.importFusionConversation(carry.map((m) => ({
+            role: m.role, content: m.content, answers: m.answers,
+            by_label: m.by_label, note: m.note })));
+          conversationId = r.conversation_id;   // keep `messages`; continue in this convo
+        } catch (e) { conversationId = null; messages = []; }
+      } else {
+        conversationId = null; messages = [];    // fresh signed-in state
+      }
     }
     await refreshConversations();
   } else {
-    // Anonymous: show the chatbot immediately, but sync the free-turn quota so a reload
-    // after the quota is spent lands straight on the gate (the server is authoritative).
+    // Anonymous: if we just signed OUT of an account, clear that chat from memory.
+    if (lastAccountId !== null) {
+      lastAccountId = null; conversationId = null; messages = []; gated = false;
+    }
+    // Show the chatbot immediately; sync the free-turn quota so a reload after the quota
+    // is spent lands straight on the gate (the server is authoritative).
     await syncAnonQuota();
   }
   render(el, ctx);

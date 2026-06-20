@@ -155,6 +155,8 @@ export const fusionChat = (payload) => postJSON("/api/fusion/chat", payload);
 export const getFusionConversations = () => getJSON("/api/fusion/conversations");
 export const getFusionConversation = (id) => getJSON(`/api/fusion/conversations/${id}`);
 export const createFusionConversation = (body) => postJSON("/api/fusion/conversations", body || {});
+export const importFusionConversation = (messages) =>
+  postJSON("/api/fusion/conversations/import", { messages });
 export const renameFusionConversation = (id, title) =>
   patchJSON(`/api/fusion/conversations/${id}`, { title });
 export const deleteFusionConversation = (id) => delJSON(`/api/fusion/conversations/${id}`);

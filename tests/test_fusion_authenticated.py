@@ -313,6 +313,44 @@ def test_rename_and_soft_delete(env, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 11b. Carry an anonymous teaser conversation into per-account memory on login
+# ---------------------------------------------------------------------------
+def test_import_anonymous_transcript(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    transcript = [
+        {"role": "user", "content": "出口退税是什么？"},
+        {"role": "assistant", "content": "出口退税是…的政策。",
+         "answers": [{"model": "deepseek-v4-flash", "label": "DSF", "ok": True, "text": "A"}],
+         "by_label": "DeepSeek V4 Flash", "note": "Fused from 1."},
+    ]
+    r = client.post("/api/fusion/conversations/import", json={"messages": transcript})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    cid = r.get_json()["conversation_id"]
+    # the transcript is now a persisted per-account conversation (decrypts back)
+    msgs = metrics_store.get_fusion_messages(cid)
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[0]["content"] == "出口退税是什么？"
+    assert msgs[1]["answers"][0]["label"] == "DSF"
+    # it shows in the account's rail, and a follow-up turn continues IN it (full memory)
+    listing = client.get("/api/fusion/conversations").get_json()["conversations"]
+    assert any(c["id"] == cid for c in listing)
+    follow = client.post("/api/fusion/chat", json={
+        "conversation_id": cid, "text": "再详细点", "models": ["deepseek-v4-flash"]})
+    assert follow.status_code == 200 and follow.get_json()["conversation_id"] == cid
+    assert len(metrics_store.get_fusion_messages(cid)) == 4   # 2 imported + 2 new
+
+
+def test_import_requires_login_and_rejects_empty(env):
+    anon = app.app.test_client()
+    assert anon.post("/api/fusion/conversations/import",
+                     json={"messages": [{"role": "user", "content": "hi"}]}).status_code == 401
+    client = _client_for(env["store"], A_EMAIL)
+    assert client.post("/api/fusion/conversations/import",
+                       json={"messages": []}).status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # 11. LOCAL_MODE hides the persistent Fusion surface (cloud-only)
 # ---------------------------------------------------------------------------
 def test_local_mode_blocks_persistent_fusion(env, monkeypatch):

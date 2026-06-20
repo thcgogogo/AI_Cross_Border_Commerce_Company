@@ -6523,6 +6523,49 @@ def fusion_conversation_create():
     return jsonify({"conversation_id": cid, "title": title})
 
 
+@app.route("/api/fusion/conversations/import", methods=["POST"])
+def fusion_conversation_import():
+    """Carry an anonymous teaser conversation into the signed-in account's memory — called
+    once, right after the visitor logs in at the gate — so the chat becomes a persisted,
+    per-account conversation and continues with full memory. Bounded (anti-abuse): a capped
+    number of turns, each truncated; and it only ever writes to the caller's OWN account."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    data = request.get_json(silent=True) or {}
+    raw = data.get("messages")
+    if not isinstance(raw, list) or not raw:
+        return jsonify({"error": "没有可导入的对话。"}), 400
+    max_msgs = 2 * config.fusion_free_anon_turns() + 2
+    cid = metrics_store.create_fusion_conversation(customer["id"], model_tier="free")
+    kept = 0
+    for m in raw[:max_msgs]:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = (m.get("content") or "").strip()[:8000]
+        if role not in ("user", "assistant") or not content:
+            continue
+        if role == "user":
+            metrics_store.append_fusion_message(cid, "user", content)
+        else:
+            ans = m.get("answers")
+            answers = None
+            if isinstance(ans, list):
+                answers = [{k: (str(a.get(k))[:8000] if k == "text" else a.get(k))
+                            for k in ("model", "label", "ok", "text", "error") if k in a}
+                           for a in ans[:8] if isinstance(a, dict)]
+            metrics_store.append_fusion_message(
+                cid, "assistant", content, answers=answers,
+                fused_meta={"by_label": m.get("by_label"), "note": m.get("note")},
+                status="ok")
+        kept += 1
+    if not kept:
+        metrics_store.soft_delete_fusion_conversation(customer["id"], cid)
+        return jsonify({"error": "没有可导入的对话。"}), 400
+    return jsonify({"conversation_id": cid})
+
+
 @app.route("/api/fusion/conversations/<int:conversation_id>", methods=["GET"])
 def fusion_conversation_get(conversation_id):
     """Full message history of one owned conversation (decrypted; NO ¥)."""
