@@ -585,3 +585,22 @@ def test_reserve_and_refund_anon_turns(env):
     assert metrics_store.reserve_anon_fusion_turn(aid, 2) == (True, 0)
     assert metrics_store.reserve_anon_fusion_turn(None, 2)[0] is True
     assert metrics_store.anon_fusion_remaining(None, 2) == 2
+
+
+def test_admin_gets_full_fusion_fanout(env, monkeypatch):
+    """A founder/admin is NOT tier-clamped: a custom selection of models OUTSIDE the cheap
+    free allowlist fans out across ALL of them (not silently reduced to one), and the picker
+    advertises the full cap. (Regression for the founder seeing only DeepSeek answer.)"""
+    monkeypatch.setenv("ADMIN_EMAILS", A_EMAIL)
+    captured = {}
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway(captured))
+    client = _client_for(env["store"], A_EMAIL)
+    # the picker advertises full tier for the admin
+    resp = client.get("/api/fusion/models").get_json()
+    assert resp["account_tier"] == "full" and resp["model_cap"] == config.fusion_full_model_cap()
+    # a custom selection of models OUTSIDE the free allowlist all run (no clamp)
+    picks = ["deepseek-v4-flash", "MiniMax-M3", "qwen3.7-max"]
+    assert not set(picks) <= set(config.fusion_free_models()), "premise: picks are non-free"
+    client.post("/api/fusion/chat", json={"text": "hi", "models": picks})
+    called = {c["model"] for c in captured["calls"]}
+    assert set(picks) <= called, f"admin fan-out was clamped to: {called}"

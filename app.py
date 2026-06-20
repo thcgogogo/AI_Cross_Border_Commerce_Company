@@ -6192,9 +6192,14 @@ def _clamp_messages_chars(messages, max_chars):
 
 
 def _fusion_full_tier(customer):
-    """True when the account is on a PAID plan (basic/pro) → the full Fusion fan-out.
-    FREE accounts get the cheaper model split. Best-effort: any lookup hiccup → free."""
+    """True when the account gets the full Fusion fan-out: a PAID plan (basic/pro), or a
+    founder/admin. Founders are never tier-clamped — they fan out across every model they
+    configured, not just the cheap free allowlist (otherwise a selected model is silently
+    dropped before the run). FREE customers get the cheaper model split. Best-effort: any
+    lookup hiccup → free."""
     try:
+        if _is_admin(customer):
+            return True
         plan_code, _sub, _locked = metrics_store.effective_plan(customer["id"])
         return plan_code in ("basic", "pro")
     except Exception:  # noqa: BLE001 — a plan-lookup blip must never block a free chat
