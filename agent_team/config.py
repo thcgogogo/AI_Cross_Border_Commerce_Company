@@ -463,14 +463,23 @@ def fusion_loggedin_max_chars():
 def fusion_free_models():
     """The model IDs a FREE account may fan out to (the cheaper 'budget' set). The
     requested models are clamped to this allowlist so a free user can't run the
-    expensive QUALITY tier. Full fan-out is reserved for paid plans."""
+    expensive QUALITY tier. Full fan-out is reserved for paid plans.
+
+    Filtered to models whose provider key is ACTUALLY configured, so a free fan-out never
+    silently includes a dead-key model that just returns an error voice (e.g. the
+    international default's gemini/gpt/haiku on a domestic-only deployment). Falls back to
+    the unfiltered valid list only if NONE have keys (so the picker still shows something
+    rather than 400-ing)."""
+    from . import providers  # lazy — providers imports config, so a top-level import cycles
     raw = _env("FUSION_FREE_MODELS")
     if raw:
         ids = [m.strip() for m in raw.split(",") if m.strip()]
-        if ids:
-            return ids
-    # Default = the frontend BUDGET preset (cheap, broad provider spread).
-    return ["deepseek-v4-flash", "qwen-plus", "gemini-2.5-flash", "gpt-5-mini", HAIKU]
+    else:
+        # Default = the frontend BUDGET preset (cheap, broad provider spread).
+        ids = ["deepseek-v4-flash", "qwen-plus", "gemini-2.5-flash", "gpt-5-mini", HAIKU]
+    valid = [m for m in ids if get_model(m) and is_text_model(m)]
+    available = [m for m in valid if providers.model_available(m)]
+    return available or valid
 
 
 def fusion_free_model_cap():
@@ -484,10 +493,21 @@ def fusion_full_model_cap():
 
 
 def fusion_free_fuser():
-    """The reconciler model forced on the FREE tier — a cheap one (Haiku, or the
-    domestic model under TEAM_MODEL_PRESET so a no-Anthropic-key setup still fuses)."""
-    return (_env("FUSION_FREE_FUSER")
-            or (DOMESTIC_MODEL if team_model_preset() == "domestic" else HAIKU))
+    """The reconciler model forced on the FREE tier — a cheap one (Haiku, or the domestic
+    model under TEAM_MODEL_PRESET), falling back to any AVAILABLE free model so a
+    no-Anthropic-key deployment still actually fuses instead of failing the reconcile and
+    just echoing the first answer."""
+    from . import providers  # lazy — see fusion_free_models()
+    explicit = _env("FUSION_FREE_FUSER")
+    if explicit and get_model(explicit) and providers.model_available(explicit):
+        return explicit
+    preset_choice = DOMESTIC_MODEL if team_model_preset() == "domestic" else HAIKU
+    if providers.model_available(preset_choice):
+        return preset_choice
+    for m in fusion_free_models():               # first available free model
+        if providers.model_available(m):
+            return m
+    return preset_choice                          # nothing has a key — _fuse_answers degrades
 
 
 def fusion_retention_days():

@@ -604,3 +604,24 @@ def test_admin_gets_full_fusion_fanout(env, monkeypatch):
     client.post("/api/fusion/chat", json={"text": "hi", "models": picks})
     called = {c["model"] for c in captured["calls"]}
     assert set(picks) <= called, f"admin fan-out was clamped to: {called}"
+
+
+def test_free_models_filtered_to_available(env, monkeypatch):
+    """The free allowlist drops models with no configured key (so a free fan-out never
+    includes a dead-key voice like 'GPT-5 mini returned no text'); it falls back to the
+    valid list only if NONE have keys."""
+    monkeypatch.setenv("FUSION_FREE_MODELS", "deepseek-v4-flash,qwen3.7-max,MiniMax-M3,gpt-5-mini")
+    avail = {"deepseek-v4-flash", "qwen3.7-max"}
+    monkeypatch.setattr(app.providers, "model_available", lambda m: m in avail)
+    assert config.fusion_free_models() == ["deepseek-v4-flash", "qwen3.7-max"]
+    monkeypatch.setattr(app.providers, "model_available", lambda m: False)
+    assert config.fusion_free_models() == [
+        "deepseek-v4-flash", "qwen3.7-max", "MiniMax-M3", "gpt-5-mini"]  # fall back to valid
+
+
+def test_free_fuser_falls_back_to_available(env, monkeypatch):
+    """When the default free fuser (HAIKU) has no key, the free fuser falls back to an
+    available free model instead of a dead reconciler."""
+    monkeypatch.setenv("FUSION_FREE_MODELS", "deepseek-v4-flash,qwen3.7-max")
+    monkeypatch.setattr(app.providers, "model_available", lambda m: m == "deepseek-v4-flash")
+    assert config.fusion_free_fuser() == "deepseek-v4-flash"

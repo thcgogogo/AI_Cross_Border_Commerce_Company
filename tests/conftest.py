@@ -32,3 +32,10 @@ import app  # noqa: E402 — imported here (after the env default) to disable th
 
 app.limiter.enabled = False
 app.load_dotenv = lambda *args, **kwargs: None  # keep tests hermetic vs the local .env
+
+# app.py runs load_dotenv(override=True) ONCE at import (before the no-op above), which
+# seeds os.environ from the developer's .env. Drop deployment-specific Fusion config that
+# tests assume the code DEFAULT for (a local FUSION_FREE_MODELS would change the free
+# allowlist out from under the model-split tests). Tests that need them set them explicitly.
+for _k in ("FUSION_FREE_MODELS", "FUSION_FREE_FUSER"):
+    os.environ.pop(_k, None)

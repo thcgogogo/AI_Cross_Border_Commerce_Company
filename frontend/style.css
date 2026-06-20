@@ -1529,8 +1529,14 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 .fusion-new:hover { border-color: var(--accent); color: var(--accent); }
 .fusion-dock { background: var(--bg); padding-top: 8px; }
 /* Conversing: a proper chat column — the thread scrolls inside a bounded height
-   while the dock + foot stay put, so the composer never overlaps the fused answer. */
-.fusion-page.conversing { display: flex; flex-direction: column; height: calc(100vh - 150px); min-height: 440px; }
+   while the dock + foot stay put, so the composer never overlaps the fused answer.
+   The bound goes on .fusion-main (the flex parent of the topline/thread/dock), NOT the
+   whole .fusion-page: anonymous has no .fusion-app wrapper, so bounding the page lets
+   .fusion-main overflow it and spill over the global site footer. Mirrors the signed-in
+   rule above; the signed-in path bounds .fusion-main directly, so exclude it here. */
+.fusion-page.conversing:not(.signed-in) .fusion-main {
+  display: flex; flex-direction: column; height: calc(100vh - 150px); min-height: 440px;
+}
 .fusion-page.conversing .fusion-topline,
 .fusion-page.conversing .fusion-dock,
 .fusion-page.conversing .fusion-foot { flex: none; }
