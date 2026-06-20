@@ -10,9 +10,16 @@ source-verified 经营周报 (weekly business report), delivered on a schedule. 
 customer never writes a prompt, never picks a model, never sees a token. There are
 **two surfaces**:
 
-- **Fusion** (`/`) — public, no-login, multi-model chatbot: one question fans out to
-  several models and one fused answer is reconciled from them. Model names are shown
-  here (the open front door), bounded by per-IP rate limits + platform spend caps.
+- **Fusion** (`/fusion`; the `/` home is a marketing landing that funnels here) — a public,
+  **multi-turn** multi-model chatbot: one question fans out to several models and one fused
+  answer is reconciled from them. An **anonymous** visitor gets **3 free turns** (server-paid,
+  per-IP capped) then a **login gate**; **signed-in** users are free with **persisted,
+  encrypted per-conversation memory** (account-owned `fusion_conversations`/`fusion_messages`)
+  + a conversation rail + a **free-vs-paid model split** (free clamps to a cheap subset, paid
+  gets the full fan-out). The anon teaser conversation carries over into per-account memory on
+  login. Model names are shown here (the council/voices); ¥/tokens never are. Rate-limited
+  per-account (signed-in) / per-IP (anon teaser) under the platform spend caps. (The
+  founder-only `POST /api/fusion` — single-shot, shows ¥ — is separate + stays `_is_admin`-gated.)
 - **工作流** (sign-in required; the customer nav tab — formerly "Agents") — the
   report/analytics product: the AI team that turns Excel into a verified weekly report,
   delivered on a schedule. The whole flow is now ONE consolidated page, **数据分析+报告
@@ -48,7 +55,7 @@ pip install -e .              # then: tangent-agent   (loopback server + tray ic
 
 # Production
 docker compose up -d          # nginx → 4 gunicorn workers + scheduler worker + Postgres 16 + redis
-alembic upgrade head          # migrations 0001–0010 (head = 0010_ar)
+alembic upgrade head          # migrations 0001–0014 (head = 0014_anon_fusion_usage)
 ```
 
 There is **no configured linter/formatter** (no ruff/black/flake8 config); match the
@@ -105,7 +112,9 @@ reasoning models (e.g. `MiniMax-M3`) don't leak chain-of-thought into a delivera
 every metric from every run is persisted so later runs compare against history. Key
 tables: `Company`, `Run`, `Metric`, `CompanyProfile`, `GlossaryTerm`,
 `ReportPreference`, `ScheduledJob`, `Delivery`, `Feedback`, `Account`, `Device`,
-`AgentCatalog`/`AgentInstall`/`AgentRun` (marketplace), `Order` (payments), audit/spend/
+`AgentCatalog`/`AgentInstall`/`AgentRun` (marketplace), `Order` (payments),
+`FusionConversation`/`FusionMessage` (the sign-in Fusion chat memory — account-owned, NOT
+company-scoped; content encrypted at rest via `crypto.encrypt_string`), audit/spend/
 breaker tables. Schema changes go through **Alembic** (`migrations/versions/`,
 `alembic upgrade head`) — do not rely on `create_all` for production columns.
 

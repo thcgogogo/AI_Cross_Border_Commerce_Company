@@ -77,6 +77,12 @@ Moves: **定时任务** and **报告历史** move OUT of 企业大脑 into their
 Disappears from customer view (founder mode only): Your Team, Models & Pricing, Fusion, Unified
 API/keys, Token Manager, ¥ balance & top-up, token usage table.
 
+> **Update (2026-06-20):** "Fusion" above is the *founder* machinery view (single-shot, shows ¥ —
+> still admin-only). A separate **customer-facing** Fusion chatbot was later added at `/fusion`: a
+> freemium multi-model chat (3 free anonymous turns → sign in for free, persisted per-conversation
+> memory). It is a deliberate customer surface and is NOT machinery. See the two-surfaces note in
+> `README.md` / `CLAUDE.md`.
+
 ### Copy deck (old → new)
 
 | Old | New (customer-facing) |

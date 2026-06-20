@@ -335,6 +335,7 @@ the value. In dev it warns instead of exiting.
 # breaker + fires one alert + an admin reset restores service, (4) an upload is
 # ciphertext on disk but downloads with the original checksum, (5) audit rows are
 # written for login + topup + download.
+```
 
 ### 7.6 Scaling to multiple workers (rate limits behind a proxy)
 
@@ -355,27 +356,34 @@ just the why (and what to change if your topology differs):
   trusting `X-Forwarded-For` with no real proxy lets a client spoof its IP and dodge
   per-IP limits. (It also makes the audit-log client IP accurate.)
 
-### 7.7 The public Fusion chat (cost exposure)
+### 7.7 The Fusion chat (cost exposure)
 
-The home page (`/`) is an **anonymous** multi-model Fusion chatbot (`/api/fusion/chat`):
-no login, so **the server pays** for every model call on its own provider keys. Treat
-it as a deliberate, bounded cost. The guards, in order of importance:
+Fusion (`/fusion`) is a freemium multi-model chatbot: an **anonymous** visitor gets a few
+free turns (default 3) on `/api/fusion/chat` — **the server pays** for those on its own
+provider keys — then a login gate appears. Signed-in use is free (COGS is internal, never
+charged to the customer's balance) and persisted per-account. Treat the anonymous teaser as
+a deliberate, bounded cost. The guards, in order of importance:
 
 - **Set the platform spend caps** (`PLATFORM_HOURLY_CAP_YUAN` / `PLATFORM_DAILY_CAP_YUAN`,
-  §7.1) **before exposing it publicly** — anonymous Fusion spend is metered into the same
-  breaker (billed to no account), so once rolling spend crosses a cap the chat refuses
-  with 503 until you reset. This is the hard kill-switch.
-- **Per-IP rate limit** `FUSION_RATE_LIMIT` (default `10 per hour`) — needs `TRUST_PROXY`
-  set (§7.6) to key on the real client behind nginx.
-- **Per-run ceilings**: `FUSION_ANON_MAX_MODELS` (3), `FUSION_ANON_MAX_TOKENS` (800),
-  and the history clamp (`FUSION_ANON_MAX_HISTORY_MSGS` / `FUSION_ANON_MAX_CHARS`) bound
-  the fan-out, answer length, and long-conversation input cost.
+  §7.1) **before exposing it publicly** — both anonymous (billed to no account) and signed-in
+  Fusion spend are metered into the same breaker, so once rolling spend crosses a cap the chat
+  refuses with 503 until you reset. This is the hard kill-switch.
+- **Free-anon-turn cap** `FUSION_FREE_ANON_TURNS` (default `3`) — how many turns an anonymous
+  visitor gets before the login gate (counted **server-side**, atomic, keyed by the `anon_id`
+  cookie — table `anon_fusion_usage`, migration `0014` — so clearing the session can't reset it).
+- **Rate limits**: anonymous turns are per-IP (`FUSION_RATE_LIMIT`); signed-in turns are
+  **per-account** (`FUSION_ACCOUNT_RATE_LIMIT`, default `20 per day`, keyed on the customer).
+  The per-IP path needs `TRUST_PROXY` set (§7.6) to key on the real client behind nginx.
+- **Per-run ceilings** (anonymous teaser): `FUSION_ANON_MAX_MODELS`, `FUSION_ANON_MAX_TOKENS`,
+  and the history clamp (`FUSION_ANON_MAX_HISTORY_MSGS` / `FUSION_ANON_MAX_CHARS`) bound the
+  fan-out, answer length, and input cost. Signed-in turns use the free-vs-paid model split
+  (free accounts clamp to `FUSION_FREE_MODELS`, capped at `FUSION_FREE_MODEL_CAP`).
 
 Model NAMES are shown in the picker by design (this is the one surface that exposes the
-"council"), but no ¥ cost is ever returned to the public. The picker defaults to the
-cheap "经济" preset and only the models whose provider keys are set. To gate the priciest
-flagships behind login later, add a per-model `anon_ok` flag (not built yet).
-```
+"council"), but no ¥ cost is ever returned to any customer. The picker defaults to the cheap
+"经济" preset, and the free tier auto-filters to models whose provider keys are actually set.
+Signed-in chats persist per-account (encrypted at rest); anonymous turns don't, but the teaser
+conversation carries into the account on login.
 
 ## 8. Payments, subscriptions & fapiao (Phase 9)
 
@@ -553,8 +561,8 @@ seeds, portable SQL (SQLite dev / Postgres prod):
 ### 9.5 First-party analytics (founder-only)
 
 The head-of-funnel data `/admin` can't show: web visits, traffic sources, the
-visit→signup→paid funnel, and the **anonymous Fusion front door** (`/`, which
-creates no `Run`/`Order`). First-party + on-box — no third-party SDK, no off-box
+visit→signup→paid funnel, and the **anonymous Fusion teaser** (`/fusion`'s first few free
+turns, which create no `Run`/`Order`). First-party + on-box — no third-party SDK, no off-box
 calls, no raw IPs, nothing on any customer surface.
 
 - One append-only `events` table (migration `0009_events`). `agent_team/analytics.track()`

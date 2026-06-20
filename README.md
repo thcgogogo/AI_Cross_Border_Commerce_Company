@@ -22,14 +22,18 @@ console — the customer-facing promise is 成本透明，绝不超支.
 
 ---
 
-## Two surfaces: Fusion (home) + Agents
+## Two surfaces: Fusion + Agents
 
-The home page (`/`) is **Fusion** — a public, no-login, multi-model chatbot: ask once,
-several models answer, and one fused answer is reconciled from them (when one model is
-wrong, the others catch it). It's the open front door; model names are shown, anonymous
-visitors can try it, and it's bounded by a per-IP rate limit + the platform spend caps
-(see [docs/ops.md](docs/ops.md) §7.7 — **the server pays, so set the caps before going
-public**).
+**Fusion** (`/fusion`) is a public, multi-turn multi-model chatbot: ask a question, several
+models answer, and one fused answer is reconciled from them (when one model is wrong, the
+others catch it). The home page (`/`) is a marketing landing that funnels here. An anonymous
+visitor gets **3 free turns** and is then asked to **sign in** — Fusion stays free, and from
+then on every chat is a **persisted, per-conversation memory** owned by the account (encrypted
+at rest, with a conversation list to revisit past chats; the anonymous teaser even carries
+over on login). Model names are shown (the multi-model "council"); ¥ cost/tokens never are.
+Signed-in usage is bounded per-account, the anonymous teaser per-IP, all under the platform
+spend caps (see [docs/ops.md](docs/ops.md) §7.7 — **the first 3 anonymous turns are
+server-paid, so set the caps before going public**).
 
 The report/analytics product described below now lives under the **Agents** section
 (sign-in required): the AI team that turns your Excel into a source-verified weekly
@@ -217,7 +221,7 @@ Want a different split? See [docs/launch-checklist.md](docs/launch-checklist.md)
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q     # 209 passed — acceptance tests for every phase
+.venv/bin/python -m pytest -q     # 537 passed — acceptance tests for every phase
 ```
 
 Each phase ships its own acceptance suite (`tests/test_phase8_security.py`,
