@@ -6086,9 +6086,11 @@ def fusion():
                     "cost": round(total_cost, 6), "balance": balance})
 
 
-def _fuse_answers(prompt, answers, fuser):
+def _fuse_answers(prompt, answers, fuser, history=None):
     """Reconcile several model answers into one best result. Returns
-    {"text", "by", "by_label", "note"} or None if every model failed."""
+    {"text", "by", "by_label", "note"} or None if every model failed. `history` is the
+    prior conversation the candidates saw (the turns BEFORE `prompt`); pass it on a
+    follow-up so the fuser judges with the same context, not a bare last message."""
     ok = [a for a in answers if a.get("ok")]
     if not ok:
         return None
@@ -6121,9 +6123,17 @@ def _fuse_answers(prompt, answers, fuser):
         "self-contained answer for the user. Do NOT mention the candidates, the other "
         "models, or that any fusion happened — just give the best possible response."
     )
-    user = (f"The user's prompt was:\n\n{prompt}\n\n"
+    # Give the fuser the SAME conversation context the candidates saw, so it can reconcile
+    # a history-dependent follow-up (a pronoun, "再详细点", "那第二个方案呢") correctly instead
+    # of judging a context-free last message.
+    ctx = ""
+    convo = "\n".join(f"{'用户' if h.get('role') == 'user' else '助手'}：{h.get('content', '')}"
+                      for h in (history or []) if h.get("content"))
+    if convo:
+        ctx = f"Earlier turns in this conversation, for context:\n\n{convo}\n\n"
+    user = (f"{ctx}The user's latest prompt was:\n\n{prompt}\n\n"
             f"Here are the candidate answers:\n\n{transcript}\n\n"
-            "Now write the single best, fact-checked answer to the user's prompt.")
+            "Now write the single best, fact-checked answer to the user's latest prompt.")
     fuse_messages = [{"role": "system", "content": system},
                      {"role": "user", "content": user}]
     try:
@@ -6382,12 +6392,14 @@ def _fusion_chat_anonymous():
 
     with ThreadPoolExecutor(max_workers=min(len(picked), 5)) as pool:
         answers = list(pool.map(run_one, picked))
-    fused = _fuse_answers(messages[-1]["content"], answers, fuser)
+    fused = _fuse_answers(messages[-1]["content"], answers, fuser, history=messages[:-1])
     _record_anonymous_fusion_spend(answers, fused)
 
-    # Count this free turn only once a real answer was produced (a 400/blocked request
-    # above never reaches here, so a wasted turn isn't charged against the free quota).
-    session["fusion_free_used"] = int(session.get("fusion_free_used", 0) or 0) + 1
+    # Count this free turn only when a real answer was produced. A turn where every model
+    # failed (fused is None → the UI shows '没有模型成功作答') must NOT spend the quota, or a
+    # misconfigured deployment would gate a visitor to login having answered nothing.
+    if fused:
+        session["fusion_free_used"] = int(session.get("fusion_free_used", 0) or 0) + 1
 
     public_answers = [{k: a[k] for k in ("model", "label", "ok", "text", "error") if k in a}
                       for a in answers]
@@ -6425,6 +6437,14 @@ def _fusion_chat_member(customer):
 
     tier = "full" if _fusion_full_tier(customer) else "free"
 
+    # Free-vs-paid model split (server-enforced — the client can't widen the free tier).
+    # Resolve + validate the council BEFORE touching a conversation, so a bad request never
+    # leaves an orphan empty conversation behind in the rail.
+    picked, fuser_override = _fusion_pick_models(models, tier)
+    if not picked:
+        return jsonify({"error": "Pick at least one text model."}), 400
+    fuser = fuser_override or (data.get("fuser") or "auto").strip()
+
     # Resolve / create the conversation (account-owned; 404 on a foreign/missing id).
     conversation_id = data.get("conversation_id")
     if conversation_id:
@@ -6446,12 +6466,6 @@ def _fusion_chat_member(customer):
     # Guarantee a provider-valid context (starts with user, strictly alternates) so a
     # prior failed turn's dangling user message can't poison the conversation.
     messages = _fusion_normalize_alternation(messages)
-
-    # Free-vs-paid model split (server-enforced — the client can't widen the free tier).
-    picked, fuser_override = _fusion_pick_models(models, tier)
-    if not picked:
-        return jsonify({"error": "Pick at least one text model."}), 400
-    fuser = fuser_override or (data.get("fuser") or "auto").strip()
 
     # Founder-only funnel event — now attributed to the signed-in account.
     analytics.track(EVENT_FUSION_QUERY, account_id=customer["id"],
@@ -6476,7 +6490,7 @@ def _fusion_chat_member(customer):
     with ThreadPoolExecutor(max_workers=min(len(picked), 5)) as pool:
         answers = list(pool.map(run_one, picked))
 
-    fused = _fuse_answers(text, answers, fuser)
+    fused = _fuse_answers(text, answers, fuser, history=messages[:-1])
 
     # BILLING — meter every real upstream call to the account as COGS, but DON'T charge
     # the balance (Fusion is free; subscribers are quota-gated, not balance-gated). This
@@ -6575,7 +6589,9 @@ def fusion_conversation_import():
     max_msgs = 2 * config.fusion_free_anon_turns() + 2
     cid = metrics_store.create_fusion_conversation(customer["id"], model_tier="free")
     kept = 0
-    for m in raw[:max_msgs]:
+    # Keep the MOST RECENT turns (the latest question is what the user wants continued),
+    # matching the [-N:] windowing used everywhere else — not the oldest.
+    for m in raw[-max_msgs:]:
         if not isinstance(m, dict):
             continue
         role = m.get("role")
@@ -6591,10 +6607,15 @@ def fusion_conversation_import():
                 answers = [{k: (str(a.get(k))[:8000] if k == "text" else a.get(k))
                             for k in ("model", "label", "ok", "text", "error") if k in a}
                            for a in ans[:8] if isinstance(a, dict)]
+            # A teaser turn where every model failed (the client placeholder) must be
+            # imported as 'failed' so it never re-enters context as a real prior answer.
+            failed = bool(m.get("failed")) or (
+                isinstance(answers, list) and answers
+                and not any(a.get("ok") for a in answers))
             metrics_store.append_fusion_message(
                 cid, "assistant", content, answers=answers,
                 fused_meta={"by_label": m.get("by_label"), "note": m.get("note")},
-                status="ok")
+                status="failed" if failed else "ok")
         kept += 1
     if not kept:
         metrics_store.soft_delete_fusion_conversation(customer["id"], cid)

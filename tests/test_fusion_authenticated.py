@@ -430,3 +430,124 @@ def test_local_mode_blocks_persistent_fusion(env, monkeypatch):
     assert client.get("/api/fusion/conversations").status_code == 404
     # the public model list stays reachable (names only)
     assert client.get("/api/fusion/models").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 12. Batch-2 audit fixes (persistence / crypto / fuser context / import / anon)
+# ---------------------------------------------------------------------------
+def test_append_rejects_soft_deleted_conversation(env, monkeypatch):
+    """A late append to a conversation soft-deleted mid-flight is a no-op — it can't land
+    turns (and bill COGS) into a thread the user can no longer see."""
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    cid = client.post("/api/fusion/chat", json={"text": "hi", "models": ["deepseek-v4-flash"]}
+                      ).get_json()["conversation_id"]
+    before = len(metrics_store.get_fusion_messages(cid))
+    acc_id = env["store"].find_by_email(A_EMAIL)["id"]
+    assert metrics_store.soft_delete_fusion_conversation(acc_id, cid)
+    assert metrics_store.append_fusion_message(cid, "user", "late") is None
+    assert len(metrics_store.get_fusion_messages(cid)) == before
+
+
+def test_strict_decrypt_drops_foreign_ciphertext(env):
+    """A value encrypted under a key that's been rotated out of FERNET_KEYS is token-shaped
+    but undecryptable here → strict decrypt returns None, never the raw 'gAAAAA…' string."""
+    foreign = Fernet(Fernet.generate_key()).encrypt(b"secret").decode()
+    assert foreign.startswith("gAAAAA")
+    assert crypto.decrypt_string_strict(foreign) is None
+    assert crypto.decrypt_string_strict(crypto.encrypt_string("hi")) == "hi"  # active key
+    assert crypto.decrypt_string_strict("plain text") == "plain text"          # legacy plaintext
+
+
+def test_undecryptable_message_content_not_surfaced(env):
+    """If a stored turn's content can't be decrypted (key rotated out), the read path drops
+    it to '' — it never reaches the UI nor re-enters the next turn's model context."""
+    acc_id = env["store"].find_by_email(A_EMAIL)["id"]
+    cid = metrics_store.create_fusion_conversation(acc_id, model_tier="free")
+    metrics_store.append_fusion_message(cid, "user", "hello")
+    foreign = Fernet(Fernet.generate_key()).encrypt("乱码".encode()).decode()
+    with sqlite3.connect(env["dbpath"]) as conn:
+        conn.execute("UPDATE fusion_messages SET content=? WHERE conversation_id=?",
+                     (foreign, cid))
+        conn.commit()
+    msgs = metrics_store.get_fusion_messages(cid)
+    assert msgs and msgs[0]["content"] == "" and not msgs[0]["content"].startswith("gAAAAA")
+    assert app._fusion_history_messages(msgs) == []   # ciphertext can't re-enter context
+
+
+def test_fuser_receives_conversation_history(env, monkeypatch):
+    """On a follow-up, the fuser is given the prior conversation (not just the bare last
+    turn) so it can reconcile a history-dependent answer."""
+    captured = {}
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway(captured))
+    client = _client_for(env["store"], A_EMAIL)
+    cid = client.post("/api/fusion/chat", json={
+        "text": "首都是哪", "models": ["deepseek-v4-flash", "qwen-plus"]}).get_json()["conversation_id"]
+    captured["calls"].clear()
+    client.post("/api/fusion/chat", json={
+        "conversation_id": cid, "text": "再详细点", "models": ["deepseek-v4-flash", "qwen-plus"]})
+    fuse_calls = [c for c in captured["calls"]
+                  if any("Fusion judge" in m.get("content", "") for m in c["messages"])]
+    assert fuse_calls, "no fuser call was captured"
+    user_msg = next(m["content"] for m in fuse_calls[0]["messages"] if m["role"] == "user")
+    assert "首都是哪" in user_msg and "再详细点" in user_msg
+
+
+def test_bad_models_dont_create_orphan_conversation(env, monkeypatch):
+    """A paid request whose models are all invalid 400s WITHOUT leaving an orphan empty
+    conversation behind in the rail."""
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    monkeypatch.setattr(app.metrics_store, "effective_plan",
+                        lambda *a, **k: ("pro", None, False))  # paid: no allowlist fallback
+    client = _client_for(env["store"], A_EMAIL)
+    r = client.post("/api/fusion/chat", json={"text": "hi", "models": ["no-such-model-xyz"]})
+    assert r.status_code == 400
+    assert client.get("/api/fusion/conversations").get_json()["conversations"] == []
+
+
+def test_import_keeps_newest_turns(env, monkeypatch):
+    """Carry-over keeps the MOST RECENT turns (not the oldest), so the latest question is
+    never dropped when the transcript exceeds the import cap."""
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    cap = 2 * config.fusion_free_anon_turns() + 2
+    transcript = [{"role": "user", "content": f"q{i}"} for i in range(cap + 3)]
+    cid = client.post("/api/fusion/conversations/import",
+                      json={"messages": transcript}).get_json()["conversation_id"]
+    contents = [m["content"] for m in metrics_store.get_fusion_messages(cid)]
+    assert len(contents) == cap
+    assert contents[-1] == f"q{cap + 2}"                  # newest question survived
+    assert "q0" not in contents and "q1" not in contents  # oldest dropped
+
+
+def test_import_marks_failed_turn(env, monkeypatch):
+    """A failed teaser turn is imported as 'failed' so it never re-enters model context."""
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    transcript = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "(no answer)", "failed": True,
+         "answers": [{"model": "deepseek-v4-flash", "label": "DSF", "ok": False, "error": "x"}]},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "real answer", "by_label": "DSF", "note": "Fused from 1.",
+         "answers": [{"model": "deepseek-v4-flash", "label": "DSF", "ok": True, "text": "A"}]},
+    ]
+    cid = client.post("/api/fusion/conversations/import",
+                      json={"messages": transcript}).get_json()["conversation_id"]
+    msgs = metrics_store.get_fusion_messages(cid)
+    assert [(m["role"], m["status"]) for m in msgs] == [
+        ("user", "ok"), ("assistant", "failed"), ("user", "ok"), ("assistant", "ok")]
+    assert [m["content"] for m in app._fusion_history_messages(msgs)] == ["q1", "q2", "real answer"]
+
+
+def test_anon_failed_turn_not_charged(env, monkeypatch):
+    """An anonymous turn where every model fails returns fused=None and must NOT spend a
+    free turn — else a misconfigured deployment gates the visitor having answered nothing."""
+    monkeypatch.setattr(app.providers, "gateway_chat",
+                        _fake_gateway(fail={"deepseek-v4-flash"}))
+    anon = app.app.test_client()
+    before = anon.get("/api/fusion/quota").get_json()["free_remaining"]
+    r = anon.post("/api/fusion/chat", json={
+        "messages": [{"role": "user", "content": "hi"}], "models": ["deepseek-v4-flash"]})
+    assert r.status_code == 200 and r.get_json()["fused"] is None
+    assert r.get_json()["free_remaining"] == before, "a failed teaser turn must not be charged"

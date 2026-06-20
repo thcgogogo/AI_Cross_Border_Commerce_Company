@@ -111,6 +111,21 @@ def decrypt_string(token):
         return token  # pre-encryption legacy row, or already-plaintext input
 
 
+def decrypt_string_strict(token):
+    """Like decrypt_string, but returns None when `token` is Fernet-shaped yet cannot be
+    decrypted — i.e. its key was rotated out of FERNET_KEYS, or encryption was switched
+    off while encrypted rows remain. This stops a caller surfacing raw 'gAAAAA…' ciphertext
+    (e.g. as a chat message, where it would also be replayed to the models as history). A
+    genuine legacy plaintext value (not token-shaped) still passes through unchanged."""
+    if token is None or token == "":
+        return token
+    plain = decrypt_string(token)
+    raw = token.encode("utf-8") if isinstance(token, str) else token
+    if plain == token and looks_encrypted(raw):
+        return None  # token-shaped but undecryptable → lost ciphertext, not plaintext
+    return plain
+
+
 # ---- file helpers ---------------------------------------------------------
 def encrypt_file_in_place(path):
     """Encrypt the file at `path`, overwriting it with ciphertext. No-op when

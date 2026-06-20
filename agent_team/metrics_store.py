@@ -3476,12 +3476,15 @@ def _fusion_convo_dict(c):
 
 
 def _fusion_msg_dict(m):
-    """Decrypt one stored turn into a plain dict (per-model `answers` parsed)."""
-    content = crypto.decrypt_string(m.content) if m.content else ""
+    """Decrypt one stored turn into a plain dict (per-model `answers` parsed). Content that
+    can't be decrypted (a key rotated out of FERNET_KEYS) is dropped to '' rather than
+    surfaced as raw ciphertext — so it never shows in the UI nor re-enters model context."""
+    content = (crypto.decrypt_string_strict(m.content) or "") if m.content else ""
     answers = None
     if m.answers_json:
         try:
-            answers = json.loads(crypto.decrypt_string(m.answers_json))
+            dec = crypto.decrypt_string_strict(m.answers_json)
+            answers = json.loads(dec) if dec else None
         except (ValueError, TypeError):
             answers = None
     fused = ({"by": m.fused_by, "by_label": m.fused_by_label, "note": m.fused_note}
@@ -3537,7 +3540,8 @@ def get_fusion_messages(conversation_id):
     with db.session_scope() as s:
         rows = (s.query(FusionMessage)
                 .filter(FusionMessage.conversation_id == conversation_id)
-                .order_by(FusionMessage.message_index.asc()).all())
+                .order_by(FusionMessage.message_index.asc(),
+                          FusionMessage.id.asc()).all())
         return [_fusion_msg_dict(m) for m in rows]
 
 
@@ -3560,11 +3564,22 @@ def append_fusion_message(conversation_id, role, content, answers=None,
             cost_dec = round(float(cost_yuan), 6)
         except (TypeError, ValueError):
             cost_dec = None
+    from sqlalchemy import func
     with db.session_scope() as s:
-        c = s.get(FusionConversation, conversation_id)
-        if c is None:
+        # Lock the conversation row so two concurrent appends to the SAME conversation
+        # can't both read the counter and collide on message_index (real on Postgres; a
+        # harmless no-op on SQLite, which has no concurrency here). Also reject a
+        # conversation soft-deleted mid-flight, so a late append can't land in a hidden
+        # thread (bills COGS into something the user can no longer see).
+        c = (s.query(FusionConversation)
+             .filter_by(id=conversation_id).with_for_update().one_or_none())
+        if c is None or c.status != FUSION_CONVO_ACTIVE:
             return None
-        idx = int(c.message_count or 0)
+        # Derive the index from the actual max row under the lock (authoritative — survives
+        # any drift in the denormalized counter), then keep the counter in sync.
+        max_idx = (s.query(func.max(FusionMessage.message_index))
+                   .filter(FusionMessage.conversation_id == conversation_id).scalar())
+        idx = int(max_idx) + 1 if max_idx is not None else 0
         m = FusionMessage(
             conversation_id=conversation_id, message_index=idx, role=role,
             content=enc_content, answers_json=enc_answers,
