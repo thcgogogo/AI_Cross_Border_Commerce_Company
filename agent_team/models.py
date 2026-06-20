@@ -1142,3 +1142,39 @@ class AnonFusionUsage(Base):
     used = Column(Integer, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+FUSION_ATTACH_READY = "ready"
+FUSION_ATTACH_DELETED = "deleted"        # soft-deleted with its conversation
+FUSION_ATTACH_STATUSES = (FUSION_ATTACH_READY, FUSION_ATTACH_DELETED)
+
+FUSION_ATTACH_DOCUMENT = "document"      # parsed to text (file_tools) and injected as context
+FUSION_ATTACH_IMAGE = "image"            # reserved for the vision release (R2)
+
+
+class FusionAttachment(Base):
+    """A file a SIGNED-IN user attached to a Fusion conversation. The raw file is stored
+    ENCRYPTED at rest (crypto.encrypt_file_in_place); the text extracted by
+    file_tools.parse_file is kept ENCRYPTED in `parsed_text` so a chat turn injects it
+    without re-reading the file. Account-owned + conversation-scoped (no cross-thread leak);
+    soft-deleted with its conversation. `message_index` is NULL while the attachment is
+    pending (uploaded before the turn) and stamped when that user turn is persisted."""
+    __tablename__ = "fusion_attachments"
+
+    id = Column(Integer, primary_key=True)
+    conversation_id = Column(Integer, ForeignKey("fusion_conversations.id"),
+                             nullable=False, index=True)
+    account_id = Column(String(32), nullable=False, index=True)   # ownership double-check
+    message_index = Column(Integer, nullable=True)                # set when the turn persists
+    filename = Column(String(255), nullable=False)
+    media_type = Column(String(100), nullable=True)
+    kind = Column(String(16), nullable=False, default=FUSION_ATTACH_DOCUMENT,
+                  server_default=FUSION_ATTACH_DOCUMENT)
+    file_size = Column(Integer, nullable=False, default=0)
+    content_hash = Column(String(64), nullable=True)              # sha256 (integrity / dedup)
+    char_count = Column(Integer, nullable=False, default=0)       # length of parsed_text
+    stored_path = Column(String(512), nullable=True)             # encrypted file on disk
+    parsed_text = Column(Text, nullable=True)                    # ENCRYPTED extracted text
+    status = Column(String(16), nullable=False, default=FUSION_ATTACH_READY,
+                    server_default=FUSION_ATTACH_READY)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

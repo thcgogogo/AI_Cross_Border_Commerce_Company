@@ -38,7 +38,7 @@ from sqlalchemy import text
 # Make .env authoritative for this process too (same rationale as app.py).
 load_dotenv(override=True)
 
-from agent_team import config, db, metrics_store  # noqa: E402
+from agent_team import config, db, fusion_attachments, metrics_store  # noqa: E402
 from agent_team.scheduler import ReportScheduler  # noqa: E402
 
 HEARTBEAT_INTERVAL_SECS = 60
@@ -158,6 +158,9 @@ def main():
     # Retention: prune dormant anonymous Fusion teaser counters (default 90 days).
     scheduler.add_system_job("anon-fusion-prune-nightly",
                              metrics_store.prune_anon_fusion_usage, "15 4 * * *")
+    # Retention: hard-delete soft-deleted Fusion attachments + their encrypted blobs.
+    scheduler.add_system_job("fusion-attachments-prune-nightly",
+                             fusion_attachments.prune, "30 4 * * *")
     scheduler.start()
     _log(f"running ({len(scheduler.job_ids())} active job(s) loaded); "
          f"heartbeat every {HEARTBEAT_INTERVAL_SECS}s.")

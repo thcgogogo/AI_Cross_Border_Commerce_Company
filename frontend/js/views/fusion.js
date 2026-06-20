@@ -38,6 +38,7 @@ let messages = [];          // [{role:"user"|"assistant", content, by_label?, an
 let sending = false;
 let error = "";
 let draft = "";             // composer text, kept across re-renders
+let pendingAttachments = [];// files staged for the next turn [{id, filename, char_count}]
 let conversations = [];     // the account's saved conversations (rail) [{id,title,...}]
 let conversationId = null;  // the open conversation's id (null = a fresh, unsaved chat)
 let loadingConvo = false;   // rehydrating a conversation from the server
@@ -203,7 +204,7 @@ async function refreshConversations() {
 
 // Map a stored server turn into the view's render shape.
 function fromServerMsg(m) {
-  if (m.role === "user") return { role: "user", content: m.content || "" };
+  if (m.role === "user") return { role: "user", content: m.content || "", attachments: m.attachments || [] };
   const failed = m.status === "failed";
   const fused = m.fused || {};
   return {
@@ -390,7 +391,10 @@ const isCorrected = (note) => /纠正|更正|修正|有误|不一致|分歧/.tes
 
 function turnHTML(m, i) {
   if (m.role === "user") {
-    return `<div class="ft-turn user"><div class="ft-bubble">${esc(m.content)}</div></div>`;
+    const atts = (m.attachments || []).map((a) =>
+      `<span class="ft-attach">📎 ${esc(a.filename)}</span>`).join("");
+    return `<div class="ft-turn user"><div class="ft-bubble">${esc(m.content)}</div>${
+      atts ? `<div class="ft-attachs">${atts}</div>` : ""}</div>`;
   }
   const answers = m.answers || [];
   const okCount = answers.filter((a) => a.ok).length;
@@ -441,12 +445,49 @@ function turnHTML(m, i) {
 }
 
 // ---- composer ---------------------------------------------------------------
+// Staged-file chips above the composer (signed-in only).
+function attachChipsHTML() {
+  if (!pendingAttachments.length) return "";
+  return `<div class="fusion-attach-chips">${pendingAttachments.map((a, i) => `
+    <span class="fusion-attach-chip"><span class="fa-name">📎 ${esc(a.filename)}</span>
+      <button type="button" class="fa-rm" data-i="${i}" aria-label="移除">&times;</button></span>`).join("")}</div>`;
+}
+
 function composerHTML(placeholder) {
   const disabled = sending ? "disabled" : "";
-  return `<form class="fusion-composer" id="fusionForm">
+  // Attachments are a signed-in feature (the anonymous teaser stays text-only).
+  const attach = state.account ? `
+    <input type="file" id="fusionFile" hidden multiple
+      accept=".pdf,.docx,.xlsx,.xls,.csv,.json,.txt,.md,.markdown,.log">
+    <button type="button" class="fusion-attach" id="fusionAttachBtn" ${disabled}
+      title="附加文件（PDF / Excel / CSV / Word / 文本）" aria-label="附加文件">📎</button>` : "";
+  return `${attachChipsHTML()}<form class="fusion-composer" id="fusionForm">
+    ${attach}
     <textarea id="fusionInput" class="fusion-input" rows="1" placeholder="${esc(placeholder || "问任何问题…")}" ${disabled}>${esc(draft)}</textarea>
     <button type="submit" class="fusion-send" id="fusionSend" ${disabled} aria-label="发送">${sending ? "…" : "↑"}</button>
   </form>`;
+}
+
+// Upload staged files. An attachment needs a conversation to live in, so a fresh chat
+// creates one first (it then appears in the rail). Signed-in only.
+async function uploadAttachments(el, ctx, files) {
+  if (!files || !files.length) return;
+  error = "";
+  try {
+    if (!conversationId) {
+      const r = await api.createFusionConversation();
+      conversationId = r.conversation_id;
+      carryPending = null;          // a real conversation now exists; nothing to carry
+      await refreshConversations();
+    }
+    for (const file of Array.from(files)) {
+      const r = await api.attachFusionFile(conversationId, file);
+      if (r && r.attachment) pendingAttachments.push(r.attachment);
+    }
+  } catch (e) {
+    error = (e && e.message) || "文件上传失败。";
+  }
+  render(el, ctx);
 }
 
 // ---- events -----------------------------------------------------------------
@@ -482,6 +523,15 @@ function wire(el, ctx) {
   const fuserSel = el.querySelector("#fusionFuser");
   if (fuserSel) fuserSel.addEventListener("change", () => { fuser = fuserSel.value; });
 
+  const fileInput = el.querySelector("#fusionFile");
+  const attachBtn = el.querySelector("#fusionAttachBtn");
+  if (attachBtn && fileInput) {
+    attachBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => uploadAttachments(el, ctx, fileInput.files));
+  }
+  el.querySelectorAll(".fa-rm").forEach((b) =>
+    b.addEventListener("click", () => { pendingAttachments.splice(Number(b.dataset.i), 1); render(el, ctx); }));
+
   const input = el.querySelector("#fusionInput");
   if (input) {
     autoGrow(input);
@@ -507,7 +557,9 @@ async function send(el, ctx) {
   if (!text) return;
   if (!selected.length) { error = "请至少选择一个模型。"; render(el, ctx); return; }
 
-  messages.push({ role: "user", content: text });
+  const sentAtts = pendingAttachments.slice();
+  pendingAttachments = [];
+  messages.push({ role: "user", content: text, attachments: sentAtts });
   draft = "";
   sending = true;
   render(el, ctx);
@@ -520,7 +572,8 @@ async function send(el, ctx) {
       // Signed-in: the SERVER is the source of truth — send the new user `text` + the
       // conversation id (null on the first turn → the server creates one + returns it);
       // prior turns are loaded from the encrypted conversation server-side.
-      ? await api.fusionChat({ conversation_id: conversationId, text, models: selected, fuser })
+      ? await api.fusionChat({ conversation_id: conversationId, text, models: selected, fuser,
+                               attachment_ids: sentAtts.map((a) => a.id) })
       // Anonymous teaser: send the client-maintained history (no server memory).
       // Skip turns where every model failed — replaying the '没有模型成功作答' placeholder
       // would feed it back to the council as a real prior answer.

@@ -126,8 +126,12 @@ from .models import (
     CB_FLAG_CLASSIFIED,
     CB_FLAG_RESOLVED,
     DunningMessage,
+    FusionAttachment,
     FusionConversation,
     FusionMessage,
+    FUSION_ATTACH_DELETED,
+    FUSION_ATTACH_DOCUMENT,
+    FUSION_ATTACH_READY,
     FUSION_CONVO_ACTIVE,
     FUSION_CONVO_DELETED,
     FUSION_MSG_OK,
@@ -3699,6 +3703,135 @@ def prune_anon_fusion_usage(older_than_days=90):
     with db.session_scope() as s:
         return int(s.query(AnonFusionUsage)
                    .filter(AnonFusionUsage.updated_at < cutoff).delete() or 0)
+
+
+# ---- Fusion file attachments (R1) -----------------------------------------
+def _fusion_attachment_public(a):
+    """Customer-safe attachment metadata — never the stored_path or parsed_text."""
+    return {"id": a.id, "filename": a.filename, "media_type": a.media_type,
+            "kind": a.kind, "file_size": int(a.file_size or 0),
+            "char_count": int(a.char_count or 0), "created_at": _iso(a.created_at)}
+
+
+def _attach_id_list(ids):
+    return [int(i) for i in (ids or [])
+            if isinstance(i, int) or (isinstance(i, str) and i.isdigit())]
+
+
+def create_fusion_attachment(conversation_id, account_id, filename, *, media_type=None,
+                             kind=FUSION_ATTACH_DOCUMENT, file_size=0, content_hash=None,
+                             char_count=0, stored_path=None, parsed_text=None):
+    """Persist one attachment row (parsed_text ENCRYPTED at rest). Returns its public dict."""
+    if not (conversation_id and account_id):
+        return None
+    with db.session_scope() as s:
+        a = FusionAttachment(
+            conversation_id=conversation_id, account_id=str(account_id),
+            filename=(filename or "file")[:255], media_type=(media_type or None),
+            kind=kind, file_size=int(file_size or 0), content_hash=(content_hash or None),
+            char_count=int(char_count or 0), stored_path=(stored_path or None),
+            parsed_text=(crypto.encrypt_string(parsed_text) if parsed_text else None),
+            status=FUSION_ATTACH_READY)
+        s.add(a)
+        s.flush()
+        return _fusion_attachment_public(a)
+
+
+def count_pending_fusion_attachments(conversation_id, account_id):
+    """How many READY, not-yet-sent (message_index NULL) attachments a conversation holds —
+    bounds how many files a user can stage before sending."""
+    if not (conversation_id and account_id):
+        return 0
+    with db.session_scope() as s:
+        return int(s.query(FusionAttachment)
+                   .filter(FusionAttachment.conversation_id == conversation_id,
+                           FusionAttachment.account_id == str(account_id),
+                           FusionAttachment.status == FUSION_ATTACH_READY,
+                           FusionAttachment.message_index.is_(None)).count())
+
+
+def get_fusion_attachments(conversation_id, account_id, ids, *, want_text=False):
+    """Fetch READY attachments by id, enforcing conversation + account ownership. Returns
+    dicts (public metadata, plus decrypted `text` when want_text), ordered to follow `ids`.
+    Silently drops any id not owned / not in this conversation / not ready."""
+    id_list = _attach_id_list(ids)
+    if not (conversation_id and account_id and id_list):
+        return []
+    with db.session_scope() as s:
+        rows = (s.query(FusionAttachment)
+                .filter(FusionAttachment.id.in_(id_list),
+                        FusionAttachment.conversation_id == conversation_id,
+                        FusionAttachment.account_id == str(account_id),
+                        FusionAttachment.status == FUSION_ATTACH_READY).all())
+        by_id = {a.id: a for a in rows}
+        out = []
+        for i in id_list:
+            a = by_id.get(i)
+            if a is None:
+                continue
+            d = _fusion_attachment_public(a)
+            if want_text:
+                d["text"] = (crypto.decrypt_string_strict(a.parsed_text) or "") if a.parsed_text else ""
+            out.append(d)
+        return out
+
+
+def link_fusion_attachments(conversation_id, account_id, ids, message_index):
+    """Stamp message_index on the given owned attachments — called when the user turn that
+    carried them is persisted. Returns the count linked."""
+    id_list = _attach_id_list(ids)
+    if not (conversation_id and account_id and id_list):
+        return 0
+    with db.session_scope() as s:
+        return int((s.query(FusionAttachment)
+                    .filter(FusionAttachment.id.in_(id_list),
+                            FusionAttachment.conversation_id == conversation_id,
+                            FusionAttachment.account_id == str(account_id))
+                    .update({FusionAttachment.message_index: int(message_index)},
+                            synchronize_session=False)) or 0)
+
+
+def fusion_attachments_by_message(conversation_id):
+    """All of a conversation's linked attachments grouped by message_index — one query for
+    rendering the history (each user bubble shows its file chips)."""
+    if not conversation_id:
+        return {}
+    out = {}
+    with db.session_scope() as s:
+        rows = (s.query(FusionAttachment)
+                .filter(FusionAttachment.conversation_id == conversation_id,
+                        FusionAttachment.status == FUSION_ATTACH_READY,
+                        FusionAttachment.message_index.isnot(None))
+                .order_by(FusionAttachment.id.asc()).all())
+        for a in rows:
+            out.setdefault(int(a.message_index), []).append(_fusion_attachment_public(a))
+    return out
+
+
+def soft_delete_fusion_attachments(conversation_id):
+    """Mark a conversation's attachments deleted (called when the conversation is deleted)."""
+    if not conversation_id:
+        return 0
+    with db.session_scope() as s:
+        return int((s.query(FusionAttachment)
+                    .filter(FusionAttachment.conversation_id == conversation_id,
+                            FusionAttachment.status == FUSION_ATTACH_READY)
+                    .update({FusionAttachment.status: FUSION_ATTACH_DELETED},
+                            synchronize_session=False)) or 0)
+
+
+def prune_fusion_attachments(older_than_days=30):
+    """Hard-delete soft-deleted attachment rows older than the window, returning their
+    stored file paths so the caller (fusion_attachments) can remove the encrypted blobs."""
+    cutoff = datetime.utcnow() - timedelta(days=int(older_than_days))
+    with db.session_scope() as s:
+        rows = (s.query(FusionAttachment)
+                .filter(FusionAttachment.status == FUSION_ATTACH_DELETED,
+                        FusionAttachment.created_at < cutoff).all())
+        paths = [a.stored_path for a in rows if a.stored_path]
+        for a in rows:
+            s.delete(a)
+        return paths
 
 
 def purge_account_conversations(account_id):

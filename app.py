@@ -53,6 +53,7 @@ from agent_team import (
     db,
     deliverables,
     delivery,
+    fusion_attachments,
     helpdocs,
     industry_packs,
     lifecycle,
@@ -6474,11 +6475,22 @@ def _fusion_chat_member(customer):
         conversation_id = metrics_store.create_fusion_conversation(
             customer["id"], model_tier=tier)
         prior = []
+    user_index = len(prior)   # the message_index the new user turn will get
+
+    # Attachments (signed-in only): pull the parsed text of any owned files this turn
+    # carries and prepend it to the user message the MODELS see. The persisted turn + the
+    # fuser keep the plain question; the files render as chips, linked by message_index.
+    attachment_ids = data.get("attachment_ids")
+    atts = (metrics_store.get_fusion_attachments(conversation_id, customer["id"],
+                                                 attachment_ids, want_text=True)
+            if isinstance(attachment_ids, list) and attachment_ids else [])
+    actx = fusion_attachments.build_attachment_context(atts)
+    user_for_models = f"{actx}\n\n{text}" if actx else text
 
     # Build the (clamped) context: stored turns + the new user turn. Older turns drop
     # from the window but stay in the DB.
     messages = _fusion_history_messages(prior)
-    messages.append({"role": "user", "content": text})
+    messages.append({"role": "user", "content": user_for_models})
     messages = messages[-config.fusion_loggedin_max_history_msgs():]
     messages = _clamp_messages_chars(messages, config.fusion_loggedin_max_chars())
     # Guarantee a provider-valid context (starts with user, strictly alternates) so a
@@ -6489,11 +6501,16 @@ def _fusion_chat_member(customer):
     analytics.track(EVENT_FUSION_QUERY, account_id=customer["id"],
                     anon_id=getattr(g, "anon_id", None), path="/api/fusion/chat",
                     ip_hash=analytics.hash_ip(_client_ip()),
-                    props={"models": picked, "fuser": fuser, "tier": tier})
+                    props={"models": picked, "fuser": fuser, "tier": tier,
+                           "attachments": len(atts)})
 
-    # Persist the user turn FIRST so the question is always recorded (even if the
-    # fan-out then fails) — never a half-saved conversation.
+    # Persist the user turn FIRST so the question is always recorded (even if the fan-out
+    # then fails) — never a half-saved conversation. The plain question is stored; the
+    # attachment text lives in fusion_attachments, linked to this turn by message_index.
     metrics_store.append_fusion_message(conversation_id, "user", text)
+    if atts:
+        metrics_store.link_fusion_attachments(conversation_id, customer["id"],
+                                              [a["id"] for a in atts], user_index)
 
     def run_one(mid):
         label = (config.get_model(mid) or {}).get("label", mid)
@@ -6641,6 +6658,34 @@ def fusion_conversation_import():
     return jsonify({"conversation_id": cid})
 
 
+@app.route("/api/fusion/conversations/<int:conversation_id>/attach", methods=["POST"])
+def fusion_conversation_attach(conversation_id):
+    """Attach a document (PDF / Excel / CSV / Word / text) to one of the signed-in account's
+    Fusion conversations. The raw file is stored encrypted; its parsed text is injected into
+    the next chat turn so every council member reads it. Sign-in required — attachments are
+    NOT offered to the anonymous teaser (cost + abuse bound). Returns the attachment's
+    customer-safe metadata (filename / size / char_count; never ¥ or the stored path)."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    _convo, err = _fusion_owned_convo_or_404(conversation_id, customer)
+    if err:
+        return err
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"error": "没有选择文件。"}), 400
+    pending = metrics_store.count_pending_fusion_attachments(conversation_id, customer["id"])
+    if pending >= config.fusion_attachments_per_message():
+        return jsonify({"error": f"一条消息最多附带 {config.fusion_attachments_per_message()} "
+                                 f"个文件，请先发送或移除已添加的文件。"}), 400
+    try:
+        att = fusion_attachments.accept_attachment(
+            customer["id"], conversation_id, f.filename, f)
+    except fusion_attachments.AttachmentError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"attachment": att})
+
+
 @app.route("/api/fusion/conversations/<int:conversation_id>", methods=["GET"])
 def fusion_conversation_get(conversation_id):
     """Full message history of one owned conversation (decrypted; NO ¥)."""
@@ -6651,9 +6696,17 @@ def fusion_conversation_get(conversation_id):
     if err:
         return err
     msgs = metrics_store.get_fusion_messages(conversation_id)
+    atts_by_idx = metrics_store.fusion_attachments_by_message(conversation_id)
+    out_msgs = []
+    for m in msgs:
+        pm = _fusion_public_message(m)
+        chips = atts_by_idx.get(m.get("message_index"))
+        if chips:
+            pm["attachments"] = chips
+        out_msgs.append(pm)
     return jsonify({"conversation_id": conversation_id,
                     "title": convo["title"] or "新对话",
-                    "messages": [_fusion_public_message(m) for m in msgs]})
+                    "messages": out_msgs})
 
 
 @app.route("/api/fusion/conversations/<int:conversation_id>", methods=["PATCH"])
@@ -6679,6 +6732,7 @@ def fusion_conversation_delete(conversation_id):
         return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
     if not metrics_store.soft_delete_fusion_conversation(customer["id"], conversation_id):
         return jsonify({"error": "对话不存在。"}), 404
+    metrics_store.soft_delete_fusion_attachments(conversation_id)   # files go with the thread
     return jsonify({"ok": True})
 
 

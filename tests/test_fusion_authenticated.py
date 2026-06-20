@@ -24,6 +24,7 @@ Network-free: providers.gateway_chat is monkeypatched. Run from the project root
 
     .venv/bin/python -m pytest tests/test_fusion_authenticated.py -v
 """
+import io
 import os
 import sqlite3
 import sys
@@ -51,6 +52,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("FERNET_KEYS", Fernet.generate_key().decode())
     dbpath = str(tmp_path / "fusion.db")
     db.init_db(dbpath)
+    monkeypatch.setattr(metrics_store, "DATA_DIR", str(tmp_path / "data"))  # attachments → tmp
     monkeypatch.setenv("ADMIN_EMAILS", "")
     store = CustomerStore(store_path=str(tmp_path / "customers.json"))
     store.create_customer([], name="Alice", starting_balance=1000.0,
@@ -625,3 +627,86 @@ def test_free_fuser_falls_back_to_available(env, monkeypatch):
     monkeypatch.setenv("FUSION_FREE_MODELS", "deepseek-v4-flash,qwen3.7-max")
     monkeypatch.setattr(app.providers, "model_available", lambda m: m == "deepseek-v4-flash")
     assert config.fusion_free_fuser() == "deepseek-v4-flash"
+
+
+# ---------------------------------------------------------------------------
+# 13. Fusion 2.0 R1 — file attachments (document understanding)
+# ---------------------------------------------------------------------------
+def _create_convo(client):
+    return client.post("/api/fusion/conversations", json={}).get_json()["conversation_id"]
+
+
+def _attach(client, cid, filename, content):
+    return client.post(f"/api/fusion/conversations/{cid}/attach",
+                       data={"file": (io.BytesIO(content), filename)},
+                       content_type="multipart/form-data")
+
+
+def test_attach_injects_file_into_council(env, monkeypatch):
+    """An attached document is parsed and its text reaches every council member, while the
+    PERSISTED user turn stays the plain question with the file linked + rendered as a chip."""
+    captured = {}
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway(captured))
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    r = _attach(client, cid, "q2.csv", b"metric,value\nZZUNIQUE_SALES,4242\n")
+    assert r.status_code == 200, r.get_data(as_text=True)
+    att = r.get_json()["attachment"]
+    assert att["filename"] == "q2.csv" and att["char_count"] > 0
+    resp = client.post("/api/fusion/chat", json={
+        "conversation_id": cid, "text": "分析这个文件", "models": ["deepseek-v4-flash"],
+        "attachment_ids": [att["id"]]})
+    assert resp.status_code == 200
+    # the parsed file content reached the model in the final user message
+    user_msg = captured["calls"][0]["messages"][-1]["content"]
+    assert "ZZUNIQUE_SALES" in user_msg and "附件" in user_msg
+    # but the persisted turn is the plain question, with the file linked + rendered
+    got = client.get(f"/api/fusion/conversations/{cid}").get_json()
+    user_turn = got["messages"][0]
+    assert user_turn["content"] == "分析这个文件"
+    assert [a["filename"] for a in user_turn.get("attachments", [])] == ["q2.csv"]
+
+
+def test_attach_rejects_executable_magic_bytes(env, monkeypatch):
+    """Magic bytes beat the extension: an ELF binary renamed .csv is rejected."""
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    r = _attach(client, cid, "evil.csv", b"\x7fELF\x02\x01\x01\x00 malicious payload")
+    assert r.status_code == 400 and "可执行" in r.get_json()["error"]
+
+
+def test_attach_rejects_unsupported_type(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    r = _attach(client, cid, "archive.zip", b"PK\x03\x04 zip data")
+    assert r.status_code == 400 and "不支持" in r.get_json()["error"]
+
+
+def test_attach_ownership_isolation(env, monkeypatch):
+    """Account B cannot attach to account A's conversation (404, no disclosure)."""
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    cid = _create_convo(_client_for(env["store"], A_EMAIL))
+    b = _client_for(env["store"], B_EMAIL)
+    assert _attach(b, cid, "x.csv", b"a,b\n1,2\n").status_code == 404
+
+
+def test_attachment_text_encrypted_at_rest(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    _attach(client, cid, "secret.csv", b"col\nSENSITIVE_VALUE\n")
+    rows = sqlite3.connect(env["dbpath"]).execute(
+        "SELECT parsed_text FROM fusion_attachments").fetchall()
+    assert rows and rows[0][0].startswith("gAAAAA"), "parsed text not encrypted at rest"
+    assert "SENSITIVE_VALUE" not in rows[0][0]
+    assert "SENSITIVE_VALUE" in crypto.decrypt_string(rows[0][0])
+
+
+def test_anonymous_cannot_attach(env):
+    anon = app.app.test_client()
+    r = anon.post("/api/fusion/conversations/1/attach",
+                  data={"file": (io.BytesIO(b"a,b\n1,2\n"), "x.csv")},
+                  content_type="multipart/form-data")
+    assert r.status_code == 401

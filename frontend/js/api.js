@@ -160,6 +160,11 @@ export const importFusionConversation = (messages) =>
 export const renameFusionConversation = (id, title) =>
   patchJSON(`/api/fusion/conversations/${id}`, { title });
 export const deleteFusionConversation = (id) => delJSON(`/api/fusion/conversations/${id}`);
+export const attachFusionFile = (conversationId, file) => {
+  const fd = new FormData();
+  fd.append("file", file);
+  return postForm(`/api/fusion/conversations/${conversationId}/attach`, fd);
+};
 
 // ---- billing ------------------------------------------------------------------
 export const getPlans = () => getJSON("/api/plans");

@@ -492,6 +492,22 @@ def fusion_full_model_cap():
     return _env_int("FUSION_FULL_MODEL_CAP", 5) or 5
 
 
+# Extensions Fusion accepts as DOCUMENT attachments — the set file_tools.parse_file reads.
+# (Images are handled separately by the vision release, R2.)
+FUSION_ATTACHMENT_EXTS = frozenset(
+    {"pdf", "docx", "xlsx", "xls", "csv", "json", "txt", "md", "markdown", "log", "text"})
+
+
+def fusion_attachment_max_bytes():
+    """Max size of one Fusion attachment (bounds parse cost + at-rest storage)."""
+    return _env_int("FUSION_ATTACHMENT_MAX_BYTES", 15 * 1024 * 1024) or 15 * 1024 * 1024
+
+
+def fusion_attachments_per_message():
+    """Max attachments a signed-in user can send with one Fusion turn."""
+    return _env_int("FUSION_ATTACHMENTS_PER_MESSAGE", 5) or 5
+
+
 def fusion_free_fuser():
     """The reconciler model forced on the FREE tier — a cheap one (Haiku, or the domestic
     model under TEAM_MODEL_PRESET), falling back to any AVAILABLE free model so a
