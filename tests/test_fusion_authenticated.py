@@ -551,3 +551,37 @@ def test_anon_failed_turn_not_charged(env, monkeypatch):
         "messages": [{"role": "user", "content": "hi"}], "models": ["deepseek-v4-flash"]})
     assert r.status_code == 200 and r.get_json()["fused"] is None
     assert r.get_json()["free_remaining"] == before, "a failed teaser turn must not be charged"
+
+
+def test_anon_free_turns_enforced_server_side(env, monkeypatch):
+    """The teaser cap is enforced SERVER-SIDE (anon_fusion_usage, keyed on the anon_id
+    cookie) — not the editable session cookie. The turn over the cap 401s with
+    login_required; a different visitor gets its own fresh allowance."""
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    monkeypatch.setenv("FUSION_FREE_ANON_TURNS", "2")
+    anon = app.app.test_client()
+    payload = {"messages": [{"role": "user", "content": "hi"}], "models": ["deepseek-v4-flash"]}
+    r1 = anon.post("/api/fusion/chat", json=payload)
+    assert r1.status_code == 200 and r1.get_json()["free_remaining"] == 1
+    r2 = anon.post("/api/fusion/chat", json=payload)
+    assert r2.status_code == 200 and r2.get_json()["free_remaining"] == 0
+    r3 = anon.post("/api/fusion/chat", json=payload)
+    assert r3.status_code == 401 and r3.get_json().get("login_required") is True
+    # a different visitor (fresh client → fresh anon_id) has its own allowance
+    other = app.app.test_client()
+    assert other.post("/api/fusion/chat", json=payload).status_code == 200
+
+
+def test_reserve_and_refund_anon_turns(env):
+    """The server-side teaser counter caps at the limit and refunds a returned turn; with
+    no anon_id it never blocks (the per-IP limit + spend breaker are the backstops)."""
+    aid = "anon-unit-xyz"
+    assert metrics_store.reserve_anon_fusion_turn(aid, 2) == (True, 1)
+    assert metrics_store.reserve_anon_fusion_turn(aid, 2) == (True, 0)
+    assert metrics_store.reserve_anon_fusion_turn(aid, 2) == (False, 0)   # capped
+    assert metrics_store.anon_fusion_remaining(aid, 2) == 0
+    metrics_store.refund_anon_fusion_turn(aid)
+    assert metrics_store.anon_fusion_remaining(aid, 2) == 1               # gave one back
+    assert metrics_store.reserve_anon_fusion_turn(aid, 2) == (True, 0)
+    assert metrics_store.reserve_anon_fusion_turn(None, 2)[0] is True
+    assert metrics_store.anon_fusion_remaining(None, 2) == 2

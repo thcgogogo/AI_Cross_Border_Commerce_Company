@@ -155,6 +155,9 @@ def main():
     # Retention: prune analytics events older than 180 days (default of prune_events).
     scheduler.add_system_job("events-prune-nightly",
                              analytics.prune_events, "0 4 * * *")
+    # Retention: prune dormant anonymous Fusion teaser counters (default 90 days).
+    scheduler.add_system_job("anon-fusion-prune-nightly",
+                             metrics_store.prune_anon_fusion_usage, "15 4 * * *")
     scheduler.start()
     _log(f"running ({len(scheduler.job_ids())} active job(s) loaded); "
          f"heartbeat every {HEARTBEAT_INTERVAL_SECS}s.")

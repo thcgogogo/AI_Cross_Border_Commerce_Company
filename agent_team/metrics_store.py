@@ -37,6 +37,7 @@ from sqlalchemy import func
 from . import config, crypto, db
 from .models import (
     ACCOUNT_ACTIVE,
+    AnonFusionUsage,
     AUDIT_ACTIONS,
     CODE_PURPOSES,
     DELIVERY_FAILED,
@@ -3632,6 +3633,72 @@ def soft_delete_fusion_conversation(account_id, conversation_id):
         c.status = FUSION_CONVO_DELETED
         c.updated_at = datetime.utcnow()
         return True
+
+
+# ---- anonymous Fusion teaser counter (server-side, keyed on anon_id) -------
+def reserve_anon_fusion_turn(anon_id, limit):
+    """Atomically reserve one free anonymous teaser turn for `anon_id`. The conversation
+    counter is the editable session cookie no more — it lives here, row-locked so two
+    concurrent requests can't both pass the cap. Returns (allowed: bool, remaining: int);
+    refund with refund_anon_fusion_turn() if the run produced no answer / was blocked. With
+    no anon_id we don't block (the per-IP rate limit + spend breaker are the backstops)."""
+    limit = int(limit)
+    if not anon_id:
+        return True, limit
+    from sqlalchemy.exc import IntegrityError
+    now = datetime.utcnow()
+    with db.session_scope() as s:
+        row = (s.query(AnonFusionUsage)
+               .filter_by(anon_id=anon_id).with_for_update().one_or_none())
+        if row is None:
+            try:
+                with s.begin_nested():            # SAVEPOINT — survive a concurrent insert
+                    s.add(AnonFusionUsage(anon_id=anon_id, used=0,
+                                          created_at=now, updated_at=now))
+                    s.flush()
+                row = (s.query(AnonFusionUsage)
+                       .filter_by(anon_id=anon_id).with_for_update().one())
+            except IntegrityError:
+                row = (s.query(AnonFusionUsage)
+                       .filter_by(anon_id=anon_id).with_for_update().one())
+        used = int(row.used or 0)
+        if used >= limit:
+            return False, 0
+        row.used = used + 1
+        row.updated_at = now
+        return True, max(0, limit - row.used)
+
+
+def refund_anon_fusion_turn(anon_id):
+    """Give a reserved teaser turn back when the run produced no answer or was blocked."""
+    if not anon_id:
+        return
+    with db.session_scope() as s:
+        row = (s.query(AnonFusionUsage)
+               .filter_by(anon_id=anon_id).with_for_update().one_or_none())
+        if row is not None and int(row.used or 0) > 0:
+            row.used = int(row.used) - 1
+            row.updated_at = datetime.utcnow()
+
+
+def anon_fusion_remaining(anon_id, limit):
+    """Free anonymous teaser turns left for `anon_id` (the quota endpoint + chat replies)."""
+    limit = int(limit)
+    if not anon_id:
+        return limit
+    with db.session_scope() as s:
+        row = s.query(AnonFusionUsage).filter_by(anon_id=anon_id).one_or_none()
+        used = int(row.used or 0) if row is not None else 0
+        return max(0, limit - used)
+
+
+def prune_anon_fusion_usage(older_than_days=90):
+    """Delete anon teaser counters untouched for `older_than_days` (housekeeping — a
+    long-absent visitor then gets a fresh teaser). Returns the row count removed."""
+    cutoff = datetime.utcnow() - timedelta(days=int(older_than_days))
+    with db.session_scope() as s:
+        return int(s.query(AnonFusionUsage)
+                   .filter(AnonFusionUsage.updated_at < cutoff).delete() or 0)
 
 
 def purge_account_conversations(account_id):

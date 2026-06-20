@@ -6304,9 +6304,12 @@ def _record_anonymous_fusion_spend(answers, fused):
         pass
 
 
-def _fusion_anon_free_remaining():
-    """Free anonymous turns left in this session (the freemium teaser counter)."""
-    return max(0, config.fusion_free_anon_turns() - int(session.get("fusion_free_used", 0) or 0))
+def _fusion_anon_free_remaining(anon_id=None):
+    """Free anonymous teaser turns left for this visitor — read from the SERVER-SIDE
+    counter (keyed on the long-lived anon_id cookie), not the editable session cookie."""
+    if anon_id is None:
+        anon_id = getattr(g, "anon_id", None)
+    return metrics_store.anon_fusion_remaining(anon_id, config.fusion_free_anon_turns())
 
 
 @app.route("/api/fusion/quota", methods=["GET"])
@@ -6334,19 +6337,15 @@ def fusion_chat():
 
 
 def _fusion_chat_anonymous():
-    """The freemium teaser: up to config.fusion_free_anon_turns() free turns per anon
-    session (counted in the signed session cookie), server-paid, NOT persisted. The 4th
-    turn returns 401 with login_required so the UI can gate. Body: {"messages":[...],
-    "models":[...], "fuser":...} — client-maintained history (no server memory)."""
-    if _fusion_anon_free_remaining() <= 0:
-        return jsonify({"error": "免费体验已用完，登录后可免费继续对话。",
-                        "login_required": True}), 401
+    """The freemium teaser: up to config.fusion_free_anon_turns() free turns per visitor,
+    counted SERVER-SIDE (keyed on the anon_id cookie and RESERVED before the run, so
+    concurrent requests can't all pass the gate and a cleared session cookie can't reset
+    it), server-paid, NOT persisted. The next turn over the cap returns 401 with
+    login_required so the UI can gate. Body: {"messages":[...], "models":[...], "fuser":...}."""
+    anon_id = getattr(g, "anon_id", None)
+    limit = config.fusion_free_anon_turns()
 
-    # Global spend breaker (anonymous → the server pays on its own keys).
-    allowed, reason = platform_guard.check()
-    if not allowed:
-        return jsonify({"error": reason}), 503
-
+    # Validate the body BEFORE reserving a turn — a malformed request never spends quota.
     data = request.get_json(silent=True) or {}
     raw_messages = data.get("messages")
     models = data.get("models")
@@ -6361,6 +6360,20 @@ def _fusion_chat_anonymous():
             messages.append({"role": role, "content": content.strip()})
     if not messages or messages[-1]["role"] != "user":
         return jsonify({"error": "Type a question to start."}), 400
+
+    # Reserve one free turn up front — the ATOMIC, server-side gate (replaces the editable
+    # session-cookie counter). Refunded below on any path that doesn't deliver an answer.
+    allowed, _rem = metrics_store.reserve_anon_fusion_turn(anon_id, limit)
+    if not allowed:
+        return jsonify({"error": "免费体验已用完，登录后可免费继续对话。",
+                        "login_required": True}), 401
+
+    # Global spend breaker (anonymous → the server pays on its own keys).
+    ok, reason = platform_guard.check()
+    if not ok:
+        metrics_store.refund_anon_fusion_turn(anon_id)
+        return jsonify({"error": reason}), 503
+
     messages = messages[-config.fusion_anon_max_history_msgs():]
     messages = _clamp_messages_chars(messages, config.fusion_anon_max_chars())
     # Same provider-valid-context guarantee as the signed-in path (the client-supplied
@@ -6370,11 +6383,12 @@ def _fusion_chat_anonymous():
     # Anonymous runs use the cheap FREE model split too (the server pays).
     picked, fuser_override = _fusion_pick_models(models, "free")
     if not picked:
+        metrics_store.refund_anon_fusion_turn(anon_id)
         return jsonify({"error": "Pick at least one text model."}), 400
     fuser = fuser_override or (data.get("fuser") or "auto").strip()
 
     analytics.track(EVENT_FUSION_QUERY, account_id=None,
-                    anon_id=getattr(g, "anon_id", None), path="/api/fusion/chat",
+                    anon_id=anon_id, path="/api/fusion/chat",
                     ip_hash=analytics.hash_ip(_client_ip()),
                     props={"models": picked, "fuser": fuser, "tier": "anon"})
 
@@ -6395,18 +6409,17 @@ def _fusion_chat_anonymous():
     fused = _fuse_answers(messages[-1]["content"], answers, fuser, history=messages[:-1])
     _record_anonymous_fusion_spend(answers, fused)
 
-    # Count this free turn only when a real answer was produced. A turn where every model
-    # failed (fused is None → the UI shows '没有模型成功作答') must NOT spend the quota, or a
-    # misconfigured deployment would gate a visitor to login having answered nothing.
-    if fused:
-        session["fusion_free_used"] = int(session.get("fusion_free_used", 0) or 0) + 1
+    # A turn where every model failed produced no answer → give the reserved turn back, so
+    # the visitor isn't gated to login having answered nothing.
+    if not fused:
+        metrics_store.refund_anon_fusion_turn(anon_id)
 
     public_answers = [{k: a[k] for k in ("model", "label", "ok", "text", "error") if k in a}
                       for a in answers]
     public_fused = ({k: fused[k] for k in ("text", "by", "by_label", "note") if k in fused}
                     if fused else None)
     return jsonify({"answers": public_answers, "fused": public_fused, "anonymous": True,
-                    "free_remaining": _fusion_anon_free_remaining()})
+                    "free_remaining": _fusion_anon_free_remaining(anon_id)})
 
 
 def _fusion_chat_member(customer):

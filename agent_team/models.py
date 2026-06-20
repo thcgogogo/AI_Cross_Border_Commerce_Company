@@ -1126,3 +1126,19 @@ class FusionMessage(Base):
     status = Column(String(16), nullable=False, default=FUSION_MSG_OK,
                     server_default=FUSION_MSG_OK)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AnonFusionUsage(Base):
+    """Server-side free-turn counter for the ANONYMOUS Fusion teaser, keyed on the
+    long-lived `anon_id` cookie (NOT the editable per-session cookie that held the count
+    before). Lets the gate be atomic — the turn is RESERVED before the fan-out, so
+    concurrent requests can't all slip past the cap — and resistant to a cleared session
+    cookie. The per-IP rate limit + platform spend breaker stay the backstops against
+    anon_id rotation. Dormant rows are pruned so a long-absent visitor gets a fresh
+    teaser."""
+    __tablename__ = "anon_fusion_usage"
+
+    anon_id = Column(String(64), primary_key=True)              # loose ref to the cookie
+    used = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
