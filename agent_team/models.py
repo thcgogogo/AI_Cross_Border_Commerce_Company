@@ -1053,3 +1053,76 @@ class DunningMessage(Base):
     delivery_id = Column(Integer, nullable=True)       # loose ref deliveries.id
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# Fusion chat — sign-in-required, multi-turn chat with per-conversation memory.
+# A conversation is PERSONAL (owned by an ACCOUNT, not a Company): ownership is
+# `account_id` (a loose ref to accounts.id, mirroring the Company↔Account
+# natural-key convention) and every read/continue compares against the logged-in
+# account — NEVER company_id. Message `content` + `answers_json` are ENCRYPTED at
+# rest (crypto.encrypt_string) so chat text never sits plaintext in the DB. The
+# assistant `content` is the FUSED reply — the canonical text replayed as context
+# on later turns — while `answers_json` keeps the per-model voices for redisplay on
+# reopen. `cost_yuan` is metered per turn for the founder cost console and is NEVER
+# returned to a customer (Fusion COGS is internal; flat pricing is unchanged).
+# ---------------------------------------------------------------------------
+FUSION_CONVO_ACTIVE = "active"
+FUSION_CONVO_DELETED = "deleted"        # soft-delete: encrypted history is retained
+FUSION_CONVO_STATUSES = (FUSION_CONVO_ACTIVE, FUSION_CONVO_DELETED)
+
+FUSION_MSG_OK = "ok"
+FUSION_MSG_FAILED = "failed"            # a turn where every model errored (no fused text)
+FUSION_MSG_STATUSES = (FUSION_MSG_OK, FUSION_MSG_FAILED)
+
+FUSION_ROLE_USER = "user"
+FUSION_ROLE_ASSISTANT = "assistant"
+FUSION_ROLES = (FUSION_ROLE_USER, FUSION_ROLE_ASSISTANT)
+
+
+class FusionConversation(Base):
+    """One signed-in Fusion chat thread, owned by an account. Soft-deleted via
+    `status` (encrypted history is kept for retention/audit, hidden from the list);
+    `message_count` + `last_message_at` are denormalized for the conversation list.
+    `model_tier` records the fan-out tier (free|full) chosen when it was created."""
+    __tablename__ = "fusion_conversations"
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String(32), nullable=False, index=True)   # loose ref accounts.id
+    title = Column(String(255), nullable=True)
+    status = Column(String(16), nullable=False, default=FUSION_CONVO_ACTIVE,
+                    server_default=FUSION_CONVO_ACTIVE)
+    model_tier = Column(String(16), nullable=True)               # free | full (at create)
+    message_count = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_message_at = Column(DateTime, nullable=True, index=True)
+
+
+class FusionMessage(Base):
+    """One turn of a Fusion conversation. `content` and `answers_json` (the per-model
+    breakdown on assistant turns) are ENCRYPTED at rest. The assistant `content` is the
+    fused reply — the canonical text replayed as context on later turns; a turn where
+    every model errored is a `status='failed'` marker (empty content, never fed back
+    into context). `cost_yuan` is founder-internal COGS, never sent to a customer."""
+    __tablename__ = "fusion_messages"
+    __table_args__ = (Index("ix_fusion_messages_convo_index",
+                            "conversation_id", "message_index"),)
+
+    id = Column(Integer, primary_key=True)
+    conversation_id = Column(Integer, ForeignKey("fusion_conversations.id"),
+                             nullable=False, index=True)
+    message_index = Column(Integer, nullable=False)              # 0-based order in thread
+    role = Column(String(16), nullable=False)                   # user | assistant
+    content = Column(Text, nullable=True)                       # ENCRYPTED at rest
+    answers_json = Column(Text, nullable=True)                  # ENCRYPTED — per-model voices
+    fused_by = Column(String(64), nullable=True)               # fuser model id (metadata)
+    fused_by_label = Column(String(128), nullable=True)
+    fused_note = Column(Text, nullable=True)                   # canned fuser note (non-sensitive)
+    models_used = Column(String(255), nullable=True)           # comma list (display/debug)
+    input_tokens = Column(Integer, nullable=True)
+    output_tokens = Column(Integer, nullable=True)
+    cost_yuan = Column(Numeric(12, 6), nullable=True)          # founder-internal COGS
+    status = Column(String(16), nullable=False, default=FUSION_MSG_OK,
+                    server_default=FUSION_MSG_OK)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

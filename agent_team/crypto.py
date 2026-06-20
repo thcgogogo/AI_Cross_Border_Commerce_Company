@@ -80,6 +80,37 @@ def looks_encrypted(data):
     return bool(data) and data[:6] == _FERNET_MAGIC
 
 
+# ---- string helpers (DB columns) ------------------------------------------
+def encrypt_string(text):
+    """Encrypt a unicode string for storage in a DB column, returning a unicode
+    Fernet token (ascii). Pass-through (returns `text` unchanged) when encryption
+    is disabled or `text` is None/empty — so a dev DB stays plaintext and readable,
+    matching how files behave with no FERNET_KEYS set."""
+    if text is None or text == "":
+        return text
+    f = _multifernet()
+    if f is None:
+        return text
+    return f.encrypt(text.encode("utf-8")).decode("ascii")
+
+
+def decrypt_string(token):
+    """Inverse of encrypt_string — return the plaintext unicode string. Pass-through
+    when encryption is disabled; falls back to returning the input unchanged when it
+    isn't a valid token (a legacy plaintext row written before a key was set)."""
+    if token is None or token == "":
+        return token
+    f = _multifernet()
+    if f is None:
+        return token
+    from cryptography.fernet import InvalidToken
+    raw = token.encode("utf-8") if isinstance(token, str) else token
+    try:
+        return f.decrypt(raw).decode("utf-8")
+    except InvalidToken:
+        return token  # pre-encryption legacy row, or already-plaintext input
+
+
 # ---- file helpers ---------------------------------------------------------
 def encrypt_file_in_place(path):
     """Encrypt the file at `path`, overwriting it with ciphertext. No-op when

@@ -40,6 +40,12 @@ const postJSON = (url, body) => request(url, {
   body: JSON.stringify(body || {}),
 });
 const postForm = (url, formData) => request(url, { method: "POST", body: formData });
+const patchJSON = (url, body) => request(url, {
+  method: "PATCH",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body || {}),
+});
+const delJSON = (url) => request(url, { method: "DELETE" });
 
 // ---- boot / catalog ---------------------------------------------------------
 export const getMeta = () => getJSON("/api/meta");
@@ -143,7 +149,15 @@ export const runFusion = (payload) => postJSON("/api/fusion", payload);
 
 // ---- public Fusion chat (the landing page) ------------------------------------
 export const getFusionModels = () => getJSON("/api/fusion/models");
+export const getFusionQuota = () => getJSON("/api/fusion/quota");
 export const fusionChat = (payload) => postJSON("/api/fusion/chat", payload);
+// Sign-in-required Fusion conversation memory (account-owned, encrypted at rest).
+export const getFusionConversations = () => getJSON("/api/fusion/conversations");
+export const getFusionConversation = (id) => getJSON(`/api/fusion/conversations/${id}`);
+export const createFusionConversation = (body) => postJSON("/api/fusion/conversations", body || {});
+export const renameFusionConversation = (id, title) =>
+  patchJSON(`/api/fusion/conversations/${id}`, { title });
+export const deleteFusionConversation = (id) => delJSON(`/api/fusion/conversations/${id}`);
 
 // ---- billing ------------------------------------------------------------------
 export const getPlans = () => getJSON("/api/plans");

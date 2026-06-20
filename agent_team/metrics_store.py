@@ -34,7 +34,7 @@ from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import func
 
-from . import config, db
+from . import config, crypto, db
 from .models import (
     ACCOUNT_ACTIVE,
     AUDIT_ACTIONS,
@@ -125,6 +125,13 @@ from .models import (
     CB_FLAG_CLASSIFIED,
     CB_FLAG_RESOLVED,
     DunningMessage,
+    FusionConversation,
+    FusionMessage,
+    FUSION_CONVO_ACTIVE,
+    FUSION_CONVO_DELETED,
+    FUSION_MSG_OK,
+    FUSION_ROLE_USER,
+    FUSION_ROLE_ASSISTANT,
     Subscription,
     SupportRequest,
 )
@@ -3453,3 +3460,177 @@ def company_has_successful_run(company_id):
     with db.session_scope() as s:
         return s.query(Run.id).filter(Run.company_id == company_id,
                                       Run.status == RUN_SUCCEEDED).first() is not None
+
+
+# ---------------------------------------------------------------------------
+# Fusion chat — sign-in-required, multi-turn conversations (account-owned, content
+# encrypted at rest). The customer routes own the ownership check (compare against
+# the logged-in account); these helpers just read/write rows and (de)crypt content.
+# ---------------------------------------------------------------------------
+def _fusion_convo_dict(c):
+    return {"id": c.id, "account_id": c.account_id, "title": c.title,
+            "status": c.status, "model_tier": c.model_tier,
+            "message_count": int(c.message_count or 0),
+            "created_at": _iso(c.created_at), "updated_at": _iso(c.updated_at),
+            "last_message_at": _iso(c.last_message_at)}
+
+
+def _fusion_msg_dict(m):
+    """Decrypt one stored turn into a plain dict (per-model `answers` parsed)."""
+    content = crypto.decrypt_string(m.content) if m.content else ""
+    answers = None
+    if m.answers_json:
+        try:
+            answers = json.loads(crypto.decrypt_string(m.answers_json))
+        except (ValueError, TypeError):
+            answers = None
+    fused = ({"by": m.fused_by, "by_label": m.fused_by_label, "note": m.fused_note}
+             if m.role == FUSION_ROLE_ASSISTANT else None)
+    return {"id": m.id, "message_index": m.message_index, "role": m.role,
+            "content": content or "", "answers": answers, "fused": fused,
+            "status": m.status, "created_at": _iso(m.created_at)}
+
+
+def create_fusion_conversation(account_id, title=None, model_tier=None):
+    """Open a Fusion conversation for an account; return its id (or None)."""
+    if not account_id:
+        return None
+    with db.session_scope() as s:
+        c = FusionConversation(account_id=str(account_id), title=(title or None),
+                               model_tier=(model_tier or None),
+                               status=FUSION_CONVO_ACTIVE)
+        s.add(c)
+        s.flush()
+        return c.id
+
+
+def get_fusion_conversation(conversation_id):
+    """Return a conversation dict (NO messages) or None. Caller checks ownership
+    by comparing the returned `account_id` to the logged-in account."""
+    if not conversation_id:
+        return None
+    with db.session_scope() as s:
+        c = s.get(FusionConversation, conversation_id)
+        return _fusion_convo_dict(c) if c is not None else None
+
+
+def list_fusion_conversations(account_id, limit=100):
+    """Active conversations for an account, most-recent activity first (list view)."""
+    if not account_id:
+        return []
+    from sqlalchemy import func
+    order = func.coalesce(FusionConversation.last_message_at,
+                          FusionConversation.created_at).desc()
+    with db.session_scope() as s:
+        rows = (s.query(FusionConversation)
+                .filter(FusionConversation.account_id == str(account_id),
+                        FusionConversation.status == FUSION_CONVO_ACTIVE)
+                .order_by(order).limit(int(limit)).all())
+        return [_fusion_convo_dict(c) for c in rows]
+
+
+def get_fusion_messages(conversation_id):
+    """The conversation's turns in order, DECRYPTED (per-model answers parsed). Used
+    by both the history view and the multi-turn context builder."""
+    if not conversation_id:
+        return []
+    with db.session_scope() as s:
+        rows = (s.query(FusionMessage)
+                .filter(FusionMessage.conversation_id == conversation_id)
+                .order_by(FusionMessage.message_index.asc()).all())
+        return [_fusion_msg_dict(m) for m in rows]
+
+
+def append_fusion_message(conversation_id, role, content, answers=None,
+                          fused_meta=None, models_used=None, input_tokens=None,
+                          output_tokens=None, cost_yuan=None, status=None):
+    """Append a turn (encrypting `content` + `answers_json`), bump the conversation's
+    counters/timestamp, auto-title from the first user turn, and return the message id.
+    `answers` is the per-model list; `fused_meta` is {by, by_label, note}."""
+    if not conversation_id:
+        return None
+    status = status or FUSION_MSG_OK
+    enc_content = crypto.encrypt_string(content) if content else content
+    enc_answers = (crypto.encrypt_string(json.dumps(answers, ensure_ascii=False))
+                   if answers is not None else None)
+    fm = fused_meta or {}
+    cost_dec = None
+    if cost_yuan is not None:
+        try:
+            cost_dec = round(float(cost_yuan), 6)
+        except (TypeError, ValueError):
+            cost_dec = None
+    with db.session_scope() as s:
+        c = s.get(FusionConversation, conversation_id)
+        if c is None:
+            return None
+        idx = int(c.message_count or 0)
+        m = FusionMessage(
+            conversation_id=conversation_id, message_index=idx, role=role,
+            content=enc_content, answers_json=enc_answers,
+            fused_by=(fm.get("by") or None),
+            fused_by_label=(fm.get("by_label") or None),
+            fused_note=(fm.get("note") or None),
+            models_used=((",".join(models_used))[:255] if models_used else None),
+            input_tokens=(int(input_tokens) if input_tokens is not None else None),
+            output_tokens=(int(output_tokens) if output_tokens is not None else None),
+            cost_yuan=cost_dec, status=status)
+        s.add(m)
+        c.message_count = idx + 1
+        now = datetime.utcnow()
+        c.updated_at = now
+        c.last_message_at = now
+        if not c.title and role == FUSION_ROLE_USER and content:
+            c.title = content.strip().replace("\n", " ")[:60]
+        s.flush()
+        return m.id
+
+
+def rename_fusion_conversation(account_id, conversation_id, title):
+    """Rename a conversation the account owns. Returns True if updated."""
+    if not (account_id and conversation_id):
+        return False
+    new_title = (title or "").strip()[:255]
+    if not new_title:
+        return False
+    with db.session_scope() as s:
+        c = (s.query(FusionConversation)
+             .filter_by(id=conversation_id, account_id=str(account_id),
+                        status=FUSION_CONVO_ACTIVE).one_or_none())
+        if c is None:
+            return False
+        c.title = new_title
+        c.updated_at = datetime.utcnow()
+        return True
+
+
+def soft_delete_fusion_conversation(account_id, conversation_id):
+    """Soft-delete (status='deleted') a conversation the account owns — encrypted
+    history is retained but hidden from the list and refused on fetch. Returns True."""
+    if not (account_id and conversation_id):
+        return False
+    with db.session_scope() as s:
+        c = (s.query(FusionConversation)
+             .filter_by(id=conversation_id, account_id=str(account_id)).one_or_none())
+        if c is None:
+            return False
+        c.status = FUSION_CONVO_DELETED
+        c.updated_at = datetime.utcnow()
+        return True
+
+
+def purge_account_conversations(account_id):
+    """Hard-delete ALL of an account's Fusion conversations + messages — for a future
+    account-deletion path (there is no auto-cascade today). Returns the convo count."""
+    if not account_id:
+        return 0
+    with db.session_scope() as s:
+        ids = [row[0] for row in s.query(FusionConversation.id)
+               .filter(FusionConversation.account_id == str(account_id)).all()]
+        if not ids:
+            return 0
+        s.query(FusionMessage).filter(FusionMessage.conversation_id.in_(ids)).delete(
+            synchronize_session=False)
+        s.query(FusionConversation).filter(FusionConversation.id.in_(ids)).delete(
+            synchronize_session=False)
+        return len(ids)

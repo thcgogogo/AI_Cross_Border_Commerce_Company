@@ -431,6 +431,71 @@ def fusion_anon_max_chars():
     return _env_int("FUSION_ANON_MAX_CHARS", 12000) or 12000
 
 
+# ---- Signed-in Fusion — free, multi-turn, per-conversation memory ----------
+# The logged-in chatbot bills COGS to the account (never the balance — Fusion is
+# free) and is gated by a PER-ACCOUNT rate limit + a free-vs-paid model split, not
+# by money. Caps are looser than the anonymous ceilings because spend is now
+# attributed to an account (so the platform breaker + per-account ¥ cap apply).
+def fusion_account_rate_limit():
+    """Per-ACCOUNT limit on signed-in Fusion turns (keyed on customer_id, not IP).
+    The free tier's primary throttle — a runaway can't burn the server's keys."""
+    return _env("FUSION_ACCOUNT_RATE_LIMIT") or "20 per day"
+
+
+def fusion_free_anon_turns():
+    """How many turns an ANONYMOUS visitor gets free (server-paid, no persistence)
+    before login is required — the freemium teaser. Counted in the signed session
+    cookie; the per-IP rate limit + the platform breaker backstop the cost."""
+    return _env_int("FUSION_FREE_ANON_TURNS", 3) or 3
+
+
+def fusion_loggedin_max_history_msgs():
+    """Most-recent conversation turns forwarded to the models on a signed-in turn
+    (older turns stay in the DB; only the context window is bounded)."""
+    return _env_int("FUSION_LOGGEDIN_MAX_HISTORY_MSGS", 20) or 20
+
+
+def fusion_loggedin_max_chars():
+    """Total conversation characters forwarded on a signed-in turn (input-cost bound)."""
+    return _env_int("FUSION_LOGGEDIN_MAX_CHARS", 24000) or 24000
+
+
+def fusion_free_models():
+    """The model IDs a FREE account may fan out to (the cheaper 'budget' set). The
+    requested models are clamped to this allowlist so a free user can't run the
+    expensive QUALITY tier. Full fan-out is reserved for paid plans."""
+    raw = _env("FUSION_FREE_MODELS")
+    if raw:
+        ids = [m.strip() for m in raw.split(",") if m.strip()]
+        if ids:
+            return ids
+    # Default = the frontend BUDGET preset (cheap, broad provider spread).
+    return ["deepseek-v4-flash", "qwen-plus", "gemini-2.5-flash", "gpt-5-mini", HAIKU]
+
+
+def fusion_free_model_cap():
+    """Max models a FREE account fuses per turn (bounds the free fan-out cost)."""
+    return _env_int("FUSION_FREE_MODEL_CAP", 3) or 3
+
+
+def fusion_full_model_cap():
+    """Max models a PAID account fuses per turn (the full fan-out ceiling)."""
+    return _env_int("FUSION_FULL_MODEL_CAP", 5) or 5
+
+
+def fusion_free_fuser():
+    """The reconciler model forced on the FREE tier — a cheap one (Haiku, or the
+    domestic model under TEAM_MODEL_PRESET so a no-Anthropic-key setup still fuses)."""
+    return (_env("FUSION_FREE_FUSER")
+            or (DOMESTIC_MODEL if team_model_preset() == "domestic" else HAIKU))
+
+
+def fusion_retention_days():
+    """Days to keep a Fusion conversation before a (future) prune job may purge it.
+    None = keep indefinitely (the default). Tunable via FUSION_RETENTION_DAYS."""
+    return _env_int("FUSION_RETENTION_DAYS", 0) or None
+
+
 # Default gateway requests-per-minute for a key with no explicit accounts.rpm_limit.
 DEFAULT_KEY_RPM = 60
 

@@ -132,19 +132,22 @@ def test_signup_links_anon_id_to_account(fresh_db, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 6. /api/fusion/chat records the anonymous front-door query (account_id NULL)
+# 6. /api/fusion/chat records the query, now ATTRIBUTED to the signed-in account
+#    (Fusion requires login since the multi-turn-memory upgrade).
 # ---------------------------------------------------------------------------
-def test_fusion_query_records_anonymous_event(fresh_db, monkeypatch):
+def test_fusion_query_records_account_event(fresh_db, tmp_path, monkeypatch):
     def fake_gateway(model_id, messages, max_tokens=1024):
         return {"text": f"[{model_id}] ok", "input_tokens": 3, "output_tokens": 4,
                 "model": model_id, "provider": config.provider_for(model_id)}
     monkeypatch.setattr(app.providers, "gateway_chat", fake_gateway)
-    r = app.app.test_client().post("/api/fusion/chat", json={
-        "messages": [{"role": "user", "content": "你好"}],
-        "models": ["deepseek-v4-flash"], "fuser": "auto"})
+    store = _store(tmp_path, **{"user@corp.com": "password1"})
+    client = _login(store, "user@corp.com")
+    r = client.post("/api/fusion/chat", json={
+        "text": "你好", "models": ["deepseek-v4-flash"], "fuser": "auto"})
     assert r.status_code == 200, r.get_data(as_text=True)
     fq = _events("fusion_query")
-    assert len(fq) == 1 and fq[0]["account_id"] is None and fq[0]["anon_id"]
+    acct_id = store.find_by_email("user@corp.com")["id"]
+    assert len(fq) == 1 and fq[0]["account_id"] == acct_id   # now tied to the account
     assert "deepseek-v4-flash" in (fq[0]["props"] or "")
 
 

@@ -1,13 +1,16 @@
 """
-test_fusion_public.py — the PUBLIC Fusion chat (the new landing page).
+test_fusion_public.py — Fusion's PUBLIC surface: the freemium teaser.
 
-Asserts the anonymous, multi-turn, server-paid contract and its cost guards:
-  - works with NO login and returns a fused answer (no ¥ cost/balance in the body),
-  - forwards the full conversation history to each model (multi-turn),
-  - caps the model fan-out per run,
-  - is rate-limited per IP (429),
-  - /api/fusion/models lists models WITHOUT pricing,
-  - anonymous (account_id=None) spend is metered and trips the platform breaker.
+An anonymous visitor gets a few FREE turns (server-paid, NOT persisted) and then must
+log in to continue. The full authenticated, multi-turn, per-conversation-memory behavior
+(persistence, the rail, ownership) lives in test_fusion_authenticated.py. This file pins:
+  - the first N anonymous turns succeed and the free-turn counter decrements,
+  - the (N+1)th anonymous turn is refused with 401 + login_required,
+  - GET /api/fusion/quota reports the remaining free turns,
+  - anonymous turns persist NOTHING (no conversation/message rows),
+  - the conversation-memory routes still require login (401),
+  - /api/fusion/models stays public with NO pricing,
+  - metered spend still feeds the platform breaker (which refuses anonymous runs too).
 
 Network-free: providers.gateway_chat is monkeypatched. Run from the project root:
 
@@ -34,84 +37,83 @@ def client():
 
 @pytest.fixture
 def fresh_db(tmp_path):
-    """Throwaway SQLite for the breaker/spend test (isolated platform_spend table)."""
+    """Throwaway SQLite so spend/persistence assertions are isolated."""
     db.init_db(str(tmp_path / "brain.db"))
     yield
 
 
-def _fake_gateway(captured=None):
+def _fake_gateway():
     def fake(model_id, messages, max_tokens=1024):
-        if captured is not None:
-            captured.setdefault("calls", []).append({"model": model_id, "messages": messages})
         return {"text": f"[{model_id}] reply", "input_tokens": 5, "output_tokens": 7,
                 "model": model_id, "provider": config.provider_for(model_id)}
     return fake
 
 
+def _anon_turn(client, text):
+    return client.post("/api/fusion/chat", json={
+        "messages": [{"role": "user", "content": text}], "models": ["deepseek-v4-flash"]})
+
+
 # ---------------------------------------------------------------------------
-# 1. Anonymous chat returns a fused answer, with no ¥ machinery in the body
+# 1. The freemium teaser: N free anonymous turns, then a login gate
 # ---------------------------------------------------------------------------
-def test_anonymous_fusion_chat_returns_fused_answer(client, monkeypatch):
+def test_anonymous_free_turns_then_gate(fresh_db, client, monkeypatch):
+    monkeypatch.setenv("FUSION_FREE_ANON_TURNS", "3")
     monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
-    r = client.post("/api/fusion/chat", json={
-        "messages": [{"role": "user", "content": "你好"}],
-        "models": ["deepseek-v4-flash", "qwen-max"], "fuser": "auto"})
-    assert r.status_code == 200, r.get_data(as_text=True)
-    body = r.get_json()
-    assert body["fused"] and body["fused"]["text"]
-    assert len(body["answers"]) == 2
-    # No login was sent and no billing machinery may leak to the public.
-    assert "cost" not in body and "balance" not in body
-    for a in body["answers"]:
-        assert "input_tokens" not in a and "output_tokens" not in a
+    remaining = []
+    for i in range(3):
+        r = _anon_turn(client, f"问题 {i}")
+        assert r.status_code == 200, r.get_data(as_text=True)
+        body = r.get_json()
+        assert body["fused"] and body["fused"]["text"]
+        assert body.get("anonymous") is True
+        remaining.append(body["free_remaining"])
+    assert remaining == [2, 1, 0]
+    # the 4th turn is gated
+    r = _anon_turn(client, "问题 4")
+    assert r.status_code == 401
+    assert r.get_json().get("login_required") is True
 
 
 # ---------------------------------------------------------------------------
-# 2. Multi-turn: the full conversation reaches each model
+# 2. The quota endpoint reports the remaining free turns
 # ---------------------------------------------------------------------------
-def test_multi_turn_history_is_forwarded(client, monkeypatch):
-    captured = {}
-    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway(captured))
-    convo = [{"role": "user", "content": "first"},
-             {"role": "assistant", "content": "ok"},
-             {"role": "user", "content": "second"}]
-    r = client.post("/api/fusion/chat", json={"messages": convo, "models": ["deepseek-v4-flash"]})
-    assert r.status_code == 200
-    # One model → one candidate call, no separate fuser call; it saw the whole convo.
-    sent = captured["calls"][0]["messages"]
-    assert [m["content"] for m in sent] == ["first", "ok", "second"]
-
-
-# ---------------------------------------------------------------------------
-# 3. The per-run model fan-out is capped
-# ---------------------------------------------------------------------------
-def test_model_cap_enforced(client, monkeypatch):
-    monkeypatch.setenv("FUSION_ANON_MAX_MODELS", "2")
+def test_fusion_quota_endpoint(fresh_db, client, monkeypatch):
+    monkeypatch.setenv("FUSION_FREE_ANON_TURNS", "3")
     monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
-    r = client.post("/api/fusion/chat", json={
-        "messages": [{"role": "user", "content": "hi"}],
-        "models": ["deepseek-v4-flash", "qwen-max", "qwen-plus", config.HAIKU]})
-    assert r.status_code == 200
-    assert len(r.get_json()["answers"]) == 2  # capped from 4
+    q0 = client.get("/api/fusion/quota").get_json()
+    assert q0["signed_in"] is False and q0["free_remaining"] == 3
+    _anon_turn(client, "hi")
+    q1 = client.get("/api/fusion/quota").get_json()
+    assert q1["free_remaining"] == 2
 
 
 # ---------------------------------------------------------------------------
-# 4. Per-IP rate limit
+# 3. Anonymous turns persist NOTHING
 # ---------------------------------------------------------------------------
-def test_per_ip_rate_limit_429(client, monkeypatch):
-    monkeypatch.setenv("FUSION_RATE_LIMIT", "2 per hour")
+def test_anonymous_turns_are_not_persisted(fresh_db, client, monkeypatch):
+    from agent_team import metrics_store
+    from agent_team.models import FusionConversation, FusionMessage
     monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
-    monkeypatch.setattr(app.limiter, "enabled", True)  # conftest disables it suite-wide
-    app.limiter.reset()
-    payload = {"messages": [{"role": "user", "content": "hi"}], "models": ["deepseek-v4-flash"]}
-    codes = [client.post("/api/fusion/chat", json=payload).status_code for _ in range(3)]
-    app.limiter.reset()
-    assert codes[0] == 200 and codes[1] == 200
-    assert codes[2] == 429
+    _anon_turn(client, "hi")
+    with db.session_scope() as s:
+        assert s.query(FusionConversation).count() == 0
+        assert s.query(FusionMessage).count() == 0
 
 
 # ---------------------------------------------------------------------------
-# 5. Public model list carries NO pricing
+# 4. The conversation-memory routes still require login
+# ---------------------------------------------------------------------------
+def test_conversation_routes_require_login(client):
+    assert client.get("/api/fusion/conversations").status_code == 401
+    assert client.post("/api/fusion/conversations", json={}).status_code == 401
+    assert client.get("/api/fusion/conversations/1").status_code == 401
+    assert client.patch("/api/fusion/conversations/1", json={"title": "x"}).status_code == 401
+    assert client.delete("/api/fusion/conversations/1").status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# 5. Public model list carries NO pricing (the picker stays open)
 # ---------------------------------------------------------------------------
 def test_fusion_models_endpoint_has_no_pricing(client):
     r = client.get("/api/fusion/models")
@@ -125,24 +127,24 @@ def test_fusion_models_endpoint_has_no_pricing(client):
 
 
 # ---------------------------------------------------------------------------
-# 6. Cost guard — anonymous spend is metered and trips the breaker
+# 6. Cost guard — the breaker refuses anonymous runs when tripped
 # ---------------------------------------------------------------------------
-def test_anonymous_spend_feeds_breaker(fresh_db, monkeypatch):
+def test_spend_feeds_breaker(fresh_db, monkeypatch):
     from agent_team import metrics_store
     from datetime import datetime, timezone
     monkeypatch.setenv("PLATFORM_HOURLY_CAP_YUAN", "0.01")
-    # An anonymous (account_id=None) fusion call records platform spend...
     platform_guard.record_spend("deepseek", 1.0, account_id=None)
     hour_start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     assert metrics_store.sum_platform_spend(hour_start) >= 1.0
-    # ...which pushes rolling spend over the cap, so the breaker refuses the next run.
     allowed, reason = platform_guard.check()
     assert allowed is False and reason
 
 
-def test_route_refuses_when_breaker_tripped(client, monkeypatch):
-    monkeypatch.setattr(app.platform_guard, "check", lambda *a, **k: (False, "系统繁忙，请稍后再试"))
-    r = client.post("/api/fusion/chat", json={
-        "messages": [{"role": "user", "content": "hi"}], "models": ["deepseek-v4-flash"]})
+def test_breaker_refuses_anonymous_chat(fresh_db, client, monkeypatch):
+    # Within the free quota, but the breaker is tripped → 503 (not a free answer).
+    monkeypatch.setattr(app.platform_guard, "check",
+                        lambda *a, **k: (False, "系统繁忙，请稍后再试"))
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    r = _anon_turn(client, "hi")
     assert r.status_code == 503
     assert "系统繁忙" in r.get_json()["error"]

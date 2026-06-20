@@ -256,6 +256,12 @@ def _run_rate_key():
     return session.get("customer_id") or get_remote_address()
 
 
+def _fusion_account_key():
+    """Rate-limit signed-in Fusion turns PER ACCOUNT (the free-tier throttle). The
+    route requires login, so the IP fallback only guards the unauthenticated 401 path."""
+    return session.get("customer_id") or get_remote_address()
+
+
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
@@ -368,6 +374,11 @@ _LOCAL_MODE_BLOCKED_PREFIXES = (
     "/api/ar",
     "/api/crossborder",
     "/api/cross-border",   # the hyphenated 贸易方式 settings route — same cloud-only surface
+    # Sign-in-required Fusion (multi-turn memory) is a cloud SaaS surface — accounts +
+    # encrypted conversation storage don't apply to the single-user desktop daemon.
+    # (The public model list /api/fusion/models stays reachable; it's just names.)
+    "/api/fusion/chat",
+    "/api/fusion/conversations",
 )
 _LOCAL_MUTATING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
@@ -6128,14 +6139,15 @@ def _fuse_answers(prompt, answers, fuser):
 
 
 # ---------------------------------------------------------------------------
-# PUBLIC Fusion chat — the landing page. Anonymous, multi-turn, server-paid.
+# Customer Fusion chat — sign-in-required, multi-turn, per-conversation memory.
 # ---------------------------------------------------------------------------
-# Unlike /api/fusion above (founder-only, billed to the account, single-shot), this
-# is the customer-facing chatbot: no login, conversation history, and the server pays
-# on its own provider keys. With no account to bill or rate-limit, the ONLY cost
-# guards are the per-IP rate limit, the platform spend circuit breaker, and the hard
-# per-run caps in config (models / output tokens / history). Model NAMES are shown by
-# design here (the picker), but per-¥ cost is never returned to the public.
+# Unlike /api/fusion above (founder-only, single-shot, returns ¥), this is the
+# customer-facing chatbot: it requires login, persists each conversation (encrypted
+# at rest), and is FREE — COGS is billed to the account but never the balance. Cost is
+# bounded by a PER-ACCOUNT rate limit, a free-vs-paid model split, the per-account ¥
+# cap, and the platform spend breaker. Model NAMES are shown by design (the picker +
+# the per-model voices), but per-¥ cost / tokens are never returned to a customer.
+# The model list below stays public (no login) — it's only names, no pricing.
 @app.route("/api/fusion/models", methods=["GET"])
 def fusion_models():
     """Public model list for the Fusion picker — names only, NO ¥ pricing (that stays
@@ -6162,8 +6174,81 @@ def _clamp_messages_chars(messages, max_chars):
     return messages[i:]
 
 
+def _fusion_full_tier(customer):
+    """True when the account is on a PAID plan (basic/pro) → the full Fusion fan-out.
+    FREE accounts get the cheaper model split. Best-effort: any lookup hiccup → free."""
+    try:
+        plan_code, _sub, _locked = metrics_store.effective_plan(customer["id"])
+        return plan_code in ("basic", "pro")
+    except Exception:  # noqa: BLE001 — a plan-lookup blip must never block a free chat
+        return False
+
+
+def _fusion_history_messages(prior):
+    """Build the {role,content} model context from a conversation's stored turns:
+    user turns + SUCCESSFUL assistant turns (the fused reply is the canonical assistant
+    text). 'failed' assistant markers + empty turns are skipped so they never re-enter
+    context."""
+    out = []
+    for m in prior:
+        role = m.get("role")
+        content = (m.get("content") or "").strip()
+        if not content or role not in ("user", "assistant"):
+            continue
+        if role == "assistant" and m.get("status") != "ok":
+            continue
+        out.append({"role": role, "content": content})
+    return out
+
+
+def _fusion_pick_models(models, tier):
+    """Resolve a requested model list into the actual fan-out for `tier` ('free'|'full'):
+    keep text models + dedup, then apply the FREE model-split (clamp to the cheap
+    allowlist; fall back to the default free set if the client sent only premium models)
+    or the FULL cap. Returns (picked, fuser_override) — fuser_override forces a cheap
+    reconciler on the free tier, else None."""
+    picked, seen = [], set()
+    for mid in (models or []):
+        if mid in seen:
+            continue
+        if config.get_model(mid) and config.is_text_model(mid):
+            seen.add(mid)
+            picked.append(mid)
+    if tier == "full":
+        return picked[:config.fusion_full_model_cap()], None
+    allowed = [m for m in config.fusion_free_models()
+               if config.get_model(m) and config.is_text_model(m)]
+    allowed_set = set(allowed)
+    free = [m for m in picked if m in allowed_set] or allowed
+    return free[:config.fusion_free_model_cap()], config.fusion_free_fuser()
+
+
+def _fusion_owned_convo_or_404(conversation_id, customer):
+    """Load a conversation and enforce ACCOUNT ownership. Returns (convo, None) on
+    success or (None, (resp, 404)). 404 (not 403) on a foreign/missing/soft-deleted id
+    so we never disclose that another account's conversation exists."""
+    convo = metrics_store.get_fusion_conversation(conversation_id)
+    if (not convo or convo.get("account_id") != customer["id"]
+            or convo.get("status") != "active"):
+        return None, (jsonify({"error": "对话不存在。"}), 404)
+    return convo, None
+
+
+def _fusion_public_message(m):
+    """Customer-safe rendering of one stored turn — model NAMES stay (Fusion shows the
+    per-model voices) but ¥ cost / token counts NEVER do."""
+    pub = {"role": m["role"], "content": m["content"], "status": m.get("status"),
+           "created_at": m.get("created_at")}
+    if m["role"] == "assistant":
+        ans = m.get("answers") or []
+        pub["answers"] = [{k: a.get(k) for k in ("model", "label", "ok", "text", "error")}
+                          for a in ans]
+        pub["fused"] = m.get("fused")
+    return pub
+
+
 def _record_anonymous_fusion_spend(answers, fused):
-    """Feed the platform spend breaker for a server-paid (anonymous) fusion run.
+    """Feed the platform spend breaker for a server-paid (anonymous teaser) fusion run.
     Billed to NO account — just metered in ¥ so the global hourly/daily caps can trip.
     Best-effort: a metering hiccup must never fail the response."""
     try:
@@ -6175,21 +6260,49 @@ def _record_anonymous_fusion_spend(answers, fused):
         if fused and fused.get("input_tokens") is not None:
             cost = config.cost_cny(fused["by"], fused.get("input_tokens", 0), fused.get("output_tokens", 0))
             platform_guard.record_spend(config.provider_for(fused["by"]), cost, account_id=None)
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
 
+def _fusion_anon_free_remaining():
+    """Free anonymous turns left in this session (the freemium teaser counter)."""
+    return max(0, config.fusion_free_anon_turns() - int(session.get("fusion_free_used", 0) or 0))
+
+
+@app.route("/api/fusion/quota", methods=["GET"])
+def fusion_quota():
+    """Anonymous free-turn quota for the Fusion teaser — how many free turns remain in
+    this session before login is required. Signed-in users are unlimited (free)."""
+    if _current_customer():
+        return jsonify({"signed_in": True, "free_remaining": None})
+    return jsonify({"signed_in": False, "free_limit": config.fusion_free_anon_turns(),
+                    "free_remaining": _fusion_anon_free_remaining()})
+
+
 @app.route("/api/fusion/chat", methods=["POST"])
-@limiter.limit(config.fusion_rate_limit, key_func=get_remote_address)
+@limiter.limit(config.fusion_account_rate_limit, key_func=_fusion_account_key)
 def fusion_chat():
-    """PUBLIC, anonymous, multi-turn Fusion chat (the landing page calls this).
-
-    Body: {"messages": [{"role": "user"|"assistant", "content": "..."}], "models": [...],
-    "fuser": "auto"|"<id>"}. Each model answers the FULL (clamped) conversation; a fuser
-    reconciles them into one reply. No login, no per-account billing, no ¥ in the response."""
+    """Fusion chat. ANONYMOUS visitors get a few free turns (the teaser, server-paid,
+    not persisted) then must log in; SIGNED-IN users get the full multi-turn flow with
+    per-conversation memory (persisted + encrypted), free. Model NAMES are returned, ¥
+    never is."""
     load_dotenv(override=True)  # pick up any provider keys added since startup
+    customer = _current_customer()
+    if customer:
+        return _fusion_chat_member(customer)
+    return _fusion_chat_anonymous()
 
-    # Global spend breaker (anonymous → no per-account cap). The server is paying.
+
+def _fusion_chat_anonymous():
+    """The freemium teaser: up to config.fusion_free_anon_turns() free turns per anon
+    session (counted in the signed session cookie), server-paid, NOT persisted. The 4th
+    turn returns 401 with login_required so the UI can gate. Body: {"messages":[...],
+    "models":[...], "fuser":...} — client-maintained history (no server memory)."""
+    if _fusion_anon_free_remaining() <= 0:
+        return jsonify({"error": "免费体验已用完，登录后可免费继续对话。",
+                        "login_required": True}), 401
+
+    # Global spend breaker (anonymous → the server pays on its own keys).
     allowed, reason = platform_guard.check()
     if not allowed:
         return jsonify({"error": reason}), 503
@@ -6197,9 +6310,6 @@ def fusion_chat():
     data = request.get_json(silent=True) or {}
     raw_messages = data.get("messages")
     models = data.get("models")
-    fuser = (data.get("fuser") or "auto").strip()
-
-    # Sanitize the conversation: only {role,content} with safe roles + non-empty text.
     if not isinstance(raw_messages, list) or not raw_messages:
         return jsonify({"error": "Type a question to start."}), 400
     messages = []
@@ -6211,30 +6321,19 @@ def fusion_chat():
             messages.append({"role": role, "content": content.strip()})
     if not messages or messages[-1]["role"] != "user":
         return jsonify({"error": "Type a question to start."}), 400
-    # History clamp (cost): most-recent turns, then a total-character bound.
     messages = messages[-config.fusion_anon_max_history_msgs():]
     messages = _clamp_messages_chars(messages, config.fusion_anon_max_chars())
 
-    # Text models only, dedup, cap the fan-out.
-    if not isinstance(models, list) or not models:
-        return jsonify({"error": "Pick at least one model."}), 400
-    picked, seen = [], set()
-    for mid in models:
-        if mid in seen:
-            continue
-        if config.get_model(mid) and config.is_text_model(mid):
-            seen.add(mid)
-            picked.append(mid)
+    # Anonymous runs use the cheap FREE model split too (the server pays).
+    picked, fuser_override = _fusion_pick_models(models, "free")
     if not picked:
         return jsonify({"error": "Pick at least one text model."}), 400
-    picked = picked[:config.fusion_anon_max_models()]
+    fuser = fuser_override or (data.get("fuser") or "auto").strip()
 
-    # The ONLY capture of the anonymous Fusion front door (creates no Run/Order).
-    # Founder-only event; anon_id stitches it to an account if the visitor signs up.
-    analytics.track(EVENT_FUSION_QUERY, account_id=session.get("customer_id"),
+    analytics.track(EVENT_FUSION_QUERY, account_id=None,
                     anon_id=getattr(g, "anon_id", None), path="/api/fusion/chat",
                     ip_hash=analytics.hash_ip(_client_ip()),
-                    props={"models": picked, "fuser": fuser})
+                    props={"models": picked, "fuser": fuser, "tier": "anon"})
 
     max_tokens = config.fusion_anon_max_tokens()
 
@@ -6250,20 +6349,219 @@ def fusion_chat():
 
     with ThreadPoolExecutor(max_workers=min(len(picked), 5)) as pool:
         answers = list(pool.map(run_one, picked))
-
-    # The fuser reconciles the candidates against the latest user prompt (reuses the
-    # founder fusion engine; the candidates already saw the full conversation).
     fused = _fuse_answers(messages[-1]["content"], answers, fuser)
-
     _record_anonymous_fusion_spend(answers, fused)
 
-    # Public shape — strip token counts / provider internals are fine to keep (model
-    # names are shown by design) but NEVER a ¥ cost or balance.
+    # Count this free turn only once a real answer was produced (a 400/blocked request
+    # above never reaches here, so a wasted turn isn't charged against the free quota).
+    session["fusion_free_used"] = int(session.get("fusion_free_used", 0) or 0) + 1
+
     public_answers = [{k: a[k] for k in ("model", "label", "ok", "text", "error") if k in a}
                       for a in answers]
     public_fused = ({k: fused[k] for k in ("text", "by", "by_label", "note") if k in fused}
                     if fused else None)
-    return jsonify({"answers": public_answers, "fused": public_fused})
+    return jsonify({"answers": public_answers, "fused": public_fused, "anonymous": True,
+                    "free_remaining": _fusion_anon_free_remaining()})
+
+
+def _fusion_chat_member(customer):
+    """The signed-in flow: load prior turns from the (encrypted) conversation, append the
+    new user turn, fan out + fuse, persist both turns, bill COGS to the account (never the
+    balance — Fusion is free). Body: {"conversation_id"?, "text", "models", "fuser"}."""
+    # Per-account spend gate: the platform breaker + this account's daily ¥ cap (the
+    # same backstop the founder /api/fusion uses). The free tier's primary throttle is
+    # the per-account rate limit above; this caps runaway COGS.
+    allowed, reason = platform_guard.check(customer["id"], customer.get("daily_cap_yuan"))
+    if not allowed:
+        return jsonify({"error": reason}), 503
+
+    data = request.get_json(silent=True) or {}
+    # The new user turn: explicit `text`, or the last user message of a `messages[]` body.
+    text = (data.get("text") or "").strip()
+    if not text:
+        raw = data.get("messages")
+        if (isinstance(raw, list) and raw and isinstance(raw[-1], dict)
+                and raw[-1].get("role") == "user"):
+            text = (raw[-1].get("content") or "").strip()
+    if not text:
+        return jsonify({"error": "Type a question to start."}), 400
+
+    models = data.get("models")
+    if not isinstance(models, list) or not models:
+        return jsonify({"error": "Pick at least one model."}), 400
+
+    tier = "full" if _fusion_full_tier(customer) else "free"
+
+    # Resolve / create the conversation (account-owned; 404 on a foreign/missing id).
+    conversation_id = data.get("conversation_id")
+    if conversation_id:
+        _convo, err = _fusion_owned_convo_or_404(conversation_id, customer)
+        if err:
+            return err
+        prior = metrics_store.get_fusion_messages(conversation_id)
+    else:
+        conversation_id = metrics_store.create_fusion_conversation(
+            customer["id"], model_tier=tier)
+        prior = []
+
+    # Build the (clamped) context: stored turns + the new user turn. Older turns drop
+    # from the window but stay in the DB.
+    messages = _fusion_history_messages(prior)
+    messages.append({"role": "user", "content": text})
+    messages = messages[-config.fusion_loggedin_max_history_msgs():]
+    messages = _clamp_messages_chars(messages, config.fusion_loggedin_max_chars())
+
+    # Free-vs-paid model split (server-enforced — the client can't widen the free tier).
+    picked, fuser_override = _fusion_pick_models(models, tier)
+    if not picked:
+        return jsonify({"error": "Pick at least one text model."}), 400
+    fuser = fuser_override or (data.get("fuser") or "auto").strip()
+
+    # Founder-only funnel event — now attributed to the signed-in account.
+    analytics.track(EVENT_FUSION_QUERY, account_id=customer["id"],
+                    anon_id=getattr(g, "anon_id", None), path="/api/fusion/chat",
+                    ip_hash=analytics.hash_ip(_client_ip()),
+                    props={"models": picked, "fuser": fuser, "tier": tier})
+
+    # Persist the user turn FIRST so the question is always recorded (even if the
+    # fan-out then fails) — never a half-saved conversation.
+    metrics_store.append_fusion_message(conversation_id, "user", text)
+
+    def run_one(mid):
+        label = (config.get_model(mid) or {}).get("label", mid)
+        try:
+            r = providers.gateway_chat(mid, messages, max_tokens=1024)
+            return {"model": mid, "label": label, "ok": True, "text": r["text"],
+                    "provider": r["provider"], "input_tokens": r["input_tokens"],
+                    "output_tokens": r["output_tokens"]}
+        except (providers.ProviderKeyMissing, providers.LLMError) as e:
+            return {"model": mid, "label": label, "ok": False, "error": str(e)}
+
+    with ThreadPoolExecutor(max_workers=min(len(picked), 5)) as pool:
+        answers = list(pool.map(run_one, picked))
+
+    fused = _fuse_answers(text, answers, fuser)
+
+    # BILLING — meter every real upstream call to the account as COGS, but DON'T charge
+    # the balance (Fusion is free; subscribers are quota-gated, not balance-gated). This
+    # records platform_spend WITH account_id, so the per-account ¥ cap + breaker see it.
+    total_cost = 0.0
+    in_tok = out_tok = 0
+    for a in answers:
+        if a.get("ok"):
+            billed = CUSTOMERS.record_usage(customer["id"], a["model"],
+                                            a.get("input_tokens", 0), a.get("output_tokens", 0),
+                                            should_charge_balance=False)
+            total_cost += billed["cost"]
+            in_tok += a.get("input_tokens", 0)
+            out_tok += a.get("output_tokens", 0)
+    if fused and fused.get("input_tokens") is not None:
+        billed = CUSTOMERS.record_usage(customer["id"], fused["by"],
+                                        fused.get("input_tokens", 0), fused.get("output_tokens", 0),
+                                        should_charge_balance=False)
+        total_cost += billed["cost"]
+        in_tok += fused.get("input_tokens", 0)
+        out_tok += fused.get("output_tokens", 0)
+
+    # Persist the assistant turn. The per-model voices + the fused reply are stored
+    # encrypted. A turn where EVERY model failed is a 'failed' marker (no fused text
+    # re-enters context) — never a half-saved success.
+    breakdown = [{k: a.get(k) for k in ("model", "label", "ok", "text", "error") if k in a}
+                 for a in answers]
+    if fused:
+        metrics_store.append_fusion_message(
+            conversation_id, "assistant", fused["text"], answers=breakdown,
+            fused_meta={"by": fused.get("by"), "by_label": fused.get("by_label"),
+                        "note": fused.get("note")},
+            models_used=picked, input_tokens=in_tok, output_tokens=out_tok,
+            cost_yuan=total_cost, status="ok")
+    else:
+        metrics_store.append_fusion_message(
+            conversation_id, "assistant", "", answers=breakdown, models_used=picked,
+            input_tokens=in_tok, output_tokens=out_tok, cost_yuan=total_cost,
+            status="failed")
+
+    # Public shape — model NAMES stay (the voices are shown by design), NEVER ¥ / tokens.
+    public_answers = [{k: a[k] for k in ("model", "label", "ok", "text", "error") if k in a}
+                      for a in answers]
+    public_fused = ({k: fused[k] for k in ("text", "by", "by_label", "note") if k in fused}
+                    if fused else None)
+    return jsonify({"conversation_id": conversation_id,
+                    "answers": public_answers, "fused": public_fused})
+
+
+# ---------------------------------------------------------------------------
+# Fusion conversation memory — list / read / rename / soft-delete. All sign-in
+# required + ACCOUNT-ownership checked (404 on a foreign/missing id). Customer-safe
+# payloads: model names may appear, ¥ / tokens never do.
+# ---------------------------------------------------------------------------
+@app.route("/api/fusion/conversations", methods=["GET"])
+def fusion_conversations_list():
+    """List the signed-in account's active Fusion conversations (newest activity first)."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    items = metrics_store.list_fusion_conversations(customer["id"])
+    out = [{"id": c["id"], "title": c["title"] or "新对话",
+            "message_count": c["message_count"],
+            "last_message_at": c["last_message_at"], "created_at": c["created_at"]}
+           for c in items]
+    return jsonify({"conversations": out})
+
+
+@app.route("/api/fusion/conversations", methods=["POST"])
+def fusion_conversation_create():
+    """Create a new empty conversation (the '新对话' button); returns its id."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()[:255] or None
+    tier = "full" if _fusion_full_tier(customer) else "free"
+    cid = metrics_store.create_fusion_conversation(customer["id"], title=title,
+                                                   model_tier=tier)
+    return jsonify({"conversation_id": cid, "title": title})
+
+
+@app.route("/api/fusion/conversations/<int:conversation_id>", methods=["GET"])
+def fusion_conversation_get(conversation_id):
+    """Full message history of one owned conversation (decrypted; NO ¥)."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    convo, err = _fusion_owned_convo_or_404(conversation_id, customer)
+    if err:
+        return err
+    msgs = metrics_store.get_fusion_messages(conversation_id)
+    return jsonify({"conversation_id": conversation_id,
+                    "title": convo["title"] or "新对话",
+                    "messages": [_fusion_public_message(m) for m in msgs]})
+
+
+@app.route("/api/fusion/conversations/<int:conversation_id>", methods=["PATCH"])
+def fusion_conversation_rename(conversation_id):
+    """Rename one owned conversation."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify({"error": "标题不能为空。"}), 400
+    if not metrics_store.rename_fusion_conversation(customer["id"], conversation_id, title):
+        return jsonify({"error": "对话不存在。"}), 404
+    return jsonify({"ok": True, "title": title[:255]})
+
+
+@app.route("/api/fusion/conversations/<int:conversation_id>", methods=["DELETE"])
+def fusion_conversation_delete(conversation_id):
+    """Soft-delete one owned conversation (encrypted history retained, hidden)."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    if not metrics_store.soft_delete_fusion_conversation(customer["id"], conversation_id):
+        return jsonify({"error": "对话不存在。"}), 404
+    return jsonify({"ok": True})
 
 
 def _check_api_key():

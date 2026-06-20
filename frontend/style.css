@@ -1438,6 +1438,70 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 .fusion-page { max-width: 760px; margin: 0 auto; padding: 8px 16px 32px; }
 .fusion-page.landing { padding-top: 6vh; }
 
+/* Signed-in Fusion: a conversation rail + the chat column ------------------- */
+.fusion-page.signed-in { max-width: 1060px; }
+.fusion-app { display: grid; grid-template-columns: 236px minmax(0, 1fr); gap: 20px; align-items: start; }
+.fusion-main { min-width: 0; }
+/* When conversing, the MAIN column (not the whole page) becomes the bounded,
+   scrolling chat column so the rail stays put beside it. */
+.fusion-page.signed-in.conversing { display: block; height: auto; min-height: 0; }
+.fusion-page.signed-in.conversing .fusion-main {
+  display: flex; flex-direction: column; height: calc(100vh - 150px); min-height: 440px;
+}
+.fusion-splash-cta { margin: 18px 0 4px; }
+.fusion-splash-btn {
+  border: none; background: var(--accent); color: #fff; border-radius: 999px;
+  padding: 11px 26px; font: inherit; font-size: 15px; font-weight: 700; cursor: pointer;
+}
+.fusion-splash-btn:hover { background: var(--accent-2); }
+.fusion-example-static { cursor: default; }
+.fusion-example-static:hover { border-color: var(--line); color: var(--muted); }
+.fusion-loading { text-align: center; padding: 48px 0; }
+
+/* the anonymous free-quota login gate (replaces the composer once spent) */
+.fusion-gate {
+  text-align: center; background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 22px 18px; box-shadow: var(--shadow);
+  max-width: 640px; margin: 0 auto;
+}
+.fusion-gate-title { font-size: 17px; font-weight: 800; color: var(--ink); margin: 0 0 4px; }
+.fusion-gate-sub { font-size: 14px; color: var(--muted); margin: 0 0 14px; }
+
+/* the rail */
+.fusion-rail { position: sticky; top: 84px; display: flex; flex-direction: column; gap: 10px; }
+.fusion-new-convo {
+  border: 1px solid var(--line); background: var(--card); color: var(--ink);
+  border-radius: var(--radius); padding: 9px 12px; font: inherit; font-weight: 700;
+  cursor: pointer; text-align: left;
+}
+.fusion-new-convo:hover { border-color: var(--accent); color: var(--accent); }
+.fusion-convos { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.fusion-convos-empty { padding: 8px 4px; font-size: 13px; }
+.fusion-convo { display: flex; align-items: center; gap: 4px; border-radius: 9px; padding: 2px; }
+.fusion-convo.on { background: var(--accent-soft); }
+.fusion-convo .fc-open {
+  flex: 1 1 auto; min-width: 0; text-align: left; border: none; background: none;
+  color: var(--ink); font: inherit; font-size: 14px; cursor: pointer; padding: 6px 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fusion-convo.on .fc-open { color: var(--accent); font-weight: 600; }
+.fusion-convo .fc-actions { display: none; flex: none; gap: 2px; }
+.fusion-convo:hover .fc-actions, .fusion-convo.on .fc-actions { display: flex; }
+.fusion-convo .fc-ren, .fusion-convo .fc-del {
+  border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 4px 5px; border-radius: 6px;
+}
+.fusion-convo .fc-ren:hover { color: var(--accent); background: var(--inset); }
+.fusion-convo .fc-del:hover { color: var(--red); background: var(--inset); }
+
+/* narrow screens: the rail collapses above the chat */
+@media (max-width: 720px) {
+  .fusion-app { grid-template-columns: 1fr; }
+  .fusion-rail { position: static; flex-direction: row; flex-wrap: wrap; align-items: center; }
+  .fusion-convos { flex-direction: row; flex-wrap: wrap; }
+  .fusion-page.signed-in.conversing .fusion-main { height: auto; }
+}
+
 /* hero (landing) */
 .fusion-hero { text-align: center; margin-bottom: 22px; }
 .fusion-eyebrow { font-size: 12px; letter-spacing: .14em; color: var(--muted); margin-bottom: 12px; }
