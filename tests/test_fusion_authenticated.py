@@ -170,8 +170,11 @@ def test_history_trim_keeps_db_but_bounds_context(env, monkeypatch):
     captured["calls"].clear()
     client.post("/api/fusion/chat", json={"conversation_id": cid, "text": "t3",
                                           "models": ["deepseek-v4-flash"]})
-    # only the last 2 messages reached the model...
-    assert len(captured["calls"][0]["messages"]) == 2
+    # The trim keeps the last 2 messages = [assistant r2, user t3]; normalization then
+    # drops the leading assistant (a context must START on a user turn, else Anthropic
+    # 400s), leaving just the newest user turn — provider-valid and still bounded.
+    sent = captured["calls"][0]["messages"]
+    assert [m["role"] for m in sent] == ["user"] and sent[0]["content"] == "t3"
     # ...but all 6 turns (3 user + 3 assistant) are persisted
     assert len(metrics_store.get_fusion_messages(cid)) == 6
 
@@ -205,6 +208,26 @@ def test_paid_tier_keeps_premium(env, monkeypatch):
         "text": "hi", "models": ["gpt-5.1", "gemini-2.5-pro"]})
     called = {c["model"] for c in captured["calls"]}
     assert {"gpt-5.1", "gemini-2.5-pro"} <= called, "paid fan-out was wrongly clamped"
+
+
+def test_models_cap_reflects_tier(env, monkeypatch):
+    """The public picker advertises the cap the server will actually honor, so the UI can't
+    silently cap a paid account at the free council size: free/anon → free cap, paid → full
+    cap."""
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    free_cap, full_cap = config.fusion_free_model_cap(), config.fusion_full_model_cap()
+    assert full_cap > free_cap  # the bug only matters when paid is genuinely wider
+    # anonymous → free cap
+    anon = app.app.test_client().get("/api/fusion/models").get_json()
+    assert anon["model_cap"] == free_cap and anon["account_tier"] == "free"
+    # free signed-in account → free cap
+    client = _client_for(env["store"], A_EMAIL)
+    assert client.get("/api/fusion/models").get_json()["model_cap"] == free_cap
+    # paid account → full cap
+    monkeypatch.setattr(app.metrics_store, "effective_plan",
+                        lambda *a, **k: ("pro", None, False))
+    paid = client.get("/api/fusion/models").get_json()
+    assert paid["model_cap"] == full_cap and paid["account_tier"] == "full"
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +316,51 @@ def test_total_failure_writes_failed_marker(env, monkeypatch):
     # a failed marker must not re-enter context on the next turn
     ctx = app._fusion_history_messages(msgs)
     assert [m["content"] for m in ctx] == ["hi"]
+
+
+def test_failed_turn_does_not_poison_alternation(env, monkeypatch):
+    """Regression: a turn where every model fails leaves a 'failed' assistant marker and a
+    dangling user turn. The NEXT turn must not feed the models two consecutive user
+    messages — Anthropic-family models reject that with a 400, and because the bad shape is
+    rebuilt every turn it would permanently wedge the conversation."""
+    # Turn 1: the only model fails → user persisted + assistant 'failed' marker persisted.
+    monkeypatch.setattr(app.providers, "gateway_chat",
+                        _fake_gateway(fail={"deepseek-v4-flash"}))
+    client = _client_for(env["store"], A_EMAIL)
+    cid = client.post("/api/fusion/chat", json={"text": "q1", "models": ["deepseek-v4-flash"]}
+                      ).get_json()["conversation_id"]
+
+    # Turn 2: a working model — capture exactly what reaches the gateway.
+    captured = {}
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway(captured))
+    r2 = client.post("/api/fusion/chat", json={"conversation_id": cid, "text": "q2",
+                                               "models": ["deepseek-v4-flash"]})
+    assert r2.status_code == 200
+    sent = captured["calls"][0]["messages"]
+    roles = [m["role"] for m in sent]
+    assert roles[0] == "user", f"context must start on a user turn: {roles}"
+    assert all(roles[i] != roles[i + 1] for i in range(len(roles) - 1)), roles
+    # the dangling 'q1' is dropped — context is just the new question.
+    assert [m["content"] for m in sent] == ["q2"]
+    # every turn is still kept in the DB (2 from the failed turn + 2 from this one).
+    assert len(metrics_store.get_fusion_messages(cid)) == 4
+
+
+def test_normalize_alternation_helper():
+    """Unit-level guarantee for the context normalizer used by both chat paths."""
+    norm = app._fusion_normalize_alternation
+    U = lambda c: {"role": "user", "content": c}       # noqa: E731
+    A = lambda c: {"role": "assistant", "content": c}  # noqa: E731
+    # a dangling user (its assistant turn was dropped) is removed
+    assert norm([U("a"), A("b"), U("c"), U("d")]) == [U("a"), A("b"), U("d")]
+    # a context left starting with an assistant (after clamping) drops the lead assistant
+    assert norm([A("b"), U("c")]) == [U("c")]
+    # a clean alternating context is unchanged
+    assert norm([U("a"), A("b"), U("c")]) == [U("a"), A("b"), U("c")]
+    # a single user turn is valid as-is; two consecutive users keep the newest
+    assert norm([U("a")]) == [U("a")]
+    assert norm([U("a"), U("b")]) == [U("b")]
+    assert norm([]) == []
 
 
 # ---------------------------------------------------------------------------

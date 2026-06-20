@@ -22,7 +22,9 @@ import { openLoginModal } from "./auth.js";
 // first run always works regardless of which providers are configured).
 const QUALITY = ["claude-opus-4-7", "gpt-5.1", "gemini-2.5-pro", "deepseek-v4-pro", "qwen-max"];
 const BUDGET = ["deepseek-v4-flash", "qwen-plus", "gemini-2.5-flash", "gpt-5-mini", "claude-haiku-4-5"];
-const MAX_MODELS = 3;
+// Council-size cap is tier-aware (free vs paid), resolved by the server and read live so
+// a paid account isn't silently capped at the free council size. Falls back to 3.
+const maxModels = () => state.fusionModelCap || 3;
 
 // A few concrete first questions for the boss audience (beat the blank page).
 const EXAMPLES = ["帮我分析这季度的销售数据", "写一封专业的催款邮件", "解释一下这条合同条款"];
@@ -40,6 +42,8 @@ let conversations = [];     // the account's saved conversations (rail) [{id,tit
 let conversationId = null;  // the open conversation's id (null = a fresh, unsaved chat)
 let loadingConvo = false;   // rehydrating a conversation from the server
 let lastAccountId = null;   // reset the open chat when the signed-in account changes
+let carryPending = null;    // anon teaser turns awaiting carry-over import (kept until it lands)
+let modelsForAccount;       // which account identity the tier-aware model cap was loaded for
 // Freemium teaser (anonymous only): a few free turns, then login is required.
 const FREE_ANON_TURNS = 3;  // initial display only; the server is authoritative
 let freeRemaining = FREE_ANON_TURNS;
@@ -49,43 +53,47 @@ const available = () => state.fusionModels.filter((m) => m.available);
 
 function applyPreset(key) {
   const ids = key === "quality" ? QUALITY : BUDGET;
-  let pick = ids.filter((id) => { const m = fusionModelById(id); return m && m.available; }).slice(0, MAX_MODELS);
-  if (!pick.length) pick = available().slice(0, MAX_MODELS).map((m) => m.id);
-  if (!pick.length) pick = state.fusionModels.slice(0, MAX_MODELS).map((m) => m.id); // all keyless: still show
+  let pick = ids.filter((id) => { const m = fusionModelById(id); return m && m.available; }).slice(0, maxModels());
+  if (!pick.length) pick = available().slice(0, maxModels()).map((m) => m.id);
+  if (!pick.length) pick = state.fusionModels.slice(0, maxModels()).map((m) => m.id); // all keyless: still show
   selected = pick;
   if (fuser !== "auto" && !selected.includes(fuser)) fuser = "auto";
 }
 
 export async function mount(el, ctx) {
   el.innerHTML = `<div class="fusion-page"><p class="muted" style="padding:48px 0;text-align:center">加载…</p></div>`;
-  await loadFusionModels();
-  if (!selected.length) applyPreset(preset);
+  // Load the picker catalog + its tier-aware council cap. Refetch when the signed-in
+  // identity changed (anon↔member, or a different account) so a paid login lifts the cap.
+  const acctKey = state.account ? (state.account.email || state.account.id || "?") : "";
+  if (acctKey !== modelsForAccount) {
+    await loadFusionModels(true);
+    modelsForAccount = acctKey;
+    applyPreset(preset);                 // rebuild the council for this tier's cap
+  } else {
+    await loadFusionModels();
+    if (!selected.length) applyPreset(preset);
+  }
   if (state.account) {
-    const aid = state.account.email || state.account.id || "?";
+    const aid = acctKey;
     if (aid !== lastAccountId) {
-      // First mount under this account. If we arrived here from an anonymous teaser
-      // chat (lastAccountId was null + we hold unsaved turns), CARRY it into per-account
-      // memory: persist the transcript as a new conversation and continue inside it.
-      const carry = (lastAccountId === null && !conversationId && messages.length)
-        ? messages.slice() : [];
+      // First mount under this account. If we arrived here from an anonymous teaser chat
+      // (lastAccountId was null + we hold unsaved turns), mark the transcript to CARRY
+      // into per-account memory — only on the anon→signed-in transition, never a switch.
+      carryPending = (lastAccountId === null && !conversationId && messages.length)
+        ? messages.slice() : null;
       lastAccountId = aid;
       gated = false;
-      if (carry.length) {
-        try {
-          const r = await api.importFusionConversation(carry.map((m) => ({
-            role: m.role, content: m.content, answers: m.answers,
-            by_label: m.by_label, note: m.note })));
-          conversationId = r.conversation_id;   // keep `messages`; continue in this convo
-        } catch (e) { conversationId = null; messages = []; }
-      } else {
-        conversationId = null; messages = [];    // fresh signed-in state
-      }
+      if (!carryPending) { conversationId = null; messages = []; }  // fresh signed-in state
     }
+    // Persist the carried teaser — retried on every mount until it lands. A failed import
+    // must NEVER wipe the in-memory transcript (its only copy).
+    if (carryPending && !conversationId) await tryCarryOver();
     await refreshConversations();
   } else {
     // Anonymous: if we just signed OUT of an account, clear that chat from memory.
     if (lastAccountId !== null) {
       lastAccountId = null; conversationId = null; messages = []; gated = false;
+      carryPending = null;
     }
     // Show the chatbot immediately; sync the free-turn quota so a reload after the quota
     // is spent lands straight on the gate (the server is authoritative).
@@ -93,6 +101,21 @@ export async function mount(el, ctx) {
   }
   render(el, ctx);
   return () => {}; // no timers/listeners outside `el`
+}
+
+// Persist an anonymous teaser transcript into a per-account conversation. Best-effort and
+// idempotent-by-retry: on failure the transcript stays in `messages` (its only copy) and
+// `carryPending` is kept so the next mount/send retries — it is never silently wiped.
+async function tryCarryOver() {
+  try {
+    const r = await api.importFusionConversation(carryPending.map((m) => ({
+      role: m.role, content: m.content, answers: m.answers,
+      by_label: m.by_label, note: m.note })));
+    conversationId = r.conversation_id;   // keep `messages`; continue inside this convo
+    carryPending = null;
+  } catch (e) {
+    conversationId = null;                 // leave it unsaved; retry on the next mount/send
+  }
 }
 
 async function syncAnonQuota() {
@@ -315,8 +338,8 @@ function controlsHTML() {
     }).join("");
     const addable = state.fusionModels.filter((m) => !selected.includes(m.id));
     let addControl = "";
-    if (selected.length >= MAX_MODELS) {
-      addControl = `<span class="fusion-addfull">最多 ${MAX_MODELS} 个</span>`;
+    if (selected.length >= maxModels()) {
+      addControl = `<span class="fusion-addfull">最多 ${maxModels()} 个</span>`;
     } else if (addable.length) {
       const opts = addable.map((m) =>
         `<option value="${esc(m.id)}">${esc(m.label)} · ${esc(m.provider_label || m.provider)}${m.available ? "" : "（未配置）"}</option>`).join("");
@@ -453,7 +476,7 @@ function wire(el, ctx) {
   const add = el.querySelector("#fusionAdd");
   if (add) add.addEventListener("change", () => {
     const id = add.value;
-    if (id && !selected.includes(id) && selected.length < MAX_MODELS) { selected.push(id); preset = "custom"; }
+    if (id && !selected.includes(id) && selected.length < maxModels()) { selected.push(id); preset = "custom"; }
     render(el, ctx);
   });
   const fuserSel = el.querySelector("#fusionFuser");
@@ -490,13 +513,20 @@ async function send(el, ctx) {
   render(el, ctx);
 
   try {
+    // If a carried teaser hasn't persisted yet (a prior import failed), retry now so the
+    // new turn lands in that same conversation instead of spawning a fresh one.
+    if (state.account && carryPending && !conversationId) await tryCarryOver();
     const res = state.account
       // Signed-in: the SERVER is the source of truth — send the new user `text` + the
       // conversation id (null on the first turn → the server creates one + returns it);
       // prior turns are loaded from the encrypted conversation server-side.
       ? await api.fusionChat({ conversation_id: conversationId, text, models: selected, fuser })
       // Anonymous teaser: send the client-maintained history (no server memory).
-      : await api.fusionChat({ messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      // Skip turns where every model failed — replaying the '没有模型成功作答' placeholder
+      // would feed it back to the council as a real prior answer.
+      : await api.fusionChat({ messages: messages
+                                 .filter((m) => !(m.role === "assistant" && m.failed))
+                                 .map((m) => ({ role: m.role, content: m.content })),
                                models: selected, fuser });
     if (res.conversation_id) conversationId = res.conversation_id;
     const fused = res.fused;
@@ -504,7 +534,7 @@ async function send(el, ctx) {
       messages.push({ role: "assistant", content: fused.text, by_label: fused.by_label,
         answers: res.answers || [], note: fused.note });
     } else {
-      messages.push({ role: "assistant",
+      messages.push({ role: "assistant", failed: true,
         content: "_没有模型成功作答 — 运营方可能尚未为所选模型配置密钥。换一个模型再试试。_",
         answers: res.answers || [] });
     }

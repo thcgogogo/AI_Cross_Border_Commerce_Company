@@ -6151,7 +6151,13 @@ def _fuse_answers(prompt, answers, fuser):
 @app.route("/api/fusion/models", methods=["GET"])
 def fusion_models():
     """Public model list for the Fusion picker — names only, NO ¥ pricing (that stays
-    founder-gated on /api/models). Text models only (the only kind that can be fused)."""
+    founder-gated on /api/models). Text models only (the only kind that can be fused).
+    Also returns the per-session council-size cap so the picker matches what the server
+    will actually fan out: a PAID account gets the full cap, free/anonymous the free cap
+    (this is what stops paid users being silently capped at the free council size)."""
+    customer = _current_customer()
+    full = bool(customer) and _fusion_full_tier(customer)
+    cap = config.fusion_full_model_cap() if full else config.fusion_free_model_cap()
     out = [{"id": m["id"], "label": m["label"], "provider": m["provider"],
             "provider_label": config.PROVIDERS.get(m["provider"], {}).get("label", m["provider"]),
             "tier": m.get("tier", ""),
@@ -6160,7 +6166,8 @@ def fusion_models():
             # pricing, so it stays out of the founder-only ¥ machinery.
             "available": providers.model_available(m["id"])}
            for m in config.MODEL_CHOICES if m.get("kind", "text") == "text"]
-    return jsonify({"models": out})
+    return jsonify({"models": out, "model_cap": cap,
+                    "account_tier": "full" if full else "free"})
 
 
 def _clamp_messages_chars(messages, max_chars):
@@ -6199,6 +6206,29 @@ def _fusion_history_messages(prior):
             continue
         out.append({"role": role, "content": content})
     return out
+
+
+def _fusion_normalize_alternation(messages):
+    """Coerce an assembled chat context into the shape every provider's chat API
+    requires: it must BEGIN with a user turn and STRICTLY ALTERNATE user/assistant. The
+    assembled history can otherwise (a) hold a 'dangling' user turn — one whose models
+    all failed, so its assistant turn was dropped by _fusion_history_messages — leaving
+    two user turns in a row, or (b) begin on an assistant turn once the oldest turns are
+    char-/count-clamped away. Anthropic-family models reject either with a 400, and
+    because the bad shape is rebuilt every turn it can permanently wedge a conversation.
+    Keep the most recent turns: walk newest→oldest, keeping a turn only when its role is
+    the one strict alternation expects (the final turn must be the new user message),
+    then restore chronological order and drop any leading assistant."""
+    kept, expected = [], "user"
+    for m in reversed(messages):
+        if m.get("role") != expected:
+            continue  # skip a turn that breaks alternation (a dangling user / stray asst)
+        kept.append(m)
+        expected = "assistant" if expected == "user" else "user"
+    kept.reverse()
+    if kept and kept[0].get("role") != "user":
+        kept.pop(0)  # never begin the context on an assistant turn
+    return kept
 
 
 def _fusion_pick_models(models, tier):
@@ -6323,6 +6353,9 @@ def _fusion_chat_anonymous():
         return jsonify({"error": "Type a question to start."}), 400
     messages = messages[-config.fusion_anon_max_history_msgs():]
     messages = _clamp_messages_chars(messages, config.fusion_anon_max_chars())
+    # Same provider-valid-context guarantee as the signed-in path (the client-supplied
+    # history can begin on an assistant turn or hold a dangling user after clamping).
+    messages = _fusion_normalize_alternation(messages)
 
     # Anonymous runs use the cheap FREE model split too (the server pays).
     picked, fuser_override = _fusion_pick_models(models, "free")
@@ -6410,6 +6443,9 @@ def _fusion_chat_member(customer):
     messages.append({"role": "user", "content": text})
     messages = messages[-config.fusion_loggedin_max_history_msgs():]
     messages = _clamp_messages_chars(messages, config.fusion_loggedin_max_chars())
+    # Guarantee a provider-valid context (starts with user, strictly alternates) so a
+    # prior failed turn's dangling user message can't poison the conversation.
+    messages = _fusion_normalize_alternation(messages)
 
     # Free-vs-paid model split (server-enforced — the client can't widen the free tier).
     picked, fuser_override = _fusion_pick_models(models, tier)

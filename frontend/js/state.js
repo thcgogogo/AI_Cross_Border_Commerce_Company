@@ -16,6 +16,7 @@ export const state = {
   models: [],            // FULL priced model catalog (founder views only)
   providers: {},         // provider id -> label (founder views only)
   fusionModels: [],      // PUBLIC model list for the Fusion picker (names, no pricing)
+  fusionModelCap: 3,     // tier-aware council-size cap (free=3 / paid=5), from the server
   changelogHasNew: false, // drives the 更新日志 “新功能” badge
 };
 
@@ -78,6 +79,7 @@ export async function loadFusionModels(force = false) {
   try {
     const data = await api.getFusionModels();
     state.fusionModels = (data && data.models) || [];
+    if (data && typeof data.model_cap === "number") state.fusionModelCap = data.model_cap;
   } catch (e) { /* leave empty; the view shows a friendly message */ }
   return state.fusionModels;
 }
