@@ -710,3 +710,79 @@ def test_anonymous_cannot_attach(env):
                   data={"file": (io.BytesIO(b"a,b\n1,2\n"), "x.csv")},
                   content_type="multipart/form-data")
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# 14. Fusion 2.0 R2 — vision (image understanding)
+# ---------------------------------------------------------------------------
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x01\x02\x03"   # valid PNG magic + filler
+
+
+def test_vision_capability_flags():
+    assert config.model_has_vision("qwen-vl-max") and config.model_has_vision("claude-haiku-4-5")
+    assert not config.model_has_vision("deepseek-v4-flash")
+    assert not config.model_has_vision("qwen3.7-max")
+
+
+def test_anthropic_blocks_preserve_images():
+    """The Anthropic adapter now KEEPS image content-parts (it used to flatten to text)."""
+    parts = [{"type": "text", "text": "what is this"},
+             {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}]
+    blocks = app.providers._anthropic_blocks(parts)
+    assert blocks[0] == {"type": "text", "text": "what is this"}
+    assert blocks[1]["type"] == "image" and blocks[1]["source"]["data"] == "QUJD"
+    assert blocks[1]["source"]["media_type"] == "image/png"
+
+
+def test_attach_image_stored_as_image(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    att = _attach(client, cid, "shot.png", _PNG).get_json()["attachment"]
+    assert att["kind"] == "image" and att["media_type"] == "image/png" and att["char_count"] == 0
+
+
+def test_attach_rejects_fake_image(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    r = _attach(client, cid, "notreally.png", b"this is plain text, not a PNG")
+    assert r.status_code == 400 and "图片" in r.get_json()["error"]
+
+
+def test_vision_routes_image_only_to_vision_models(env, monkeypatch):
+    """An attached image reaches a vision model as a content-array image part; a non-vision
+    model in the same fan-out gets the plain text turn (no image)."""
+    monkeypatch.setattr(app.metrics_store, "effective_plan", lambda *a, **k: ("pro", None, False))
+    captured = {}
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway(captured))
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    att = _attach(client, cid, "chart.png", _PNG).get_json()["attachment"]
+    assert att["kind"] == "image"
+    r = client.post("/api/fusion/chat", json={
+        "conversation_id": cid, "text": "看这张图", "models": ["qwen-vl-max", "deepseek-v4-flash"],
+        "attachment_ids": [att["id"]]})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    calls = captured["calls"]
+    # the vision model's candidate call carries a content-array with an image part
+    vision = [c for c in calls if c["model"] == "qwen-vl-max"]
+    assert any(isinstance(c["messages"][-1]["content"], list)
+               and any(p.get("type") == "image_url" for p in c["messages"][-1]["content"])
+               for c in vision)
+    # the non-vision model got plain text (no image)
+    ds = [c for c in calls if c["model"] == "deepseek-v4-flash"]
+    assert ds and isinstance(ds[0]["messages"][-1]["content"], str)
+    assert "看这张图" in ds[0]["messages"][-1]["content"]
+
+
+def test_image_without_vision_model_errors(env, monkeypatch):
+    monkeypatch.setattr(app.metrics_store, "effective_plan", lambda *a, **k: ("pro", None, False))
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    att = _attach(client, cid, "p.png", _PNG).get_json()["attachment"]
+    r = client.post("/api/fusion/chat", json={
+        "conversation_id": cid, "text": "看图", "models": ["deepseek-v4-flash"],
+        "attachment_ids": [att["id"]]})
+    assert r.status_code == 400 and "图片" in r.get_json()["error"]

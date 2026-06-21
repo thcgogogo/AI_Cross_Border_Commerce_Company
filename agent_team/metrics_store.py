@@ -3750,9 +3750,11 @@ def count_pending_fusion_attachments(conversation_id, account_id):
                            FusionAttachment.message_index.is_(None)).count())
 
 
-def get_fusion_attachments(conversation_id, account_id, ids, *, want_text=False):
+def get_fusion_attachments(conversation_id, account_id, ids, *, want_text=False,
+                           want_files=False):
     """Fetch READY attachments by id, enforcing conversation + account ownership. Returns
-    dicts (public metadata, plus decrypted `text` when want_text), ordered to follow `ids`.
+    dicts (public metadata, plus decrypted `text` when want_text, plus the internal
+    `stored_path` when want_files — for the vision image loader), ordered to follow `ids`.
     Silently drops any id not owned / not in this conversation / not ready."""
     id_list = _attach_id_list(ids)
     if not (conversation_id and account_id and id_list):
@@ -3772,6 +3774,8 @@ def get_fusion_attachments(conversation_id, account_id, ids, *, want_text=False)
             d = _fusion_attachment_public(a)
             if want_text:
                 d["text"] = (crypto.decrypt_string_strict(a.parsed_text) or "") if a.parsed_text else ""
+            if want_files:
+                d["stored_path"] = a.stored_path
             out.append(d)
         return out
 

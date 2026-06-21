@@ -496,6 +496,8 @@ def fusion_full_model_cap():
 # (Images are handled separately by the vision release, R2.)
 FUSION_ATTACHMENT_EXTS = frozenset(
     {"pdf", "docx", "xlsx", "xls", "csv", "json", "txt", "md", "markdown", "log", "text"})
+# Image attachments (R2 vision) — sent as native image input to vision-capable models.
+FUSION_IMAGE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "webp"})
 
 
 def fusion_attachment_max_bytes():
@@ -864,6 +866,11 @@ MODEL_CHOICES = [
     {"id": "qwen-plus", "label": "Qwen Plus", "provider": "qwen", "tier": "Balanced",
      "input_per_mtok": 0.40, "output_per_mtok": 1.20, "context": "131K tokens", "approx": True,
      "blurb": "A balanced, affordable Qwen for general-purpose work."},
+    {"id": "qwen-vl-max", "label": "Qwen VL Max", "provider": "qwen", "tier": "Vision",
+     "input_per_mtok": 0.41, "output_per_mtok": 1.24, "context": "32K tokens", "approx": True,
+     "blurb": "Alibaba's vision-language Qwen — reads images, charts, and screenshots. Served "
+              "through the SAME DashScope key as the other Qwen models, so it's the easy way "
+              "to add image understanding to a domestic deployment."},
 
     # ---- MiniMax ----
     {"id": "MiniMax-M3", "label": "MiniMax M3", "provider": "minimax", "tier": "Flagship",
@@ -995,6 +1002,23 @@ def model_kind(model_id):
 def is_text_model(model_id):
     """True for chat/LLM models — the only kind the chat gateway + Fusion serve."""
     return model_kind(model_id) == "text"
+
+
+# Models that accept IMAGE INPUT (vision). Distinct from kind="image" (image GENERATION).
+# Fusion routes an attached image ONLY to these; the rest get the text-only turn. Conservative
+# on purpose — claiming vision on a text-only model would make the provider 400 on the image.
+VISION_INPUT_MODELS = frozenset({
+    OPUS, SONNET, HAIKU,                       # all current Claude models are multimodal
+    "gpt-5.1", "gpt-5-mini", "o3",             # OpenAI
+    "gemini-2.5-pro", "gemini-2.5-flash",      # Google
+    "grok-4",                                  # xAI
+    "qwen-vl-max",                             # Alibaba VL (same DashScope key as text Qwen)
+})
+
+
+def model_has_vision(model_id):
+    """True if the model accepts image input — Fusion only sends attached images to these."""
+    return model_id in VISION_INPUT_MODELS
 
 
 def is_image_model(model_id):

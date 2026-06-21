@@ -121,7 +121,7 @@ def test_fusion_models_endpoint_has_no_pricing(client):
     models = r.get_json()["models"]
     assert models and any(m["id"] == "deepseek-v4-flash" for m in models)
     for m in models:
-        assert set(m) == {"id", "label", "provider", "provider_label", "tier", "available"}
+        assert set(m) == {"id", "label", "provider", "provider_label", "tier", "available", "vision"}
         for priced in ("input_per_mtok", "output_per_mtok", "price"):
             assert priced not in m
 

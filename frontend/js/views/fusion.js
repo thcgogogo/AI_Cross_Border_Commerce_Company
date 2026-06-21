@@ -333,7 +333,7 @@ function controlsHTML() {
       const m = fusionModelById(id);
       const warn = m && !m.available ? ` title="该模型未配置密钥，本次将返回提示" data-warn="1"` : "";
       return `<span class="fusion-chip${m && !m.available ? " unavail" : ""}"${warn}>
-        <span class="fc-label">${esc(m ? m.label : id)}</span>
+        <span class="fc-label">${esc(m ? m.label : id)}${m && m.vision ? ` <span class="fc-vision" title="支持图片">👁</span>` : ""}</span>
         <button type="button" class="fc-rm" data-id="${esc(id)}" aria-label="移除">&times;</button>
       </span>`;
     }).join("");
@@ -343,7 +343,7 @@ function controlsHTML() {
       addControl = `<span class="fusion-addfull">最多 ${maxModels()} 个</span>`;
     } else if (addable.length) {
       const opts = addable.map((m) =>
-        `<option value="${esc(m.id)}">${esc(m.label)} · ${esc(m.provider_label || m.provider)}${m.available ? "" : "（未配置）"}</option>`).join("");
+        `<option value="${esc(m.id)}">${esc(m.label)}${m.vision ? " 👁" : ""} · ${esc(m.provider_label || m.provider)}${m.available ? "" : "（未配置）"}</option>`).join("");
       addControl = `<select id="fusionAdd" class="fusion-add"><option value="">+ 添加模型</option>${opts}</select>`;
     }
     const fuserOpts = [`<option value="auto" ${fuser === "auto" ? "selected" : ""}>自动（择优）</option>`]
@@ -392,7 +392,7 @@ const isCorrected = (note) => /纠正|更正|修正|有误|不一致|分歧/.tes
 function turnHTML(m, i) {
   if (m.role === "user") {
     const atts = (m.attachments || []).map((a) =>
-      `<span class="ft-attach">📎 ${esc(a.filename)}</span>`).join("");
+      `<span class="ft-attach">${a.kind === "image" ? "🖼" : "📎"} ${esc(a.filename)}</span>`).join("");
     return `<div class="ft-turn user"><div class="ft-bubble">${esc(m.content)}</div>${
       atts ? `<div class="ft-attachs">${atts}</div>` : ""}</div>`;
   }
@@ -448,9 +448,16 @@ function turnHTML(m, i) {
 // Staged-file chips above the composer (signed-in only).
 function attachChipsHTML() {
   if (!pendingAttachments.length) return "";
-  return `<div class="fusion-attach-chips">${pendingAttachments.map((a, i) => `
-    <span class="fusion-attach-chip"><span class="fa-name">📎 ${esc(a.filename)}</span>
-      <button type="button" class="fa-rm" data-i="${i}" aria-label="移除">&times;</button></span>`).join("")}</div>`;
+  const chips = pendingAttachments.map((a, i) => `
+    <span class="fusion-attach-chip"><span class="fa-name">${a.kind === "image" ? "🖼" : "📎"} ${esc(a.filename)}</span>
+      <button type="button" class="fa-rm" data-i="${i}" aria-label="移除">&times;</button></span>`).join("");
+  // Images need a vision-capable model; nudge the user before the server rejects the turn.
+  const needsVision = pendingAttachments.some((a) => a.kind === "image")
+    && !selected.some((id) => (fusionModelById(id) || {}).vision);
+  const hint = needsVision
+    ? `<div class="fusion-attach-hint">⚠ 已添加图片，请在“自定义模型”中加入支持视觉的模型（如 Qwen VL Max）。</div>`
+    : "";
+  return `<div class="fusion-attach-chips">${chips}</div>${hint}`;
 }
 
 function composerHTML(placeholder) {
@@ -458,9 +465,9 @@ function composerHTML(placeholder) {
   // Attachments are a signed-in feature (the anonymous teaser stays text-only).
   const attach = state.account ? `
     <input type="file" id="fusionFile" hidden multiple
-      accept=".pdf,.docx,.xlsx,.xls,.csv,.json,.txt,.md,.markdown,.log">
+      accept=".pdf,.docx,.xlsx,.xls,.csv,.json,.txt,.md,.markdown,.log,.png,.jpg,.jpeg,.gif,.webp">
     <button type="button" class="fusion-attach" id="fusionAttachBtn" ${disabled}
-      title="附加文件（PDF / Excel / CSV / Word / 文本）" aria-label="附加文件">📎</button>` : "";
+      title="附加文件或图片（PDF / Excel / CSV / Word / 文本 / 图片）" aria-label="附加文件">📎</button>` : "";
   return `${attachChipsHTML()}<form class="fusion-composer" id="fusionForm">
     ${attach}
     <textarea id="fusionInput" class="fusion-input" rows="1" placeholder="${esc(placeholder || "问任何问题…")}" ${disabled}>${esc(draft)}</textarea>

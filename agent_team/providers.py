@@ -147,6 +147,43 @@ def _openai_chat(model_id, messages, max_tokens, max_retries=3):
 # ---------------------------------------------------------------------------
 # Anthropic adapter for the gateway (raw messages -> Claude)
 # ---------------------------------------------------------------------------
+def _anthropic_image_block(url):
+    """An Anthropic image content block from an OpenAI image_url. Handles a base64 data URL
+    (data:<media_type>;base64,<data>) and a plain http(s) URL. Returns None if unusable."""
+    if not url:
+        return None
+    if url.startswith("data:"):
+        try:
+            header, data = url.split(",", 1)
+            media_type = header[5:].split(";")[0] or "image/png"   # strip leading 'data:'
+        except ValueError:
+            return None
+        return {"type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data}}
+    if url.startswith("http://") or url.startswith("https://"):
+        return {"type": "image", "source": {"type": "url", "url": url}}
+    return None
+
+
+def _anthropic_blocks(parts):
+    """Convert OpenAI content-parts (text + image_url) to Anthropic content blocks, KEEPING
+    images (the gateway's vision path). Returns a blocks list, or '' if nothing usable."""
+    blocks = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            if part.get("text"):
+                blocks.append({"type": "text", "text": part["text"]})
+        elif part.get("type") == "image_url":
+            url = (part.get("image_url") or {}).get("url", "") if isinstance(
+                part.get("image_url"), dict) else ""
+            block = _anthropic_image_block(url)
+            if block:
+                blocks.append(block)
+    return blocks or ""
+
+
 def _anthropic_chat(model_id, messages, max_tokens):
     """Call Claude with an OpenAI-style `messages` list (used by the gateway).
 
@@ -164,13 +201,15 @@ def _anthropic_chat(model_id, messages, max_tokens):
     for m in messages or []:
         role = (m.get("role") or "user").strip()
         content = m.get("content") or ""
-        if isinstance(content, list):  # OpenAI content-parts -> plain text
-            content = "".join(part.get("text", "") for part in content
-                              if isinstance(part, dict))
         if role == "system":
+            # System can't carry images — flatten any parts to plain text.
+            if isinstance(content, list):
+                content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
             if content:
                 system_parts.append(content)
             continue
+        if isinstance(content, list):  # OpenAI content-parts -> Anthropic blocks (keep images)
+            content = _anthropic_blocks(content)
         convo.append({"role": "assistant" if role == "assistant" else "user",
                       "content": content})
     if not convo:

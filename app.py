@@ -6175,7 +6175,10 @@ def fusion_models():
             # Whether this model can actually run now (its provider key is set). Lets
             # the picker default to working models + mark the rest — operational, not
             # pricing, so it stays out of the founder-only ¥ machinery.
-            "available": providers.model_available(m["id"])}
+            "available": providers.model_available(m["id"]),
+            # Whether the model accepts image input — the picker badges these so a user with
+            # an attached image knows which models can read it.
+            "vision": config.model_has_vision(m["id"])}
            for m in config.MODEL_CHOICES if m.get("kind", "text") == "text"]
     return jsonify({"models": out, "model_cap": cap,
                     "account_tier": "full" if full else "free"})
@@ -6477,17 +6480,24 @@ def _fusion_chat_member(customer):
         prior = []
     user_index = len(prior)   # the message_index the new user turn will get
 
-    # Attachments (signed-in only): pull the parsed text of any owned files this turn
-    # carries and prepend it to the user message the MODELS see. The persisted turn + the
-    # fuser keep the plain question; the files render as chips, linked by message_index.
+    # Attachments (signed-in only): DOCUMENTS are parsed to text and prepended to the user
+    # message every model sees; IMAGES ride the vision path and go ONLY to vision-capable
+    # council members. The persisted turn + the fuser keep the plain question; files render
+    # as chips, linked by message_index.
     attachment_ids = data.get("attachment_ids")
     atts = (metrics_store.get_fusion_attachments(conversation_id, customer["id"],
-                                                 attachment_ids, want_text=True)
+                                                 attachment_ids, want_text=True, want_files=True)
             if isinstance(attachment_ids, list) and attachment_ids else [])
-    actx = fusion_attachments.build_attachment_context(atts)
+    docs = [a for a in atts if a.get("kind") != "image"]
+    image_parts = [p for p in (fusion_attachments.image_part(a)
+                               for a in atts if a.get("kind") == "image") if p]
+    if image_parts and not any(config.model_has_vision(m) for m in picked):
+        return jsonify({"error": "已附加图片，但所选模型都不支持图片。请在自定义中选择支持"
+                                 "视觉的模型（如 Qwen VL Max）。"}), 400
+    actx = fusion_attachments.build_attachment_context(docs)
     user_for_models = f"{actx}\n\n{text}" if actx else text
 
-    # Build the (clamped) context: stored turns + the new user turn. Older turns drop
+    # Build the (clamped) TEXT context: stored turns + the new user turn. Older turns drop
     # from the window but stay in the DB.
     messages = _fusion_history_messages(prior)
     messages.append({"role": "user", "content": user_for_models})
@@ -6496,13 +6506,18 @@ def _fusion_chat_member(customer):
     # Guarantee a provider-valid context (starts with user, strictly alternates) so a
     # prior failed turn's dangling user message can't poison the conversation.
     messages = _fusion_normalize_alternation(messages)
+    # The vision variant of the final user turn (text + image parts) — fed only to a
+    # vision-capable model; everyone else gets the plain text turn.
+    vision_final = ({"role": "user", "content":
+                     [{"type": "text", "text": messages[-1]["content"]}] + image_parts}
+                    if image_parts else None)
 
     # Founder-only funnel event — now attributed to the signed-in account.
     analytics.track(EVENT_FUSION_QUERY, account_id=customer["id"],
                     anon_id=getattr(g, "anon_id", None), path="/api/fusion/chat",
                     ip_hash=analytics.hash_ip(_client_ip()),
                     props={"models": picked, "fuser": fuser, "tier": tier,
-                           "attachments": len(atts)})
+                           "attachments": len(atts), "images": len(image_parts)})
 
     # Persist the user turn FIRST so the question is always recorded (even if the fan-out
     # then fails) — never a half-saved conversation. The plain question is stored; the
@@ -6514,8 +6529,10 @@ def _fusion_chat_member(customer):
 
     def run_one(mid):
         label = (config.get_model(mid) or {}).get("label", mid)
+        msgs = (messages[:-1] + [vision_final]
+                if vision_final and config.model_has_vision(mid) else messages)
         try:
-            r = providers.gateway_chat(mid, messages, max_tokens=1024)
+            r = providers.gateway_chat(mid, msgs, max_tokens=1024)
             return {"model": mid, "label": label, "ok": True, "text": r["text"],
                     "provider": r["provider"], "input_tokens": r["input_tokens"],
                     "output_tokens": r["output_tokens"]}
