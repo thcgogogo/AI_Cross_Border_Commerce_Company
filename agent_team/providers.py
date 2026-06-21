@@ -480,16 +480,23 @@ class ModelRouter:
             )
             self.last_stop_reason = anthropic_client.last_stop_reason
             return text
-        # File-generation tools and web search are Anthropic-only features. Rather
-        # than fake them, run a normal completion on the chosen model and add an
-        # honest note so the agent (and user) know why no files were produced.
-        note = ("\n\n[Note: file-generation tools and live web search currently run "
-                "only on Claude models. You are running on a non-Anthropic model, so "
-                "produce your deliverable as text/Markdown instead of calling tools.]")
-        return self.complete(
-            system_prompt + note, user_content, model=model, effort=effort,
-            max_tokens=max_tokens, max_retries=max_retries, budget=budget,
-        )
+        # Non-Anthropic: run the OpenAI-compatible tool loop so the model can actually CALL
+        # the file builders (it used to degrade to a text-only completion). Web search stays
+        # Anthropic-only here; the file-generation tools are what this unblocks.
+        self.last_stop_reason = None
+        if self.token_manager and budget:
+            self.token_manager.ensure_can_spend(budget)   # may raise BudgetExceededError
+        messages = [{"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}]
+        result = _openai_chat_with_tools(model, messages, tool_specs, tool_executor,
+                                         max_tokens, max_retries=max_retries,
+                                         max_iterations=max_iterations)
+        inp, out = result["input_tokens"], result["output_tokens"]
+        if self.token_manager and budget:
+            self.token_manager.record_cost(budget, config.cost_cny(model, inp, out))
+        if self.cost_listener:
+            self.cost_listener(model, inp, out)
+        return result["text"]
 
 
 # ---------------------------------------------------------------------------
