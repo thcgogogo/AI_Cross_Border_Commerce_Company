@@ -29,6 +29,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 
 import pytest
 from cryptography.fernet import Fernet
@@ -40,7 +41,7 @@ if ROOT not in sys.path:
 import app  # noqa: E402 — one-time, idempotent module boot
 from agent_team import config, crypto, db, metrics_store, providers  # noqa: E402
 from agent_team.customers import CustomerStore  # noqa: E402
-from agent_team.models import Account, FusionMessage  # noqa: E402
+from agent_team.models import Account, FusionMessage, RUN_KIND_FUSION_SEED  # noqa: E402
 
 A_EMAIL = "alice@corp.com"
 B_EMAIL = "bob@corp.com"
@@ -1012,3 +1013,96 @@ def test_persona_encrypted_at_rest(env, monkeypatch):
         "SELECT system_prompt FROM fusion_conversations WHERE id=?", (cid,)).fetchone()
     assert row[0].startswith("gAAAAA") and "SENSITIVE_PERSONA" not in row[0]
     assert crypto.decrypt_string(row[0]) == "SENSITIVE_PERSONA"
+
+
+# ---------------------------------------------------------------------------
+# 17. Fusion 2.0 R6 — the chat→report-team hand-off (生成完整报告)
+# ---------------------------------------------------------------------------
+def _handoff_capture(monkeypatch):
+    """Stub the background report team — capture the seeded SharedMemory + thread args and
+    signal done, so the hand-off route is exercised end-to-end without the real
+    orchestrator / network."""
+    captured = {}
+    done = threading.Event()
+
+    def fake_run_team(memory, customer_id=None, company_id=None, run_id=None,
+                      industry_key=None, llm=None):
+        captured.update(customer_id=customer_id, company_id=company_id, run_id=run_id,
+                        industry_key=industry_key, documents=memory.documents())
+        done.set()
+    monkeypatch.setattr(app, "_run_team", fake_run_team)
+    return captured, done
+
+
+def test_handoff_seeds_report_run(env, monkeypatch):
+    """A conversation hands off to the report team: the transcript is seeded as a document,
+    a Run(kind=fusion_seed) is opened, and it surfaces in 历史报告 — no ¥ leaks."""
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    captured, done = _handoff_capture(monkeypatch)
+    client = _client_for(env["store"], A_EMAIL)
+    cid = client.post("/api/fusion/chat", json={
+        "text": "帮我分析这季度的销售", "models": ["deepseek-v4-flash"]}
+    ).get_json()["conversation_id"]
+
+    r = client.post(f"/api/fusion/conversations/{cid}/handoff")
+    assert r.status_code == 200, r.get_data(as_text=True)
+    body = r.get_json()
+    assert body["job_id"] and body["run_id"]
+    assert "cost" not in body and "total_cost_yuan" not in body   # customer-safe
+
+    # the background team ran with the conversation transcript seeded as a document
+    assert done.wait(2)
+    docs = captured["documents"]
+    transcript = next((d for d in docs if d["name"] == "对话记录.md"), None)
+    assert transcript is not None
+    assert "帮我分析这季度的销售" in transcript["text"]            # user question carries over
+
+    # the run row is persisted as kind=fusion_seed and shows up in 历史报告
+    kind = sqlite3.connect(env["dbpath"]).execute(
+        "SELECT kind FROM runs WHERE id=?", (body["run_id"],)).fetchone()[0]
+    assert kind == RUN_KIND_FUSION_SEED
+    reports = client.get("/api/reports").get_json()["reports"]
+    assert any(rep["id"] == body["run_id"] for rep in reports)
+
+
+def test_handoff_includes_document_attachments(env, monkeypatch):
+    """An uploaded data file from the chat is seeded alongside the transcript so the report
+    team can analyze it (images / generated files are not re-fed)."""
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    captured, done = _handoff_capture(monkeypatch)
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    att = _attach(client, cid, "sales.csv",
+                  b"metric,value\nZZUNIQUE_SALES,4242\n").get_json()["attachment"]
+    client.post("/api/fusion/chat", json={
+        "conversation_id": cid, "text": "分析这个文件", "models": ["deepseek-v4-flash"],
+        "attachment_ids": [att["id"]]})
+
+    r = client.post(f"/api/fusion/conversations/{cid}/handoff")
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert done.wait(2)
+    docs = captured["documents"]
+    assert any(d["name"] == "sales.csv" and "ZZUNIQUE_SALES" in d["text"] for d in docs)
+
+
+def test_handoff_requires_login(env):
+    anon = app.app.test_client()
+    assert anon.post("/api/fusion/conversations/1/handoff").status_code == 401
+
+
+def test_handoff_foreign_conversation_404(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    _handoff_capture(monkeypatch)
+    a = _client_for(env["store"], A_EMAIL)
+    cid = a.post("/api/fusion/chat", json={
+        "text": "hi", "models": ["deepseek-v4-flash"]}).get_json()["conversation_id"]
+    b = _client_for(env["store"], B_EMAIL)
+    assert b.post(f"/api/fusion/conversations/{cid}/handoff").status_code == 404
+
+
+def test_handoff_empty_conversation_rejected(env, monkeypatch):
+    _handoff_capture(monkeypatch)
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)                 # created, but no turns yet
+    r = client.post(f"/api/fusion/conversations/{cid}/handoff")
+    assert r.status_code == 400

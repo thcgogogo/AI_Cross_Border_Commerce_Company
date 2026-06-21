@@ -86,15 +86,17 @@ RUN_KIND_DEVICE = "device_run"  # Phase 11 — a run executed by a paired deskto
 RUN_KIND_RECON = "recon"     # 对账 / 平台结算核对 — a settlement-reconciliation run
 RUN_KIND_AR = "ar"           # 应收账款管理 + 催收 — an AR aging + dunning-draft run
 RUN_KIND_CROSSBORDER = "crossborder"  # 跨境财务 三流合一/退税/发票/无票免税 — one shared kind
+RUN_KIND_FUSION_SEED = "fusion_seed"  # a full report seeded FROM a Fusion conversation (R6 hand-off)
 RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT, RUN_KIND_DEVICE, RUN_KIND_RECON,
-             RUN_KIND_AR, RUN_KIND_CROSSBORDER)
+             RUN_KIND_AR, RUN_KIND_CROSSBORDER, RUN_KIND_FUSION_SEED)
 
 # Run kinds that count against the shared report quota / can consume a 单次 credit.
 # 对账 and 应收账款 both fold into the existing report quota (owner decisions
 # 2026-06-16 / 2026-06-19) so they sit here next to the weekly report; import + device
 # runs never count. `runs.kind` is a plain String(32), so adding new kinds needs NO
 # enum migration.
-QUOTA_RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_RECON, RUN_KIND_AR, RUN_KIND_CROSSBORDER)
+QUOTA_RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_RECON, RUN_KIND_AR, RUN_KIND_CROSSBORDER,
+                   RUN_KIND_FUSION_SEED)
 
 # Where a scheduled run gets its input files from.
 SOURCE_LATEST_UPLOAD = "latest_upload"   # the most recent files the account uploaded

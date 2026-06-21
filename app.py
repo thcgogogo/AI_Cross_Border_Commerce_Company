@@ -110,6 +110,7 @@ from agent_team.models import (
     RUN_KIND_IMPORT,
     RUN_KIND_AR,
     RUN_KIND_CROSSBORDER,
+    RUN_KIND_FUSION_SEED,
     RUN_KIND_RECON,
     RUN_KIND_REPORT,
     RUN_STOPPED_BUDGET,
@@ -3634,7 +3635,8 @@ def list_reports():
     # badge a device run and never offer a (nonexistent) PDF. Import back-fill rows stay
     # hidden, and device runs still never count toward the plan quota (count_runs_*).
     for r in metrics_store.list_runs(company_id, limit=100,
-                                     kind=(RUN_KIND_REPORT, RUN_KIND_DEVICE)):
+                                     kind=(RUN_KIND_REPORT, RUN_KIND_DEVICE,
+                                           RUN_KIND_FUSION_SEED)):
         rid = r.get("id")
         has_pdf = os.path.isfile(metrics_store.report_pdf_path(company_id, rid))
         job_id = (r.pop("report_path", "") or "").strip()
@@ -6846,6 +6848,119 @@ def fusion_conversation_export(conversation_id):
     fname = _inbox_safe_filename(convo.get("title") or "fusion", fallback="fusion") + ".md"
     return send_file(io.BytesIO(md.encode("utf-8")), mimetype="text/markdown; charset=utf-8",
                      as_attachment=True, download_name=fname)
+
+
+def _fusion_seed_transcript(convo, msgs):
+    """Render an owned Fusion conversation into a clean transcript document for the report
+    team — the user's questions + each turn's reconciled FUSED answer. The per-model voices
+    are intentionally dropped: the report writer wants the conclusion, not the council spread."""
+    lines = []
+    title = (convo.get("title") or "").strip()
+    if title and title != "新对话":
+        lines.append(f"对话主题：{title}")
+    for m in msgs:
+        role = m.get("role")
+        content = (m.get("content") or "").strip()
+        if role == "user" and content:
+            lines.append(f"【提问】{content}")
+        elif role == "assistant" and m.get("status") != "failed" and content:
+            lines.append(f"【Fusion 答复】{content}")
+    return "\n\n".join(lines)
+
+
+def _fusion_seed_documents(conversation_id, customer):
+    """Collect an owned conversation's DOCUMENT attachments as report-team seed docs
+    (decrypted parsed text, shaped like file_tools.parse_file). Images + agent-generated
+    files are skipped — the report team is data/text-driven. Returns [{name,ext,chars,text,meta}]."""
+    by_msg = metrics_store.fusion_attachments_by_message(conversation_id)
+    doc_ids = [a["id"] for chips in by_msg.values() for a in chips
+               if a.get("kind") == metrics_store.FUSION_ATTACH_DOCUMENT]
+    if not doc_ids:
+        return []
+    rows = metrics_store.get_fusion_attachments(conversation_id, customer["id"],
+                                                doc_ids, want_text=True)
+    docs = []
+    for r in rows:
+        text = (r.get("text") or "").strip()
+        if not text:
+            continue
+        name = r.get("filename") or "附件"
+        ext = os.path.splitext(name)[1].lower().lstrip(".")
+        docs.append({"name": name, "ext": ext, "chars": len(text), "text": text,
+                     "meta": {"source": "fusion_attachment"}})
+    return docs
+
+
+@app.route("/api/fusion/conversations/<int:conversation_id>/handoff", methods=["POST"])
+@limiter.limit(config.run_rate_limit, key_func=_run_rate_key)
+def fusion_conversation_handoff(conversation_id):
+    """R6 hand-off — turn an owned Fusion conversation into a full, branded, source-verified
+    报告 produced by the report team (the moat). The conversation transcript + its document
+    attachments seed a real Run(kind="fusion_seed"); the orchestrator runs headlessly in the
+    background and renders the encrypted PDF exactly like /api/run. Returns {job_id, run_id}
+    so the SPA polls /api/status/<job_id> then downloads /api/reports/<run_id>/download.
+
+    Gated by the REPORT PRODUCT's economics (platform breaker + plan quota), NOT the Fusion
+    free-vs-paid council split — a generated report consumes the same quota/credit a /api/run
+    report does (RUN_KIND_FUSION_SEED ∈ QUOTA_RUN_KINDS)."""
+    load_dotenv(override=True)
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再生成报告。"}), 401
+    convo, err = _fusion_owned_convo_or_404(conversation_id, customer)
+    if err:
+        return err
+
+    # Same gates as /api/run: the platform spend breaker, then this account's plan quota.
+    allowed, reason = platform_guard.check(customer["id"], customer.get("daily_cap_yuan"))
+    if not allowed:
+        return jsonify({"error": reason}), 503
+    plan_ok, plan_msg, _gate_code = _plan_gate(customer)
+    if not plan_ok:
+        return jsonify({"error": plan_msg}), 402
+
+    msgs = metrics_store.get_fusion_messages(conversation_id)
+    if not any(m.get("role") == "user" and (m.get("content") or "").strip() for m in msgs):
+        return jsonify({"error": "这条对话还没有内容，无法生成报告。"}), 400
+
+    transcript = _fusion_seed_transcript(convo, msgs)
+    seed_docs = _fusion_seed_documents(conversation_id, customer)
+    title = (convo.get("title") or "").strip() or "Fusion 对话"
+    goal = (f"基于以下 Fusion 对话整理一份正式的经营分析报告（主题：{title}）。"
+            "请综合对话中讨论的要点与随附的数据文件，输出结论先行、每个数字都可溯源的一页式报告。")
+
+    job_id = uuid.uuid4().hex[:12]
+    memory = SharedMemory(job_id, store_dir=MEMORY_DIR, goal=goal,
+                          output_dir=os.path.join(OUTPUT_DIR, job_id))
+    JOBS[job_id] = memory
+    # The conversation transcript is itself a document the team reads (the user's intent +
+    # the reconciled prior analysis), followed by every uploaded data file from the chat.
+    memory.add_document({"name": "对话记录.md", "ext": "md", "chars": len(transcript),
+                         "text": transcript,
+                         "meta": {"source": "fusion_conversation",
+                                  "conversation_id": conversation_id}})
+    for doc in seed_docs:
+        memory.add_document(doc)
+    memory.log("system",
+               f"由 Fusion 对话生成报告：已载入对话记录与 {len(seed_docs)} 个数据文件。",
+               type="info")
+
+    company_id = run_id = None
+    try:
+        company_id = metrics_store.get_or_create_company(
+            customer.get("email"),
+            company_name=customer.get("company") or customer.get("name"))
+        run_id = metrics_store.create_run(company_id, goal, kind=RUN_KIND_FUSION_SEED)
+    except Exception as e:
+        memory.log("system", f"Company memory unavailable ({e}); running without it.",
+                   type="info")
+
+    industry_key = _resolve_industry(None, company_id)
+    thread = threading.Thread(
+        target=_run_team,
+        args=(memory, customer["id"], company_id, run_id, industry_key), daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id, "run_id": run_id})
 
 
 @app.route("/api/fusion/conversations/<int:conversation_id>/attachments/<int:attachment_id>/download",

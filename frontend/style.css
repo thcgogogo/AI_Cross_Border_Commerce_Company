@@ -1539,6 +1539,23 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
   border-radius: 999px; padding: 5px 13px; font: inherit; font-size: 13px; cursor: pointer;
 }
 .fusion-new:hover { border-color: var(--accent); color: var(--accent); }
+/* R6 hand-off — the moat action: turn this chat into a full branded report. */
+.fusion-handoff-btn {
+  margin-left: auto; margin-right: 8px;
+  border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent);
+  border-radius: 999px; padding: 5px 13px; font: inherit; font-size: 13px;
+  font-weight: 700; cursor: pointer;
+}
+.fusion-handoff-btn:hover { background: var(--accent); color: #fff; }
+.fusion-handoff-btn:disabled { opacity: .6; cursor: default; }
+.fusion-handoff-bar {
+  display: flex; align-items: center; gap: 8px; margin: 2px 0 10px;
+  border-radius: 10px; padding: 9px 13px; font-size: 13px; line-height: 1.45;
+}
+.fusion-handoff-bar.running { background: var(--accent-soft); color: var(--accent); }
+.fusion-handoff-bar.done { background: rgba(22,163,74,.10); color: #15803d; }
+.fusion-handoff-bar.error { background: rgba(220,38,38,.08); color: #b91c1c; }
+.fusion-handoff-link { font-weight: 700; white-space: nowrap; }
 .fusion-dock { background: var(--bg); padding-top: 8px; }
 /* Conversing: a proper chat column — the thread scrolls inside a bounded height
    while the dock + foot stay put, so the composer never overlaps the fused answer.

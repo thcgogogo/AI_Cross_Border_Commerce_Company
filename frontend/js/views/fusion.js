@@ -51,6 +51,8 @@ let lastAccountId = null;   // reset the open chat when the signed-in account ch
 let convoQuery = "";        // rail search filter (client-side, by title)
 let carryPending = null;    // anon teaser turns awaiting carry-over import (kept until it lands)
 let modelsForAccount;       // which account identity the tier-aware model cap was loaded for
+let handoff = null;         // R6 report hand-off: {convoId, jobId, runId, status, error}
+let handoffTimer = null;    // poll timer for an in-flight hand-off
 // Freemium teaser (anonymous only): a few free turns, then login is required.
 const FREE_ANON_TURNS = 3;  // initial display only; the server is authoritative
 let freeRemaining = FREE_ANON_TURNS;
@@ -369,10 +371,15 @@ function heroLayout() {
 // ---- conversing layout: thread + a docked composer (or the gate) ------------
 function threadLayout() {
   const gateMode = !state.account && gated;
+  const canHandoff = state.account && conversationId
+    && messages.some((m) => m.role === "assistant");
   return `<div class="fusion-topline">
       <span class="fusion-mark">Model Fusion</span>
+      ${canHandoff ? `<button type="button" class="fusion-handoff-btn" data-handoff
+        title="把这段对话交给报告团队，生成一页式、可溯源的 PDF 报告"${handoff && handoff.status === "running" ? " disabled" : ""}>📄 生成完整报告</button>` : ""}
       ${state.account ? `<button type="button" class="fusion-new" data-new>＋ 新对话</button>` : ""}
     </div>
+    ${handoffBarHTML()}
     <div class="fusion-thread" id="fusionThread">${threadHTML()}</div>
     <div class="fusion-dock">
       ${gateMode ? "" : controlsHTML()}
@@ -406,6 +413,63 @@ async function savePersona(el, ctx, prompt) {
     personaOpen = false;
   } catch (e) { error = (e && e.message) || "保存失败。"; }
   render(el, ctx);
+}
+
+// ---- R6 report hand-off: turn this conversation into a full branded report ---
+function handoffBarHTML() {
+  if (!handoff || handoff.convoId !== conversationId) return "";
+  if (handoff.status === "running") {
+    return `<div class="fusion-handoff-bar running"><span class="spinner"></span>
+      报告团队正在生成完整报告，约需 1–2 分钟，可继续对话…</div>`;
+  }
+  if (handoff.status === "error") {
+    return `<div class="fusion-handoff-bar error">报告生成失败：${esc(handoff.error || "请稍后重试")}</div>`;
+  }
+  // done
+  const link = handoff.runId
+    ? `<a class="fusion-handoff-link" href="/reports/${handoff.runId}" data-nav>查看报告 →</a>`
+    : "";
+  return `<div class="fusion-handoff-bar done">✅ 完整报告已生成 ${link}</div>`;
+}
+
+async function startHandoff(el, ctx) {
+  if (!conversationId || (handoff && handoff.status === "running")) return;
+  handoff = { convoId: conversationId, status: "running" };
+  render(el, ctx);
+  try {
+    const r = await api.fusionConversationHandoff(conversationId);
+    handoff.jobId = r.job_id;
+    handoff.runId = r.run_id;
+  } catch (e) {
+    handoff.status = "error";
+    handoff.error = (e && e.message) || "无法启动报告生成。";
+    render(el, ctx);
+    return;
+  }
+  render(el, ctx);
+  pollHandoff(el, ctx);
+}
+
+function pollHandoff(el, ctx) {
+  if (handoffTimer) clearTimeout(handoffTimer);
+  const job = handoff && handoff.jobId;
+  if (!job) return;
+  handoffTimer = setTimeout(async () => {
+    if (!handoff || handoff.jobId !== job) return;   // superseded / cleared
+    let s;
+    try { s = await api.getJobStatus(job); } catch (e) { pollHandoff(el, ctx); return; }
+    const status = (s && s.status) || "running";
+    if (status === "done") {
+      handoff.status = "done";
+      render(el, ctx);
+    } else if (status === "error") {
+      handoff.status = "error";
+      handoff.error = (s && s.error) || "报告生成失败。";
+      render(el, ctx);
+    } else {
+      pollHandoff(el, ctx);
+    }
+  }, 1500);
 }
 
 // ---- council controls (presets + the 自定义 model picker) --------------------
@@ -638,6 +702,8 @@ function wire(el, ctx) {
   // The topline ＋新对话 button (shown in both anon + signed-in conversing views).
   el.querySelectorAll(".fusion-new").forEach((b) =>
     b.addEventListener("click", () => newConversation(el, ctx)));
+  const ho = el.querySelector("[data-handoff]");
+  if (ho) ho.addEventListener("click", () => startHandoff(el, ctx));
 
   el.querySelectorAll(".fc-rm").forEach((b) =>
     b.addEventListener("click", () => {

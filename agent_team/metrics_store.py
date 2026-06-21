@@ -76,6 +76,7 @@ from .models import (
     RUN_FAILED,
     RUN_KIND_AR,
     RUN_KIND_DEVICE,
+    RUN_KIND_FUSION_SEED,
     RUN_KIND_IMPORT,
     RUN_KIND_RECON,
     RUN_KIND_REPORT,

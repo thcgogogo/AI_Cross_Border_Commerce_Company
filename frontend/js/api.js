@@ -165,6 +165,9 @@ export const getFusionPersonas = () => getJSON("/api/fusion/personas");
 export const setFusionPersona = (id, systemPrompt) =>
   patchJSON(`/api/fusion/conversations/${id}`, { system_prompt: systemPrompt });
 export const deleteFusionConversation = (id) => delJSON(`/api/fusion/conversations/${id}`);
+// R6 hand-off — seed the report team from a conversation; returns {job_id, run_id}.
+export const fusionConversationHandoff = (id) =>
+  postJSON(`/api/fusion/conversations/${id}/handoff`, {});
 export const attachFusionFile = (conversationId, file) => {
   const fd = new FormData();
   fd.append("file", file);
