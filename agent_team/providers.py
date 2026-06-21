@@ -28,7 +28,8 @@ import os
 import re
 
 from . import config
-from .llm import LLMClient, LLMError, _text_of, _count_tokens  # noqa: F401  (_text_of/_count_tokens reused)
+from .llm import (LLMClient, LLMError, WEB_SEARCH_TOOL, _serialize_blocks,  # noqa: F401
+                  _text_of, _count_tokens)
 
 
 class ProviderKeyMissing(LLMError):
@@ -91,12 +92,14 @@ def _missing_key_message(model_id):
 # ---------------------------------------------------------------------------
 # OpenAI-compatible adapter (OpenAI, Google, xAI, DeepSeek, Qwen, MiniMax, Moonshot)
 # ---------------------------------------------------------------------------
-def _openai_chat(model_id, messages, max_tokens, max_retries=3):
+def _openai_chat(model_id, messages, max_tokens, max_retries=3, web_search=False):
     """Call a non-Anthropic, OpenAI-compatible provider and return a result dict.
 
     Returns {"text", "input_tokens", "output_tokens"}. Raises ProviderKeyMissing
     if the provider key is absent, or LLMError on an API failure. Uses the official
-    `openai` SDK pointed at the provider's base_url (per config.PROVIDERS)."""
+    `openai` SDK pointed at the provider's base_url (per config.PROVIDERS). With
+    web_search=True on a DashScope (Qwen) model, flips on DashScope's `enable_search`
+    so the model can browse the live web; ignored for providers without a switch."""
     pid, p = _provider_cfg(model_id)
     key = provider_key(model_id)
     if not key:
@@ -117,6 +120,8 @@ def _openai_chat(model_id, messages, max_tokens, max_retries=3):
         max_retries=max_retries,
     )
     kwargs = {"model": model_id, "messages": messages, "max_tokens": max_tokens}
+    if web_search and pid == "qwen":
+        kwargs["extra_body"] = {"enable_search": True}   # DashScope's web-browse switch
     try:
         resp = client.chat.completions.create(**kwargs)
     except openai.BadRequestError as e:
@@ -184,12 +189,14 @@ def _anthropic_blocks(parts):
     return blocks or ""
 
 
-def _anthropic_chat(model_id, messages, max_tokens):
+def _anthropic_chat(model_id, messages, max_tokens, web_search=False):
     """Call Claude with an OpenAI-style `messages` list (used by the gateway).
 
     Splits out system messages, maps the rest to Anthropic's user/assistant
     turns, streams the response, and returns {"text", "input_tokens",
-    "output_tokens"} using the real usage the API reports."""
+    "output_tokens"} using the real usage the API reports. With web_search=True,
+    adds Claude's native web-search tool and resumes the turn while a search is
+    still running (stop_reason='pause_turn')."""
     import anthropic
 
     key = provider_key(model_id)  # reads ANTHROPIC_API_KEY for the anthropic provider
@@ -221,34 +228,44 @@ def _anthropic_chat(model_id, messages, max_tokens):
         kwargs["system"] = "\n\n".join(system_parts)
     if model_id in config.MODELS_WITH_ADAPTIVE_THINKING:
         kwargs["extra_body"] = {"thinking": {"type": "adaptive"}}
+    if web_search:
+        kwargs["tools"] = [WEB_SEARCH_TOOL]
 
-    try:
-        with client.messages.stream(**kwargs) as stream:
-            final = stream.get_final_message()
-    except anthropic.APIStatusError as e:
-        raise LLMError(f"Claude API error ({getattr(e, 'status_code', '?')}): {e}")
-    except anthropic.AnthropicError as e:
-        raise LLMError(f"Claude API error: {e}")
+    final, in_tok, out_tok = None, 0, 0
+    for _ in range(6):   # cap web-search 'pause_turn' resumes
+        try:
+            with client.messages.stream(**kwargs) as stream:
+                final = stream.get_final_message()
+        except anthropic.APIStatusError as e:
+            raise LLMError(f"Claude API error ({getattr(e, 'status_code', '?')}): {e}")
+        except anthropic.AnthropicError as e:
+            raise LLMError(f"Claude API error: {e}")
+        usage = getattr(final, "usage", None)
+        in_tok += int(getattr(usage, "input_tokens", 0) or 0)
+        out_tok += int(getattr(usage, "output_tokens", 0) or 0)
+        if getattr(final, "stop_reason", None) != "pause_turn":
+            break
+        # A web search is still running — hand the partial turn back to resume it.
+        convo.append({"role": "assistant",
+                      "content": _serialize_blocks(getattr(final, "content", []) or [])})
+        kwargs["messages"] = convo
 
-    usage = getattr(final, "usage", None)
-    return {
-        "text": _text_of(final),
-        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
-        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
-    }
+    return {"text": _text_of(final), "input_tokens": in_tok, "output_tokens": out_tok}
 
 
-def gateway_chat(model_id, messages, max_tokens=1024):
+def gateway_chat(model_id, messages, max_tokens=1024, web_search=False):
     """Route a raw OpenAI-style chat request to the right provider.
 
     Returns {"text", "input_tokens", "output_tokens", "model", "provider"}.
+    With web_search=True, providers that support live search use it (Claude's native
+    tool / Qwen's enable_search); others ignore the flag and answer normally.
     This is the single entry point the unified-API gateway (/v1/chat/completions)
     calls once it has authenticated the customer and checked model access."""
     provider = config.provider_for(model_id)
     if provider == "anthropic":
-        result = _anthropic_chat(model_id, messages, max_tokens)
+        result = _anthropic_chat(model_id, messages, max_tokens, web_search=web_search)
     else:
-        result = _openai_chat(model_id, messages, max_tokens)
+        result = _openai_chat(model_id, messages, max_tokens, web_search=web_search)
     return {**result, "model": model_id, "provider": provider}
 
 

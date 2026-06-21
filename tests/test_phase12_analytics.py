@@ -136,7 +136,7 @@ def test_signup_links_anon_id_to_account(fresh_db, tmp_path, monkeypatch):
 #    (Fusion requires login since the multi-turn-memory upgrade).
 # ---------------------------------------------------------------------------
 def test_fusion_query_records_account_event(fresh_db, tmp_path, monkeypatch):
-    def fake_gateway(model_id, messages, max_tokens=1024):
+    def fake_gateway(model_id, messages, max_tokens=1024, web_search=False):
         return {"text": f"[{model_id}] ok", "input_tokens": 3, "output_tokens": 4,
                 "model": model_id, "provider": config.provider_for(model_id)}
     monkeypatch.setattr(app.providers, "gateway_chat", fake_gateway)

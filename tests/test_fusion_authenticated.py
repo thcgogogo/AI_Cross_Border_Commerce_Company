@@ -73,10 +73,10 @@ def _client_for(store, email):
 def _fake_gateway(captured=None, fail=()):
     """Faked-but-billed gateway: returns real token counts (so record_usage meters COGS)
     and can simulate per-model failure. `fail` is a set of model ids that raise."""
-    def fake(model_id, messages, max_tokens=1024):
+    def fake(model_id, messages, max_tokens=1024, web_search=False):
         if captured is not None:
             captured.setdefault("calls", []).append(
-                {"model": model_id, "messages": messages})
+                {"model": model_id, "messages": messages, "web_search": web_search})
         if model_id in fail:
             raise providers.LLMError(f"{model_id} unavailable")
         # Real-ish token counts so record_usage meters a non-zero ¥ COGS (a handful of
@@ -826,3 +826,70 @@ def test_export_markdown(env, monkeypatch):
     # account B cannot export account A's conversation
     assert _client_for(env["store"], B_EMAIL).get(
         f"/api/fusion/conversations/{cid}/export").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 16. Fusion 2.0 R4 — live web search (the council can look things up)
+# ---------------------------------------------------------------------------
+def test_web_search_capability_flags():
+    assert config.model_supports_web_search("qwen-plus")       # DashScope enable_search
+    assert config.model_supports_web_search("claude-haiku-4-5")  # native tool
+    assert not config.model_supports_web_search("deepseek-v4-flash")
+
+
+def test_gateway_chat_forwards_web_search(monkeypatch):
+    """gateway_chat passes web_search down to the right adapter."""
+    seen = {}
+    monkeypatch.setattr(app.providers, "_openai_chat",
+                        lambda mid, msgs, max_tokens, web_search=False:
+                        seen.update(openai=web_search) or {"text": "x", "input_tokens": 1, "output_tokens": 1})
+    monkeypatch.setattr(app.providers, "_anthropic_chat",
+                        lambda mid, msgs, max_tokens, web_search=False:
+                        seen.update(anthropic=web_search) or {"text": "x", "input_tokens": 1, "output_tokens": 1})
+    app.providers.gateway_chat("deepseek-v4-flash", [{"role": "user", "content": "hi"}], web_search=True)
+    app.providers.gateway_chat("claude-haiku-4-5", [{"role": "user", "content": "hi"}], web_search=True)
+    assert seen == {"openai": True, "anthropic": True}
+
+
+def test_openai_chat_enable_search_only_for_qwen(env, monkeypatch):
+    """Qwen (DashScope) gets enable_search via extra_body; other OpenAI-compatible providers
+    don't (no standard switch), so the flag is silently ignored for them."""
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    captured = {}
+
+    class _Completions:
+        def create(self, **kw):
+            captured["kwargs"] = kw
+            return type("R", (), {"choices": [type("C", (), {"message": type("M", (), {"content": "ok"})()})()],
+                                  "usage": type("U", (), {"prompt_tokens": 1, "completion_tokens": 1})()})()
+
+    class _Client:
+        def __init__(self, **kw):
+            self.chat = type("Chat", (), {"completions": _Completions()})()
+
+    import openai
+    monkeypatch.setattr(openai, "OpenAI", _Client)
+    app.providers.gateway_chat("qwen-plus", [{"role": "user", "content": "今天的新闻"}], web_search=True)
+    assert captured["kwargs"].get("extra_body") == {"enable_search": True}
+    app.providers.gateway_chat("deepseek-v4-flash", [{"role": "user", "content": "hi"}], web_search=True)
+    assert "extra_body" not in captured["kwargs"]
+
+
+def test_fusion_web_search_full_tier_only(env, monkeypatch):
+    """Live web search is forwarded only on the paid/founder tier; free ignores the flag."""
+    captured = {}
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway(captured))
+    monkeypatch.setenv("ADMIN_EMAILS", A_EMAIL)          # founder → full tier
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    client.post("/api/fusion/chat", json={"conversation_id": cid, "text": "今天的新闻",
+                                          "models": ["qwen-plus"], "web_search": True})
+    assert any(c.get("web_search") for c in captured["calls"])
+    # free tier: the flag is dropped even if requested
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    captured["calls"].clear()
+    cid2 = _create_convo(client)
+    client.post("/api/fusion/chat", json={"conversation_id": cid2, "text": "今天的新闻",
+                                          "models": ["qwen-plus"], "web_search": True})
+    assert not any(c.get("web_search") for c in captured["calls"])

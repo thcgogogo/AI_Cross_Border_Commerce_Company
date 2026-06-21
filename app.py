@@ -6178,7 +6178,9 @@ def fusion_models():
             "available": providers.model_available(m["id"]),
             # Whether the model accepts image input — the picker badges these so a user with
             # an attached image knows which models can read it.
-            "vision": config.model_has_vision(m["id"])}
+            "vision": config.model_has_vision(m["id"]),
+            # Whether the "live web search" toggle reaches a real search for this model.
+            "search": config.model_supports_web_search(m["id"])}
            for m in config.MODEL_CHOICES if m.get("kind", "text") == "text"]
     return jsonify({"models": out, "model_cap": cap,
                     "account_tier": "full" if full else "free"})
@@ -6466,6 +6468,9 @@ def _fusion_chat_member(customer):
     if not picked:
         return jsonify({"error": "Pick at least one text model."}), 400
     fuser = fuser_override or (data.get("fuser") or "auto").strip()
+    # Live web search is a PAID/founder capability (added latency + COGS). Models that
+    # support it (Claude / Qwen) search; the rest answer normally. Free tier ignores it.
+    web_search = bool(data.get("web_search")) and tier == "full"
 
     # Resolve / create the conversation (account-owned; 404 on a foreign/missing id).
     conversation_id = data.get("conversation_id")
@@ -6517,7 +6522,8 @@ def _fusion_chat_member(customer):
                     anon_id=getattr(g, "anon_id", None), path="/api/fusion/chat",
                     ip_hash=analytics.hash_ip(_client_ip()),
                     props={"models": picked, "fuser": fuser, "tier": tier,
-                           "attachments": len(atts), "images": len(image_parts)})
+                           "attachments": len(atts), "images": len(image_parts),
+                           "web_search": web_search})
 
     # Persist the user turn FIRST so the question is always recorded (even if the fan-out
     # then fails) — never a half-saved conversation. The plain question is stored; the
@@ -6532,7 +6538,7 @@ def _fusion_chat_member(customer):
         msgs = (messages[:-1] + [vision_final]
                 if vision_final and config.model_has_vision(mid) else messages)
         try:
-            r = providers.gateway_chat(mid, msgs, max_tokens=1024)
+            r = providers.gateway_chat(mid, msgs, max_tokens=1024, web_search=web_search)
             return {"model": mid, "label": label, "ok": True, "text": r["text"],
                     "provider": r["provider"], "input_tokens": r["input_tokens"],
                     "output_tokens": r["output_tokens"]}

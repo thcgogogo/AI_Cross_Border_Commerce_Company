@@ -34,6 +34,7 @@ let selected = [];          // ordered model ids in the council
 let fuser = "auto";         // which model reconciles them
 let preset = "budget";      // quality | budget | custom
 let advanced = false;       // is the model picker revealed?
+let webSearch = false;      // live web search toggle (paid/founder; Claude + Qwen actually search)
 let messages = [];          // [{role:"user"|"assistant", content, by_label?, answers?, note?}]
 let sending = false;
 let error = "";
@@ -401,6 +402,7 @@ function controlsHTML() {
       ${presetChip("budget", "经济")}
       <button type="button" class="fusion-adv-toggle ${advanced ? "on" : ""}" data-adv
         aria-expanded="${advanced ? "true" : "false"}">自定义模型 ${advanced ? "▴" : "▾"}</button>
+      ${state.fusionAccountTier === "full" ? `<button type="button" class="fusion-preset ${webSearch ? "on" : ""}" data-websearch aria-pressed="${webSearch}" title="部分模型支持（Claude / Qwen）">🌐 联网搜索</button>` : ""}
     </div>
     ${picker}
   </div>`;
@@ -538,6 +540,8 @@ function wire(el, ctx) {
     b.addEventListener("click", () => { preset = b.dataset.preset; applyPreset(preset); render(el, ctx); }));
   const adv = el.querySelector(".fusion-adv-toggle");
   if (adv) adv.addEventListener("click", () => { advanced = !advanced; render(el, ctx); });
+  const ws = el.querySelector("[data-websearch]");
+  if (ws) ws.addEventListener("click", () => { webSearch = !webSearch; render(el, ctx); });
 
   el.querySelectorAll(".fusion-example").forEach((b) =>
     b.addEventListener("click", () => {
@@ -615,7 +619,7 @@ async function send(el, ctx) {
       // conversation id (null on the first turn → the server creates one + returns it);
       // prior turns are loaded from the encrypted conversation server-side.
       ? await api.fusionChat({ conversation_id: conversationId, text, models: selected, fuser,
-                               attachment_ids: sentAtts.map((a) => a.id) })
+                               attachment_ids: sentAtts.map((a) => a.id), web_search: webSearch })
       // Anonymous teaser: send the client-maintained history (no server memory).
       // Skip turns where every model failed — replaying the '没有模型成功作答' placeholder
       // would feed it back to the council as a real prior answer.

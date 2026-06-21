@@ -1021,6 +1021,16 @@ def model_has_vision(model_id):
     return model_id in VISION_INPUT_MODELS
 
 
+# Providers where Fusion's "live web search" toggle reaches a real search: Claude's native
+# web-search tool, and Qwen via DashScope's enable_search. Others ignore the flag.
+WEB_SEARCH_PROVIDERS = frozenset({"anthropic", "qwen"})
+
+
+def model_supports_web_search(model_id):
+    """True if the live-web-search toggle actually does something for this model."""
+    return provider_for(model_id) in WEB_SEARCH_PROVIDERS
+
+
 def is_image_model(model_id):
     """True for text-to-image models (kept for callers that special-case images)."""
     return model_kind(model_id) == "image"
