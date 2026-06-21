@@ -20,6 +20,15 @@ customer never writes a prompt, never picks a model, never sees a token. There a
   login. Model names are shown here (the council/voices); ¥/tokens never are. Rate-limited
   per-account (signed-in) / per-IP (anon teaser) under the platform spend caps. (The
   founder-only `POST /api/fusion` — single-shot, shows ¥ — is separate + stays `_is_admin`-gated.)
+  **Fusion 2.0** (2026-06-21) layered on multimodal + agentic capability, reusing the report
+  engine: **file attachments** (PDF/Excel/CSV/Word parsed via `file_tools`, R1) and **image/vision**
+  input (R2 — routed only to vision-capable members; added `qwen-vl-max` for a domestic vision
+  path), both stored encrypted + account/conversation-scoped in **`fusion_attachments`**;
+  **organize** (pin/title-search/Markdown-export, R3); **live web search** (R4 — Qwen
+  `enable_search` + Claude's native tool, full-tier, fuser reconciles); and **agent mode** (R5 —
+  one model runs an **OpenAI-compatible tool loop** in `providers.gateway_chat_with_tools` that
+  GENERATES files via `deliverables`, saved as downloadable `fusion_attachments`). The non-Anthropic
+  tool loop is the same one that unblocks the report team's file generation.
 - **工作流** (sign-in required; the customer nav tab — formerly "Agents") — the
   report/analytics product: the AI team that turns Excel into a verified weekly report,
   delivered on a schedule. The whole flow is now ONE consolidated page, **数据分析+报告
@@ -55,7 +64,7 @@ pip install -e .              # then: tangent-agent   (loopback server + tray ic
 
 # Production
 docker compose up -d          # nginx → 4 gunicorn workers + scheduler worker + Postgres 16 + redis
-alembic upgrade head          # migrations 0001–0014 (head = 0014_anon_fusion_usage)
+alembic upgrade head          # migrations 0001–0016 (head = 0016_fusion_pin)
 ```
 
 There is **no configured linter/formatter** (no ruff/black/flake8 config); match the

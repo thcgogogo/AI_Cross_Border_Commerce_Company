@@ -35,6 +35,13 @@ Signed-in usage is bounded per-account, the anonymous teaser per-IP, all under t
 spend caps (see [docs/ops.md](docs/ops.md) §7.7 — **the first 3 anonymous turns are
 server-paid, so set the caps before going public**).
 
+**Fusion 2.0** (2026-06-21) makes the chat multimodal and agentic, reusing the report engine:
+attach **documents** (PDF/Excel/CSV/Word — every model reads them) or **images** (vision-capable
+models see them; `qwen-vl-max` gives a domestic vision path); **organize** with pin / title-search
+/ Markdown-export; toggle **🌐 live web search** (Qwen `enable_search` + Claude's native tool); and
+**🛠 Agent mode**, where one model runs a tool loop and **generates real files** (Excel / PDF / PPT
+/ Word / SVG) you can download. Attachments are encrypted at rest and account/conversation-scoped.
+
 The report/analytics product described below now lives under the **Agents** section
 (sign-in required): the AI team that turns your Excel into a source-verified weekly
 经营周报. Everything in "The build record" and the moats applies to Agents.
