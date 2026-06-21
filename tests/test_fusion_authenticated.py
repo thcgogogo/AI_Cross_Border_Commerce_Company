@@ -786,3 +786,43 @@ def test_image_without_vision_model_errors(env, monkeypatch):
         "conversation_id": cid, "text": "看图", "models": ["deepseek-v4-flash"],
         "attachment_ids": [att["id"]]})
     assert r.status_code == 400 and "图片" in r.get_json()["error"]
+
+
+# ---------------------------------------------------------------------------
+# 15. Fusion 2.0 R3 — organize (pin / search / export)
+# ---------------------------------------------------------------------------
+def test_pin_sorts_to_top(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    a = _create_convo(client)
+    b = _create_convo(client)   # newer → first by recency
+    assert client.patch(f"/api/fusion/conversations/{a}",
+                        json={"is_pinned": True}).status_code == 200
+    convos = client.get("/api/fusion/conversations").get_json()["conversations"]
+    assert convos[0]["id"] == a and convos[0]["is_pinned"] is True   # pinned floats up
+    client.patch(f"/api/fusion/conversations/{a}", json={"is_pinned": False})
+    assert client.get("/api/fusion/conversations").get_json()["conversations"][0]["id"] == b
+
+
+def test_patch_pin_ownership_and_empty(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    cid = _create_convo(_client_for(env["store"], A_EMAIL))
+    b = _client_for(env["store"], B_EMAIL)
+    assert b.patch(f"/api/fusion/conversations/{cid}", json={"is_pinned": True}).status_code == 404
+    a = _client_for(env["store"], A_EMAIL)
+    assert a.patch(f"/api/fusion/conversations/{cid}", json={}).status_code == 400  # nothing to do
+    assert a.patch(f"/api/fusion/conversations/{cid}", json={"title": "新名字"}).status_code == 200
+
+
+def test_export_markdown(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    cid = client.post("/api/fusion/chat", json={"text": "什么是 Fusion", "models": ["deepseek-v4-flash"]}
+                      ).get_json()["conversation_id"]
+    r = client.get(f"/api/fusion/conversations/{cid}/export")
+    assert r.status_code == 200 and "text/markdown" in r.headers.get("Content-Type", "")
+    body = r.get_data(as_text=True)
+    assert "什么是 Fusion" in body and "Fusion 答案" in body
+    # account B cannot export account A's conversation
+    assert _client_for(env["store"], B_EMAIL).get(
+        f"/api/fusion/conversations/{cid}/export").status_code == 404

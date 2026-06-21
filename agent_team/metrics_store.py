@@ -3475,6 +3475,7 @@ def company_has_successful_run(company_id):
 def _fusion_convo_dict(c):
     return {"id": c.id, "account_id": c.account_id, "title": c.title,
             "status": c.status, "model_tier": c.model_tier,
+            "is_pinned": bool(c.is_pinned),
             "message_count": int(c.message_count or 0),
             "created_at": _iso(c.created_at), "updated_at": _iso(c.updated_at),
             "last_message_at": _iso(c.last_message_at)}
@@ -3523,18 +3524,34 @@ def get_fusion_conversation(conversation_id):
 
 
 def list_fusion_conversations(account_id, limit=100):
-    """Active conversations for an account, most-recent activity first (list view)."""
+    """Active conversations for an account — PINNED first, then most-recent activity."""
     if not account_id:
         return []
     from sqlalchemy import func
-    order = func.coalesce(FusionConversation.last_message_at,
-                          FusionConversation.created_at).desc()
+    recency = func.coalesce(FusionConversation.last_message_at,
+                            FusionConversation.created_at).desc()
     with db.session_scope() as s:
         rows = (s.query(FusionConversation)
                 .filter(FusionConversation.account_id == str(account_id),
                         FusionConversation.status == FUSION_CONVO_ACTIVE)
-                .order_by(order).limit(int(limit)).all())
+                .order_by(FusionConversation.is_pinned.desc(), recency)
+                .limit(int(limit)).all())
         return [_fusion_convo_dict(c) for c in rows]
+
+
+def set_fusion_conversation_pinned(account_id, conversation_id, pinned):
+    """Pin/unpin a conversation the account owns (rail sort). Returns True if updated."""
+    if not (account_id and conversation_id):
+        return False
+    with db.session_scope() as s:
+        c = (s.query(FusionConversation)
+             .filter_by(id=conversation_id, account_id=str(account_id),
+                        status=FUSION_CONVO_ACTIVE).one_or_none())
+        if c is None:
+            return False
+        c.is_pinned = bool(pinned)
+        c.updated_at = datetime.utcnow()
+        return True
 
 
 def get_fusion_messages(conversation_id):

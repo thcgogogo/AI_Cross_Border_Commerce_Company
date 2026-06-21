@@ -43,6 +43,7 @@ let conversations = [];     // the account's saved conversations (rail) [{id,tit
 let conversationId = null;  // the open conversation's id (null = a fresh, unsaved chat)
 let loadingConvo = false;   // rehydrating a conversation from the server
 let lastAccountId = null;   // reset the open chat when the signed-in account changes
+let convoQuery = "";        // rail search filter (client-side, by title)
 let carryPending = null;    // anon teaser turns awaiting carry-over import (kept until it lands)
 let modelsForAccount;       // which account identity the tier-aware model cap was loaded for
 // Freemium teaser (anonymous only): a few free turns, then login is required.
@@ -178,12 +179,17 @@ function wireGate(el, ctx) {
 
 // ---- conversation rail (the account's saved chats) --------------------------
 function railHTML() {
-  const items = conversations.map((c) => {
+  const q = convoQuery.trim().toLowerCase();
+  const list = q ? conversations.filter((c) => (c.title || "").toLowerCase().includes(q))
+                 : conversations;
+  const items = list.map((c) => {
     const on = c.id === conversationId ? " on" : "";
     const title = c.title || "新对话";
-    return `<li class="fusion-convo${on}">
-      <button type="button" class="fc-open" data-cid="${c.id}" title="${esc(title)}">${esc(title)}</button>
+    return `<li class="fusion-convo${on}${c.is_pinned ? " pinned" : ""}">
+      <button type="button" class="fc-open" data-cid="${c.id}" title="${esc(title)}">${c.is_pinned ? "📌 " : ""}${esc(title)}</button>
       <span class="fc-actions">
+        <button type="button" class="fc-pin" data-cid="${c.id}" data-pinned="${c.is_pinned ? 1 : 0}" aria-label="置顶" title="${c.is_pinned ? "取消置顶" : "置顶"}">${c.is_pinned ? "📌" : "📍"}</button>
+        <button type="button" class="fc-exp" data-cid="${c.id}" aria-label="导出" title="导出 Markdown">⬇</button>
         <button type="button" class="fc-ren" data-cid="${c.id}" aria-label="重命名" title="重命名">✎</button>
         <button type="button" class="fc-del" data-cid="${c.id}" aria-label="删除" title="删除">×</button>
       </span>
@@ -191,8 +197,18 @@ function railHTML() {
   }).join("");
   return `<aside class="fusion-rail">
     <button type="button" class="fusion-new-convo" data-new>＋ 新对话</button>
-    <ul class="fusion-convos">${items || `<li class="fusion-convos-empty muted">还没有对话</li>`}</ul>
+    <input type="search" class="fusion-search" id="fusionSearch" placeholder="搜索对话…" value="${esc(convoQuery)}">
+    <ul class="fusion-convos">${items || `<li class="fusion-convos-empty muted">${q ? "没有匹配的对话" : "还没有对话"}</li>`}</ul>
   </aside>`;
+}
+
+function downloadExport(id) {
+  const a = document.createElement("a");
+  a.href = `/api/fusion/conversations/${id}/export`;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 async function refreshConversations() {
@@ -274,6 +290,25 @@ function wireRail(el, ctx) {
     b.addEventListener("click", (e) => { e.stopPropagation(); renameConvo(el, ctx, Number(b.dataset.cid)); }));
   el.querySelectorAll(".fc-del").forEach((b) =>
     b.addEventListener("click", (e) => { e.stopPropagation(); deleteConvo(el, ctx, Number(b.dataset.cid)); }));
+  el.querySelectorAll(".fc-exp").forEach((b) =>
+    b.addEventListener("click", (e) => { e.stopPropagation(); downloadExport(Number(b.dataset.cid)); }));
+  el.querySelectorAll(".fc-pin").forEach((b) =>
+    b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try { await api.pinFusionConversation(Number(b.dataset.cid), b.dataset.pinned !== "1"); await refreshConversations(); }
+      catch (err) { error = (err && err.message) || "操作失败。"; }
+      render(el, ctx);
+    }));
+  // Search filters the loaded rail in-place (no re-render → the input keeps focus).
+  const search = el.querySelector("#fusionSearch");
+  if (search) search.addEventListener("input", () => {
+    convoQuery = search.value;
+    const q = convoQuery.trim().toLowerCase();
+    el.querySelectorAll(".fusion-convo").forEach((li) => {
+      const t = ((li.querySelector(".fc-open") || {}).textContent || "").toLowerCase();
+      li.style.display = (!q || t.includes(q)) ? "" : "none";
+    });
+  });
 }
 
 // The foot line adapts: signed-in vs the anonymous free-turn meter vs the spent gate.

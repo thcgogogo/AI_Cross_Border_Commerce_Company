@@ -6605,7 +6605,7 @@ def fusion_conversations_list():
         return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
     items = metrics_store.list_fusion_conversations(customer["id"])
     out = [{"id": c["id"], "title": c["title"] or "新对话",
-            "message_count": c["message_count"],
+            "message_count": c["message_count"], "is_pinned": c["is_pinned"],
             "last_message_at": c["last_message_at"], "created_at": c["created_at"]}
            for c in items]
     return jsonify({"conversations": out})
@@ -6727,18 +6727,68 @@ def fusion_conversation_get(conversation_id):
 
 
 @app.route("/api/fusion/conversations/<int:conversation_id>", methods=["PATCH"])
-def fusion_conversation_rename(conversation_id):
-    """Rename one owned conversation."""
+def fusion_conversation_update(conversation_id):
+    """Update one owned conversation: rename (title) and/or pin (is_pinned)."""
     customer = _current_customer()
     if not customer:
         return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
     data = request.get_json(silent=True) or {}
-    title = (data.get("title") or "").strip()
-    if not title:
-        return jsonify({"error": "标题不能为空。"}), 400
-    if not metrics_store.rename_fusion_conversation(customer["id"], conversation_id, title):
-        return jsonify({"error": "对话不存在。"}), 404
-    return jsonify({"ok": True, "title": title[:255]})
+    did = False
+    if "is_pinned" in data:
+        if not metrics_store.set_fusion_conversation_pinned(
+                customer["id"], conversation_id, bool(data.get("is_pinned"))):
+            return jsonify({"error": "对话不存在。"}), 404
+        did = True
+    if "title" in data:
+        title = (data.get("title") or "").strip()
+        if not title:
+            return jsonify({"error": "标题不能为空。"}), 400
+        if not metrics_store.rename_fusion_conversation(customer["id"], conversation_id, title):
+            return jsonify({"error": "对话不存在。"}), 404
+        did = True
+    if not did:
+        return jsonify({"error": "没有要更新的内容。"}), 400
+    return jsonify({"ok": True})
+
+
+def _fusion_export_markdown(convo, msgs):
+    """Render one conversation to Markdown for export (the fused answer + each model's
+    full reply behind a collapsible)."""
+    lines = [f"# {convo.get('title') or 'Fusion 对话'}", ""]
+    for m in msgs:
+        if m.get("role") == "user":
+            lines.append(f"## 🧑 你\n\n{m.get('content', '')}\n")
+            continue
+        if m.get("status") == "failed":
+            lines.append("## 🤖 Fusion\n\n_（本轮所有模型未作答）_\n")
+            continue
+        by = (m.get("fused") or {}).get("by_label")
+        lines.append(f"## 🤖 Fusion 答案{f'（{by}）' if by else ''}\n\n{m.get('content', '')}\n")
+        answers = m.get("answers") or []
+        if answers:
+            lines.append("<details><summary>各模型完整回答</summary>\n")
+            for a in answers:
+                if a.get("ok"):
+                    lines.append(f"**{a.get('label', '')}**\n\n{a.get('text', '')}\n")
+                else:
+                    lines.append(f"**{a.get('label', '')}** — 未作答\n")
+            lines.append("</details>\n")
+    return "\n".join(lines)
+
+
+@app.route("/api/fusion/conversations/<int:conversation_id>/export", methods=["GET"])
+def fusion_conversation_export(conversation_id):
+    """Download one owned conversation as a Markdown file (decrypted on the fly)."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    convo, err = _fusion_owned_convo_or_404(conversation_id, customer)
+    if err:
+        return err
+    md = _fusion_export_markdown(convo, metrics_store.get_fusion_messages(conversation_id))
+    fname = _inbox_safe_filename(convo.get("title") or "fusion", fallback="fusion") + ".md"
+    return send_file(io.BytesIO(md.encode("utf-8")), mimetype="text/markdown; charset=utf-8",
+                     as_attachment=True, download_name=fname)
 
 
 @app.route("/api/fusion/conversations/<int:conversation_id>", methods=["DELETE"])

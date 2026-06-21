@@ -1493,6 +1493,18 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
 }
 .fusion-convo .fc-ren:hover { color: var(--accent); background: var(--inset); }
 .fusion-convo .fc-del:hover { color: var(--red); background: var(--inset); }
+.fusion-convo .fc-pin, .fusion-convo .fc-exp {
+  border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 12.5px; line-height: 1; padding: 4px 4px; border-radius: 6px;
+}
+.fusion-convo .fc-pin:hover, .fusion-convo .fc-exp:hover { color: var(--accent); background: var(--inset); }
+.fusion-convo.pinned .fc-open { font-weight: 600; }
+.fusion-search {
+  width: 100%; box-sizing: border-box; margin: 0 0 8px; border: 1px solid var(--line);
+  background: var(--card); color: var(--ink); border-radius: 9px; padding: 7px 10px;
+  font: inherit; font-size: 13px; outline: none;
+}
+.fusion-search:focus { border-color: var(--accent); }
 
 /* narrow screens: the rail collapses above the chat */
 @media (max-width: 720px) {
