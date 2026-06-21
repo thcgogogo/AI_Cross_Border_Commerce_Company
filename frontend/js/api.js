@@ -161,6 +161,9 @@ export const renameFusionConversation = (id, title) =>
   patchJSON(`/api/fusion/conversations/${id}`, { title });
 export const pinFusionConversation = (id, pinned) =>
   patchJSON(`/api/fusion/conversations/${id}`, { is_pinned: pinned });
+export const getFusionPersonas = () => getJSON("/api/fusion/personas");
+export const setFusionPersona = (id, systemPrompt) =>
+  patchJSON(`/api/fusion/conversations/${id}`, { system_prompt: systemPrompt });
 export const deleteFusionConversation = (id) => delJSON(`/api/fusion/conversations/${id}`);
 export const attachFusionFile = (conversationId, file) => {
   const fd = new FormData();

@@ -6478,14 +6478,15 @@ def _fusion_chat_member(customer):
     # Resolve / create the conversation (account-owned; 404 on a foreign/missing id).
     conversation_id = data.get("conversation_id")
     if conversation_id:
-        _convo, err = _fusion_owned_convo_or_404(conversation_id, customer)
+        convo, err = _fusion_owned_convo_or_404(conversation_id, customer)
         if err:
             return err
+        persona = convo.get("system_prompt")   # per-conversation persona (R6), if set
         prior = metrics_store.get_fusion_messages(conversation_id)
     else:
         conversation_id = metrics_store.create_fusion_conversation(
             customer["id"], model_tier=tier)
-        prior = []
+        prior, persona = [], None
     user_index = len(prior)   # the message_index the new user turn will get
 
     # Attachments (signed-in only): DOCUMENTS are parsed to text and prepended to the user
@@ -6519,6 +6520,11 @@ def _fusion_chat_member(customer):
     vision_final = ({"role": "user", "content":
                      [{"type": "text", "text": messages[-1]["content"]}] + image_parts}
                     if image_parts else None)
+    # The fuser reconciles the candidate ANSWERS, so it gets the clean history (no persona /
+    # no system turn). The persona, if set, is prepended as a system message the models see.
+    fuser_history = messages[:-1]
+    if persona:
+        messages = [{"role": "system", "content": persona}] + messages
 
     # Founder-only funnel event — now attributed to the signed-in account.
     analytics.track(EVENT_FUSION_QUERY, account_id=customer["id"],
@@ -6573,7 +6579,7 @@ def _fusion_chat_member(customer):
 
         with ThreadPoolExecutor(max_workers=min(len(picked), 5)) as pool:
             answers = list(pool.map(run_one, picked))
-        fused = _fuse_answers(text, answers, fuser, history=messages[:-1])
+        fused = _fuse_answers(text, answers, fuser, history=fuser_history)
 
     # BILLING — meter every real upstream call to the account as COGS, but DON'T charge
     # the balance (Fusion is free; subscribers are quota-gated, not balance-gated). This
@@ -6759,6 +6765,7 @@ def fusion_conversation_get(conversation_id):
         out_msgs.append(pm)
     return jsonify({"conversation_id": conversation_id,
                     "title": convo["title"] or "新对话",
+                    "system_prompt": convo.get("system_prompt") or "",
                     "messages": out_msgs})
 
 
@@ -6782,9 +6789,23 @@ def fusion_conversation_update(conversation_id):
         if not metrics_store.rename_fusion_conversation(customer["id"], conversation_id, title):
             return jsonify({"error": "对话不存在。"}), 404
         did = True
+    if "system_prompt" in data:
+        if not metrics_store.set_fusion_conversation_persona(
+                customer["id"], conversation_id, data.get("system_prompt"),
+                max_chars=config.FUSION_PERSONA_MAX_CHARS):
+            return jsonify({"error": "对话不存在。"}), 404
+        did = True
     if not did:
         return jsonify({"error": "没有要更新的内容。"}), 400
     return jsonify({"ok": True})
+
+
+@app.route("/api/fusion/personas", methods=["GET"])
+def fusion_personas():
+    """The preset personas a user can pin to a conversation (a system instruction the whole
+    council follows). Public — names + prompts only, no ¥."""
+    return jsonify({"personas": config.FUSION_PERSONAS,
+                    "max_chars": config.FUSION_PERSONA_MAX_CHARS})
 
 
 def _fusion_export_markdown(convo, msgs):

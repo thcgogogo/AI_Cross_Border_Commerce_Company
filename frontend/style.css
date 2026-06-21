@@ -1559,6 +1559,16 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 12px 14px; box-shadow: var(--shadow); margin: 0 auto; max-width: 640px;
 }
+/* persona panel (R6) */
+.fusion-persona-panel { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; margin: 8px auto 0; max-width: 640px; display: flex; flex-direction: column; gap: 8px; }
+.fusion-page.conversing .fusion-persona-panel { max-width: none; margin-left: 0; margin-right: 0; }
+.fusion-persona-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.fusion-persona-preset, .fusion-persona-clear, .fusion-persona-save { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+.fusion-persona-preset.on { border-color: var(--accent); color: var(--accent); }
+.fusion-persona-preset:hover, .fusion-persona-clear:hover, .fusion-persona-save:hover { border-color: var(--accent); }
+.fusion-persona-save { align-self: flex-start; background: var(--accent); color: #fff; border: none; font-weight: 600; }
+.fusion-persona-custom { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; font: inherit; font-size: 13.5px; resize: vertical; background: var(--bg); color: var(--ink); outline: none; }
+.fusion-persona-custom:focus { border-color: var(--accent); }
 .fusion-page.conversing .fusion-controls { background: none; border: none; box-shadow: none; padding: 0 0 8px; max-width: none; }
 .fusion-presets { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .fusion-preset, .fusion-adv-toggle {

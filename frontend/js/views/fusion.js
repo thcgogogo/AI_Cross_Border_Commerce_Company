@@ -36,6 +36,9 @@ let preset = "budget";      // quality | budget | custom
 let advanced = false;       // is the model picker revealed?
 let webSearch = false;      // live web search toggle (paid/founder; Claude + Qwen actually search)
 let agentMode = false;      // agent mode: one model runs a tool loop + can generate files
+let personas = [];          // preset personas (lazy-loaded)
+let personaOpen = false;    // is the persona panel open?
+let activePersona = "";     // the current conversation's persona (system prompt), if set
 let messages = [];          // [{role:"user"|"assistant", content, by_label?, answers?, note?}]
 let sending = false;
 let error = "";
@@ -258,6 +261,8 @@ function newConversation(el, ctx) {
   messages = [];
   error = "";
   draft = "";
+  activePersona = "";
+  personaOpen = false;
   render(el, ctx);
 }
 
@@ -271,6 +276,8 @@ async function openConversation(el, ctx, id) {
   try {
     const r = await api.getFusionConversation(id);
     messages = (r.messages || []).map(fromServerMsg);
+    activePersona = r.system_prompt || "";
+    personaOpen = false;
   } catch (e) {
     error = (e && e.message) || "加载对话失败。";
     conversationId = null;
@@ -374,6 +381,33 @@ function threadLayout() {
     ${footHTML()}`;
 }
 
+// ---- persona panel (a per-conversation system instruction) ------------------
+function personaPanelHTML() {
+  if (!personaOpen) return "";
+  const presets = personas.map((p) =>
+    `<button type="button" class="fusion-persona-preset${activePersona === p.prompt ? " on" : ""}" data-persona-id="${esc(p.id)}">${esc(p.name)}</button>`).join("");
+  return `<div class="fusion-persona-panel">
+    <div class="fusion-persona-presets">${presets}<button type="button" class="fusion-persona-clear" data-persona-clear>清除角色</button></div>
+    <textarea class="fusion-persona-custom" id="fusionPersonaCustom" rows="2" placeholder="或自定义角色指令，例如：你是一位资深财务顾问…">${esc(activePersona)}</textarea>
+    <button type="button" class="fusion-persona-save" data-persona-save>保存</button>
+  </div>`;
+}
+
+async function savePersona(el, ctx, prompt) {
+  try {
+    if (!conversationId) {                 // a persona needs a conversation to live in
+      const r = await api.createFusionConversation();
+      conversationId = r.conversation_id;
+      carryPending = null;
+      await refreshConversations();
+    }
+    await api.setFusionPersona(conversationId, prompt);
+    activePersona = (prompt || "").trim();
+    personaOpen = false;
+  } catch (e) { error = (e && e.message) || "保存失败。"; }
+  render(el, ctx);
+}
+
 // ---- council controls (presets + the 自定义 model picker) --------------------
 function controlsHTML() {
   if (!state.fusionModels.length) {
@@ -423,7 +457,9 @@ function controlsHTML() {
         aria-expanded="${advanced ? "true" : "false"}">自定义模型 ${advanced ? "▴" : "▾"}</button>
       ${state.fusionAccountTier === "full" ? `<button type="button" class="fusion-preset ${webSearch ? "on" : ""}" data-websearch aria-pressed="${webSearch}" title="部分模型支持（Claude / Qwen）">🌐 联网搜索</button>` : ""}
       ${state.fusionAccountTier === "full" ? `<button type="button" class="fusion-preset ${agentMode ? "on" : ""}" data-agent aria-pressed="${agentMode}" title="单模型 + 工具，可生成 Excel / PDF / PPT / Word 文件">🛠 Agent</button>` : ""}
+      ${state.account ? `<button type="button" class="fusion-preset ${activePersona ? "on" : ""}" data-persona-toggle aria-pressed="${personaOpen}" title="给这个对话设定一个角色（系统指令），整组模型都会遵循">🎭 角色${activePersona ? " ·已设" : ""}</button>` : ""}
     </div>
+    ${personaPanelHTML()}
     ${picker}
   </div>`;
 }
@@ -570,6 +606,26 @@ function wire(el, ctx) {
   if (ws) ws.addEventListener("click", () => { webSearch = !webSearch; render(el, ctx); });
   const ag = el.querySelector("[data-agent]");
   if (ag) ag.addEventListener("click", () => { agentMode = !agentMode; render(el, ctx); });
+  const pt = el.querySelector("[data-persona-toggle]");
+  if (pt) pt.addEventListener("click", async () => {
+    personaOpen = !personaOpen;
+    if (personaOpen && !personas.length) {
+      try { const r = await api.getFusionPersonas(); personas = (r && r.personas) || []; } catch (e) { /* keep empty */ }
+    }
+    render(el, ctx);
+  });
+  el.querySelectorAll(".fusion-persona-preset").forEach((b) =>
+    b.addEventListener("click", () => {
+      const p = personas.find((x) => x.id === b.dataset.personaId);
+      if (p) savePersona(el, ctx, p.prompt);
+    }));
+  const psave = el.querySelector("[data-persona-save]");
+  if (psave) psave.addEventListener("click", () => {
+    const ta = el.querySelector("#fusionPersonaCustom");
+    savePersona(el, ctx, ta ? ta.value : "");
+  });
+  const pclear = el.querySelector("[data-persona-clear]");
+  if (pclear) pclear.addEventListener("click", () => savePersona(el, ctx, ""));
   el.querySelectorAll(".ft-attach.dl").forEach((b) =>
     b.addEventListener("click", () => downloadAttachment(b.dataset.cid, b.dataset.aid)));
 

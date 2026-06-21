@@ -1095,6 +1095,7 @@ class FusionConversation(Base):
     model_tier = Column(String(16), nullable=True)               # free | full (at create)
     is_pinned = Column(Boolean, nullable=False, default=False,    # rail: pinned sort first
                        server_default="0")
+    system_prompt = Column(Text, nullable=True)                  # ENCRYPTED — per-convo persona
     message_count = Column(Integer, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)

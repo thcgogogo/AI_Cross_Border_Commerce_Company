@@ -964,3 +964,51 @@ def test_agent_mode_is_full_tier_only(env, monkeypatch):
                                               "models": ["deepseek-v4-flash"], "agent": True})
     assert r.status_code == 200
     assert captured.get("calls") and not r.get_json().get("files")   # council ran, no agent files
+
+
+# ---------------------------------------------------------------------------
+# 18. Fusion 2.0 R6 — per-conversation persona (a system instruction)
+# ---------------------------------------------------------------------------
+def test_personas_endpoint(env):
+    r = app.app.test_client().get("/api/fusion/personas")
+    assert r.status_code == 200
+    personas = r.get_json()["personas"]
+    assert "财务分析师" in [p["name"] for p in personas] and all("prompt" in p for p in personas)
+
+
+def test_persona_applied_to_council(env, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway(captured))
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    assert client.patch(f"/api/fusion/conversations/{cid}",
+                        json={"system_prompt": "你是一位资深财务顾问。"}).status_code == 200
+    client.post("/api/fusion/chat", json={"conversation_id": cid, "text": "分析一下",
+                                          "models": ["deepseek-v4-flash"]})
+    sent = captured["calls"][0]["messages"]
+    assert sent[0]["role"] == "system" and "财务顾问" in sent[0]["content"]   # persona prepended
+    assert sent[-1]["role"] == "user"                                       # still ends on the user turn
+    # GET returns the persona (decrypted)
+    assert client.get(f"/api/fusion/conversations/{cid}").get_json()["system_prompt"] == "你是一位资深财务顾问。"
+
+
+def test_persona_ownership_and_clear(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    cid = _create_convo(_client_for(env["store"], A_EMAIL))
+    assert _client_for(env["store"], B_EMAIL).patch(
+        f"/api/fusion/conversations/{cid}", json={"system_prompt": "x"}).status_code == 404
+    a = _client_for(env["store"], A_EMAIL)
+    a.patch(f"/api/fusion/conversations/{cid}", json={"system_prompt": "你是助手"})
+    a.patch(f"/api/fusion/conversations/{cid}", json={"system_prompt": ""})   # clear
+    assert a.get(f"/api/fusion/conversations/{cid}").get_json()["system_prompt"] == ""
+
+
+def test_persona_encrypted_at_rest(env, monkeypatch):
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    client.patch(f"/api/fusion/conversations/{cid}", json={"system_prompt": "SENSITIVE_PERSONA"})
+    row = sqlite3.connect(env["dbpath"]).execute(
+        "SELECT system_prompt FROM fusion_conversations WHERE id=?", (cid,)).fetchone()
+    assert row[0].startswith("gAAAAA") and "SENSITIVE_PERSONA" not in row[0]
+    assert crypto.decrypt_string(row[0]) == "SENSITIVE_PERSONA"
