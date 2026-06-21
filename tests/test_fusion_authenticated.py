@@ -25,6 +25,7 @@ Network-free: providers.gateway_chat is monkeypatched. Run from the project root
     .venv/bin/python -m pytest tests/test_fusion_authenticated.py -v
 """
 import io
+import json
 import os
 import sqlite3
 import sys
@@ -893,3 +894,73 @@ def test_fusion_web_search_full_tier_only(env, monkeypatch):
     client.post("/api/fusion/chat", json={"conversation_id": cid2, "text": "今天的新闻",
                                           "models": ["qwen-plus"], "web_search": True})
     assert not any(c.get("web_search") for c in captured["calls"])
+
+
+# ---------------------------------------------------------------------------
+# 17. Fusion 2.0 R5 — agent mode (the OpenAI-compatible tool loop generates files)
+# ---------------------------------------------------------------------------
+def _fake_openai_tool_then_text(tool_name, tool_args):
+    """A fake openai.OpenAI: chat.completions.create returns a tool_call on the first call,
+    then a final text on the second (a minimal 2-step function-calling exchange)."""
+    state = {"calls": 0}
+
+    class _Completions:
+        def create(self, **kw):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                tc = type("TC", (), {"id": "tc1", "type": "function",
+                                     "function": type("F", (), {"name": tool_name,
+                                                                "arguments": json.dumps(tool_args)})()})()
+                msg = type("M", (), {"content": None, "tool_calls": [tc]})()
+            else:
+                msg = type("M", (), {"content": "已为你生成文件。", "tool_calls": None})()
+            return type("R", (), {"choices": [type("C", (), {"message": msg})()],
+                                  "usage": type("U", (), {"prompt_tokens": 10, "completion_tokens": 5})()})()
+
+    class _Client:
+        def __init__(self, **kw):
+            self.chat = type("Chat", (), {"completions": _Completions()})()
+    return _Client
+
+
+def test_fusion_agent_mode_generates_downloadable_file(env, monkeypatch):
+    """Agent mode: the model calls a deliverables tool → a real .xlsx is built, stored as a
+    FusionAttachment on the assistant turn, and downloads decrypted. Ownership-gated."""
+    monkeypatch.setenv("ADMIN_EMAILS", A_EMAIL)          # full tier
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")   # the agent model has a key
+    import openai
+    args = {"title": "销售报表", "sheets": [{"name": "S", "headers": ["月份", "销售额"],
+                                            "rows": [["6月", 100]]}]}
+    monkeypatch.setattr(openai, "OpenAI", _fake_openai_tool_then_text("create_excel_workbook", args))
+    client = _client_for(env["store"], A_EMAIL)
+    cid = _create_convo(client)
+    r = client.post("/api/fusion/chat", json={"conversation_id": cid, "text": "做个销售报表",
+                                              "models": ["deepseek-v4-flash"], "agent": True})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    body = r.get_json()
+    assert body["fused"] and "Agent" in (body["fused"].get("note") or "")
+    files = body.get("files") or []
+    assert len(files) == 1 and files[0]["filename"].endswith(".xlsx") and files[0]["kind"] == "file"
+    aid = files[0]["id"]
+    # the generated file renders on the assistant turn
+    msgs = client.get(f"/api/fusion/conversations/{cid}").get_json()["messages"]
+    asst = next(m for m in msgs if m["role"] == "assistant")
+    assert any(a["id"] == aid for a in asst.get("attachments", []))
+    # and it downloads, decrypted (xlsx is a zip → starts with 'PK')
+    dl = client.get(f"/api/fusion/conversations/{cid}/attachments/{aid}/download")
+    assert dl.status_code == 200 and dl.data[:2] == b"PK"
+    # account B cannot download it
+    assert _client_for(env["store"], B_EMAIL).get(
+        f"/api/fusion/conversations/{cid}/attachments/{aid}/download").status_code == 404
+
+
+def test_agent_mode_is_full_tier_only(env, monkeypatch):
+    """On the free tier the agent flag is ignored — it runs the normal council, no files."""
+    captured = {}
+    monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway(captured))
+    client = _client_for(env["store"], A_EMAIL)          # free (ADMIN_EMAILS="")
+    cid = _create_convo(client)
+    r = client.post("/api/fusion/chat", json={"conversation_id": cid, "text": "hi",
+                                              "models": ["deepseek-v4-flash"], "agent": True})
+    assert r.status_code == 200
+    assert captured.get("calls") and not r.get_json().get("files")   # council ran, no agent files

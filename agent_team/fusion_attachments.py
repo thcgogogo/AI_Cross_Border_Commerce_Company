@@ -150,6 +150,52 @@ def build_attachment_context(attachments, max_chars=_CONTEXT_CHAR_CAP):
             + "\n\n".join(blocks) + "\n\n[附件结束]")
 
 
+# ---- agent mode (R5): the deliverable file builders the model may call -----
+AGENT_TOOL_NAMES = ("create_excel_workbook", "create_pdf_document", "create_slide_deck",
+                    "create_word_document", "create_svg_image")
+
+
+def generated_files_dir(account_id, conversation_id):
+    folder = os.path.join(_attachments_root(), str(account_id), str(conversation_id), "generated")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def register_generated_file(account_id, conversation_id, result):
+    """Turn a deliverables.run_tool success dict into a downloadable FusionAttachment
+    (kind='file'). The file is already written + encrypted by run_tool. Returns the public
+    attachment dict, or None if the result wasn't a real file."""
+    if not (result and result.get("ok") and result.get("path")):
+        return None
+    path = result["path"]
+    name = result.get("filename") or os.path.basename(path)
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = 0
+    return metrics_store.create_fusion_attachment(
+        conversation_id, account_id, name, media_type=mimetypes.guess_type(name)[0],
+        kind="file", file_size=size, stored_path=path, char_count=0, parsed_text=None)
+
+
+def make_tool_executor(account_id, conversation_id, out_dir, collected):
+    """Build the executor for Fusion agent mode: it runs a deliverables builder, stores the
+    produced file as a FusionAttachment (appended to `collected`), and returns a short status
+    string for the model. `executor(name, args) -> str`."""
+    from . import deliverables
+
+    def executor(name, args):
+        result = deliverables.run_tool(name, args or {}, out_dir)
+        if not result.get("ok"):
+            return result.get("message") or "工具执行失败。"
+        att = register_generated_file(account_id, conversation_id, result)
+        if not att:
+            return "文件生成失败。"
+        collected.append(att)
+        return f"已生成文件：{result.get('title') or att['filename']}（{att['filename']}）"
+    return executor
+
+
 def prune(older_than_days=30):
     """Hard-delete soft-deleted attachment rows + their encrypted blobs (scheduler job)."""
     removed = 0

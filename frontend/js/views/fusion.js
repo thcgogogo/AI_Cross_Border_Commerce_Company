@@ -35,6 +35,7 @@ let fuser = "auto";         // which model reconciles them
 let preset = "budget";      // quality | budget | custom
 let advanced = false;       // is the model picker revealed?
 let webSearch = false;      // live web search toggle (paid/founder; Claude + Qwen actually search)
+let agentMode = false;      // agent mode: one model runs a tool loop + can generate files
 let messages = [];          // [{role:"user"|"assistant", content, by_label?, answers?, note?}]
 let sending = false;
 let error = "";
@@ -212,6 +213,23 @@ function downloadExport(id) {
   a.remove();
 }
 
+function downloadAttachment(cid, aid) {
+  const a = document.createElement("a");
+  a.href = `/api/fusion/conversations/${cid}/attachments/${aid}/download`;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// One attachment chip, downloadable (uploads on a user turn, generated files on an
+// assistant turn). cid is needed for the download route.
+function attachChipHTML(cid, a) {
+  const icon = a.kind === "image" ? "🖼" : (a.kind === "file" ? "📄" : "📎");
+  const dl = cid && a.id ? ` data-cid="${cid}" data-aid="${a.id}"` : "";
+  return `<button type="button" class="ft-attach${dl ? " dl" : ""}"${dl} title="下载">${icon} ${esc(a.filename)}${dl ? " ⬇" : ""}</button>`;
+}
+
 async function refreshConversations() {
   try {
     const r = await api.getFusionConversations();
@@ -230,6 +248,7 @@ function fromServerMsg(m) {
     answers: m.answers || [],
     note: fused.note || "",
     by_label: fused.by_label || "",
+    attachments: m.attachments || [],   // agent-generated files (R5)
   };
 }
 
@@ -403,6 +422,7 @@ function controlsHTML() {
       <button type="button" class="fusion-adv-toggle ${advanced ? "on" : ""}" data-adv
         aria-expanded="${advanced ? "true" : "false"}">自定义模型 ${advanced ? "▴" : "▾"}</button>
       ${state.fusionAccountTier === "full" ? `<button type="button" class="fusion-preset ${webSearch ? "on" : ""}" data-websearch aria-pressed="${webSearch}" title="部分模型支持（Claude / Qwen）">🌐 联网搜索</button>` : ""}
+      ${state.fusionAccountTier === "full" ? `<button type="button" class="fusion-preset ${agentMode ? "on" : ""}" data-agent aria-pressed="${agentMode}" title="单模型 + 工具，可生成 Excel / PDF / PPT / Word 文件">🛠 Agent</button>` : ""}
     </div>
     ${picker}
   </div>`;
@@ -428,8 +448,7 @@ const isCorrected = (note) => /纠正|更正|修正|有误|不一致|分歧/.tes
 
 function turnHTML(m, i) {
   if (m.role === "user") {
-    const atts = (m.attachments || []).map((a) =>
-      `<span class="ft-attach">${a.kind === "image" ? "🖼" : "📎"} ${esc(a.filename)}</span>`).join("");
+    const atts = (m.attachments || []).map((a) => attachChipHTML(conversationId, a)).join("");
     return `<div class="ft-turn user"><div class="ft-bubble">${esc(m.content)}</div>${
       atts ? `<div class="ft-attachs">${atts}</div>` : ""}</div>`;
   }
@@ -468,6 +487,12 @@ function turnHTML(m, i) {
   const chips = `<span class="cs-chip cs-chip-ok">✓ ${okCount} 模型已核验</span>`
     + (corrected ? `<span class="cs-chip cs-chip-warn">⚠ 已纠正分歧</span>` : "");
 
+  // Agent-generated files (R5) — downloadable chips under the answer.
+  const files = (m.attachments || []).filter((a) => a.kind === "file");
+  const filesHTML = files.length
+    ? `<div class="ft-files">${files.map((a) => attachChipHTML(conversationId, a)).join("")}</div>`
+    : "";
+
   return `<div class="ft-turn assistant" data-i="${i}">
     <div class="consensus-stack">
       ${voices}
@@ -475,6 +500,7 @@ function turnHTML(m, i) {
         <div class="cs-fused-head"><span class="cs-fused-title">融合答案</span>${chips}</div>
         <div class="report-body">${renderMarkdown(m.content || "")}</div>
         ${m.note && corrected ? `<div class="cs-note">融合说明：${esc(m.note)}</div>` : ""}
+        ${filesHTML}
       </div>
       ${detail}
     </div>
@@ -542,6 +568,10 @@ function wire(el, ctx) {
   if (adv) adv.addEventListener("click", () => { advanced = !advanced; render(el, ctx); });
   const ws = el.querySelector("[data-websearch]");
   if (ws) ws.addEventListener("click", () => { webSearch = !webSearch; render(el, ctx); });
+  const ag = el.querySelector("[data-agent]");
+  if (ag) ag.addEventListener("click", () => { agentMode = !agentMode; render(el, ctx); });
+  el.querySelectorAll(".ft-attach.dl").forEach((b) =>
+    b.addEventListener("click", () => downloadAttachment(b.dataset.cid, b.dataset.aid)));
 
   el.querySelectorAll(".fusion-example").forEach((b) =>
     b.addEventListener("click", () => {
@@ -619,7 +649,8 @@ async function send(el, ctx) {
       // conversation id (null on the first turn → the server creates one + returns it);
       // prior turns are loaded from the encrypted conversation server-side.
       ? await api.fusionChat({ conversation_id: conversationId, text, models: selected, fuser,
-                               attachment_ids: sentAtts.map((a) => a.id), web_search: webSearch })
+                               attachment_ids: sentAtts.map((a) => a.id), web_search: webSearch,
+                               agent: agentMode })
       // Anonymous teaser: send the client-maintained history (no server memory).
       // Skip turns where every model failed — replaying the '没有模型成功作答' placeholder
       // would feed it back to the council as a real prior answer.
@@ -631,7 +662,7 @@ async function send(el, ctx) {
     const fused = res.fused;
     if (fused && fused.text) {
       messages.push({ role: "assistant", content: fused.text, by_label: fused.by_label,
-        answers: res.answers || [], note: fused.note });
+        answers: res.answers || [], note: fused.note, attachments: res.files || [] });
     } else {
       messages.push({ role: "assistant", failed: true,
         content: "_没有模型成功作答 — 运营方可能尚未为所选模型配置密钥。换一个模型再试试。_",

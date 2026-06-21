@@ -6471,6 +6471,9 @@ def _fusion_chat_member(customer):
     # Live web search is a PAID/founder capability (added latency + COGS). Models that
     # support it (Claude / Qwen) search; the rest answer normally. Free tier ignores it.
     web_search = bool(data.get("web_search")) and tier == "full"
+    # Agent mode (R5): instead of the council fan-out, ONE model runs a tool loop and can
+    # GENERATE files (the deliverables builders). Single answer, no fusion. Paid/founder only.
+    agent_mode = bool(data.get("agent")) and tier == "full"
 
     # Resolve / create the conversation (account-owned; 404 on a foreign/missing id).
     conversation_id = data.get("conversation_id")
@@ -6523,7 +6526,7 @@ def _fusion_chat_member(customer):
                     ip_hash=analytics.hash_ip(_client_ip()),
                     props={"models": picked, "fuser": fuser, "tier": tier,
                            "attachments": len(atts), "images": len(image_parts),
-                           "web_search": web_search})
+                           "web_search": web_search, "agent": agent_mode})
 
     # Persist the user turn FIRST so the question is always recorded (even if the fan-out
     # then fails) — never a half-saved conversation. The plain question is stored; the
@@ -6533,22 +6536,44 @@ def _fusion_chat_member(customer):
         metrics_store.link_fusion_attachments(conversation_id, customer["id"],
                                               [a["id"] for a in atts], user_index)
 
-    def run_one(mid):
-        label = (config.get_model(mid) or {}).get("label", mid)
-        msgs = (messages[:-1] + [vision_final]
-                if vision_final and config.model_has_vision(mid) else messages)
+    collected_files = []
+    if agent_mode:
+        # Single tool-capable model runs the deliverables tool loop — no council, no fusion.
+        amodel = picked[0]
+        alabel = (config.get_model(amodel) or {}).get("label", amodel)
+        out_dir = fusion_attachments.generated_files_dir(customer["id"], conversation_id)
+        executor = fusion_attachments.make_tool_executor(
+            customer["id"], conversation_id, out_dir, collected_files)
+        specs = deliverables.specs_for(fusion_attachments.AGENT_TOOL_NAMES)
+        amsgs = (messages[:-1] + [vision_final]
+                 if vision_final and config.model_has_vision(amodel) else messages)
         try:
-            r = providers.gateway_chat(mid, msgs, max_tokens=1024, web_search=web_search)
-            return {"model": mid, "label": label, "ok": True, "text": r["text"],
-                    "provider": r["provider"], "input_tokens": r["input_tokens"],
-                    "output_tokens": r["output_tokens"]}
+            r = providers.gateway_chat_with_tools(amodel, amsgs, specs, executor, max_tokens=2048)
+            note = (f"Agent 模式（{alabel}）· 生成 {len(collected_files)} 个文件"
+                    if collected_files else f"Agent 模式（{alabel}）")
+            answers = [{"model": amodel, "label": alabel, "ok": True, "text": r["text"],
+                        "provider": r["provider"], "input_tokens": r["input_tokens"],
+                        "output_tokens": r["output_tokens"]}]
+            fused = {"text": r["text"], "by": amodel, "by_label": alabel, "note": note}
         except (providers.ProviderKeyMissing, providers.LLMError) as e:
-            return {"model": mid, "label": label, "ok": False, "error": str(e)}
+            answers = [{"model": amodel, "label": alabel, "ok": False, "error": str(e)}]
+            fused = None
+    else:
+        def run_one(mid):
+            label = (config.get_model(mid) or {}).get("label", mid)
+            msgs = (messages[:-1] + [vision_final]
+                    if vision_final and config.model_has_vision(mid) else messages)
+            try:
+                r = providers.gateway_chat(mid, msgs, max_tokens=1024, web_search=web_search)
+                return {"model": mid, "label": label, "ok": True, "text": r["text"],
+                        "provider": r["provider"], "input_tokens": r["input_tokens"],
+                        "output_tokens": r["output_tokens"]}
+            except (providers.ProviderKeyMissing, providers.LLMError) as e:
+                return {"model": mid, "label": label, "ok": False, "error": str(e)}
 
-    with ThreadPoolExecutor(max_workers=min(len(picked), 5)) as pool:
-        answers = list(pool.map(run_one, picked))
-
-    fused = _fuse_answers(text, answers, fuser, history=messages[:-1])
+        with ThreadPoolExecutor(max_workers=min(len(picked), 5)) as pool:
+            answers = list(pool.map(run_one, picked))
+        fused = _fuse_answers(text, answers, fuser, history=messages[:-1])
 
     # BILLING — meter every real upstream call to the account as COGS, but DON'T charge
     # the balance (Fusion is free; subscribers are quota-gated, not balance-gated). This
@@ -6588,14 +6613,19 @@ def _fusion_chat_member(customer):
             conversation_id, "assistant", "", answers=breakdown, models_used=picked,
             input_tokens=in_tok, output_tokens=out_tok, cost_yuan=total_cost,
             status="failed")
+    # Agent-generated files belong to the ASSISTANT turn (user_index + 1) so they render +
+    # download from that bubble.
+    if collected_files:
+        metrics_store.link_fusion_attachments(conversation_id, customer["id"],
+                                              [f["id"] for f in collected_files], user_index + 1)
 
     # Public shape — model NAMES stay (the voices are shown by design), NEVER ¥ / tokens.
     public_answers = [{k: a[k] for k in ("model", "label", "ok", "text", "error") if k in a}
                       for a in answers]
     public_fused = ({k: fused[k] for k in ("text", "by", "by_label", "note") if k in fused}
                     if fused else None)
-    return jsonify({"conversation_id": conversation_id,
-                    "answers": public_answers, "fused": public_fused})
+    return jsonify({"conversation_id": conversation_id, "answers": public_answers,
+                    "fused": public_fused, "files": collected_files})
 
 
 # ---------------------------------------------------------------------------
@@ -6795,6 +6825,27 @@ def fusion_conversation_export(conversation_id):
     fname = _inbox_safe_filename(convo.get("title") or "fusion", fallback="fusion") + ".md"
     return send_file(io.BytesIO(md.encode("utf-8")), mimetype="text/markdown; charset=utf-8",
                      as_attachment=True, download_name=fname)
+
+
+@app.route("/api/fusion/conversations/<int:conversation_id>/attachments/<int:attachment_id>/download",
+           methods=["GET"])
+def fusion_attachment_download(conversation_id, attachment_id):
+    """Download one of an owned conversation's attachments — an upload OR an agent-generated
+    file — decrypted on the fly. Ownership-gated."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再使用 Fusion。"}), 401
+    _convo, err = _fusion_owned_convo_or_404(conversation_id, customer)
+    if err:
+        return err
+    rows = metrics_store.get_fusion_attachments(conversation_id, customer["id"],
+                                                [attachment_id], want_files=True)
+    path = rows[0]["stored_path"] if rows else None
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "文件不存在。"}), 404
+    return send_file(io.BytesIO(crypto.read_plaintext(path)), as_attachment=True,
+                     download_name=rows[0]["filename"],
+                     mimetype=rows[0].get("media_type") or "application/octet-stream")
 
 
 @app.route("/api/fusion/conversations/<int:conversation_id>", methods=["DELETE"])

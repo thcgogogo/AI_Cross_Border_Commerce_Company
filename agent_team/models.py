@@ -1151,7 +1151,8 @@ FUSION_ATTACH_DELETED = "deleted"        # soft-deleted with its conversation
 FUSION_ATTACH_STATUSES = (FUSION_ATTACH_READY, FUSION_ATTACH_DELETED)
 
 FUSION_ATTACH_DOCUMENT = "document"      # parsed to text (file_tools) and injected as context
-FUSION_ATTACH_IMAGE = "image"            # reserved for the vision release (R2)
+FUSION_ATTACH_IMAGE = "image"            # sent as native image input to vision models (R2)
+FUSION_ATTACH_FILE = "file"              # a deliverable the agent GENERATED (R5) — downloadable
 
 
 class FusionAttachment(Base):

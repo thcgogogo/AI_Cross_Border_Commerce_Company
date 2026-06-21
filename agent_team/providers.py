@@ -270,6 +270,139 @@ def gateway_chat(model_id, messages, max_tokens=1024, web_search=False):
 
 
 # ---------------------------------------------------------------------------
+# Tool-use loop for the gateway (Fusion R5 "agent mode": let a model call the
+# deliverables file builders). The deliverables specs are in Anthropic format
+# {name, description, input_schema}; we translate to OpenAI's tools shape for the
+# OpenAI-compatible providers (Claude uses them natively).
+# ---------------------------------------------------------------------------
+def _anthropic_to_openai_tools(tool_specs):
+    return [{"type": "function",
+             "function": {"name": t["name"], "description": t.get("description", ""),
+                          "parameters": t.get("input_schema") or {"type": "object", "properties": {}}}}
+            for t in (tool_specs or [])]
+
+
+def _openai_chat_with_tools(model_id, messages, tool_specs, executor, max_tokens,
+                            max_retries=3, max_iterations=8):
+    """An OpenAI-compatible function-calling loop so a NON-Anthropic model (DeepSeek, Qwen,
+    MiniMax, Kimi…) can call tools — e.g. the deliverables file builders. `executor(name,
+    args) -> str` runs the tool and returns a short result string. Returns {text,
+    input_tokens, output_tokens}."""
+    pid, p = _provider_cfg(model_id)
+    key = provider_key(model_id)
+    if not key:
+        raise ProviderKeyMissing(_missing_key_message(model_id))
+    import openai
+    client = openai.OpenAI(api_key=key, base_url=config.provider_base_url(pid),
+                           timeout=120.0, max_retries=max_retries)
+    tools = _anthropic_to_openai_tools(tool_specs)
+    msgs, texts, in_tok, out_tok = list(messages), [], 0, 0
+    for _ in range(max_iterations):
+        try:
+            resp = client.chat.completions.create(model=model_id, messages=msgs,
+                                                  tools=tools, max_tokens=max_tokens)
+        except openai.OpenAIError as e:
+            raise LLMError(f"{p.get('label', pid)} API error: {e}")
+        usage = getattr(resp, "usage", None)
+        in_tok += int(getattr(usage, "prompt_tokens", 0) or 0)
+        out_tok += int(getattr(usage, "completion_tokens", 0) or 0)
+        msg = getattr((resp.choices or [None])[0], "message", None)
+        if msg is None:
+            break
+        content = _strip_reasoning((getattr(msg, "content", "") or "").strip())
+        if content:
+            texts.append(content)
+        tool_calls = getattr(msg, "tool_calls", None)
+        if not tool_calls:
+            break
+        msgs.append({"role": "assistant", "content": getattr(msg, "content", "") or "",
+                     "tool_calls": [{"id": tc.id, "type": "function",
+                                     "function": {"name": tc.function.name,
+                                                  "arguments": tc.function.arguments}}
+                                    for tc in tool_calls]})
+        for tc in tool_calls:
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except (ValueError, TypeError):
+                args = {}
+            try:
+                result = executor(tc.function.name, args)
+            except Exception as e:  # noqa: BLE001 — surface tool errors to the model
+                result = f"Tool error: {type(e).__name__}: {e}"
+            msgs.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+    return {"text": "\n".join(texts) or "(完成。)", "input_tokens": in_tok, "output_tokens": out_tok}
+
+
+def _anthropic_chat_with_tools(model_id, messages, tool_specs, executor, max_tokens,
+                               max_iterations=8):
+    """Claude's native tool-use loop over an OpenAI-style `messages` list (the gateway's
+    agent path). Same return shape as _openai_chat_with_tools."""
+    import anthropic
+    key = provider_key(model_id)
+    if not key:
+        raise ProviderKeyMissing(_missing_key_message(model_id))
+    system_parts, convo = [], []
+    for m in messages or []:
+        role = (m.get("role") or "user").strip()
+        content = m.get("content") or ""
+        if role == "system":
+            if isinstance(content, list):
+                content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+            if content:
+                system_parts.append(content)
+            continue
+        if isinstance(content, list):
+            content = _anthropic_blocks(content)
+        convo.append({"role": "assistant" if role == "assistant" else "user", "content": content})
+    if not convo:
+        convo = [{"role": "user", "content": ""}]
+
+    client = anthropic.Anthropic(api_key=key)
+    texts, in_tok, out_tok = [], 0, 0
+    for _ in range(max_iterations):
+        kwargs = dict(model=model_id, max_tokens=max_tokens, messages=convo, tools=tool_specs)
+        if system_parts:
+            kwargs["system"] = "\n\n".join(system_parts)
+        try:
+            with client.messages.stream(**kwargs) as stream:
+                final = stream.get_final_message()
+        except anthropic.AnthropicError as e:
+            raise LLMError(f"Claude API error: {e}")
+        usage = getattr(final, "usage", None)
+        in_tok += int(getattr(usage, "input_tokens", 0) or 0)
+        out_tok += int(getattr(usage, "output_tokens", 0) or 0)
+        blocks = getattr(final, "content", []) or []
+        texts += [b.text for b in blocks if getattr(b, "type", None) == "text"]
+        tool_uses = [b for b in blocks if getattr(b, "type", None) == "tool_use"]
+        if getattr(final, "stop_reason", None) != "tool_use" or not tool_uses:
+            break
+        convo.append({"role": "assistant", "content": _serialize_blocks(blocks)})
+        results = []
+        for tu in tool_uses:
+            try:
+                result = executor(tu.name, tu.input or {})
+            except Exception as e:  # noqa: BLE001
+                result = f"Tool error: {type(e).__name__}: {e}"
+            results.append({"type": "tool_result", "tool_use_id": tu.id, "content": str(result)})
+        convo.append({"role": "user", "content": results})
+    return {"text": "\n".join(texts) or "(完成。)", "input_tokens": in_tok, "output_tokens": out_tok}
+
+
+def gateway_chat_with_tools(model_id, messages, tool_specs, executor, max_tokens=2048,
+                            max_iterations=8):
+    """Run a tool-use loop for `model_id` (Claude native / OpenAI-compatible), returning
+    {text, input_tokens, output_tokens, model, provider}. `executor(name, args) -> str`."""
+    provider = config.provider_for(model_id)
+    if provider == "anthropic":
+        result = _anthropic_chat_with_tools(model_id, messages, tool_specs, executor,
+                                            max_tokens, max_iterations=max_iterations)
+    else:
+        result = _openai_chat_with_tools(model_id, messages, tool_specs, executor, max_tokens,
+                                         max_iterations=max_iterations)
+    return {**result, "model": model_id, "provider": provider}
+
+
+# ---------------------------------------------------------------------------
 # ModelRouter — a drop-in replacement for LLMClient that spans every provider
 # ---------------------------------------------------------------------------
 class ModelRouter:
