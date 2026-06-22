@@ -101,6 +101,7 @@ def _account(store, email):
 # 1. Anonymous chat is FREE (the teaser); the conversation-memory routes need login
 # ---------------------------------------------------------------------------
 def test_anonymous_chat_free_but_memory_needs_login(env, monkeypatch):
+    monkeypatch.setenv("FUSION_FREE_ANON_TURNS", "3")   # enable the teaser (default is now 0)
     monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
     anon = app.app.test_client()
     # an anonymous turn succeeds (server-paid teaser), with no ¥ in the body
@@ -526,6 +527,7 @@ def test_import_keeps_newest_turns(env, monkeypatch):
 
 def test_import_marks_failed_turn(env, monkeypatch):
     """A failed teaser turn is imported as 'failed' so it never re-enters model context."""
+    monkeypatch.setenv("FUSION_FREE_ANON_TURNS", "3")   # import cap = 2*N+2; keep all 4 turns
     monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
     client = _client_for(env["store"], A_EMAIL)
     transcript = [
@@ -547,6 +549,7 @@ def test_import_marks_failed_turn(env, monkeypatch):
 def test_anon_failed_turn_not_charged(env, monkeypatch):
     """An anonymous turn where every model fails returns fused=None and must NOT spend a
     free turn — else a misconfigured deployment gates the visitor having answered nothing."""
+    monkeypatch.setenv("FUSION_FREE_ANON_TURNS", "3")   # enable the teaser (default is now 0)
     monkeypatch.setattr(app.providers, "gateway_chat",
                         _fake_gateway(fail={"deepseek-v4-flash"}))
     anon = app.app.test_client()

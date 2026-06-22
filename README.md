@@ -26,14 +26,15 @@ console — the customer-facing promise is 成本透明，绝不超支.
 
 **Fusion** (`/fusion`) is a public, multi-turn multi-model chatbot: ask a question, several
 models answer, and one fused answer is reconciled from them (when one model is wrong, the
-others catch it). The home page (`/`) is a marketing landing that funnels here. An anonymous
-visitor gets **3 free turns** and is then asked to **sign in** — Fusion stays free, and from
+others catch it). The home page (`/`) is a marketing landing that funnels here. Fusion is
+**login-gated by default** (`FUSION_FREE_ANON_TURNS=0`); set it to `N` to enable the teaser, where
+an anonymous visitor gets **N free turns** and is then asked to **sign in** — Fusion stays free, and from
 then on every chat is a **persisted, per-conversation memory** owned by the account (encrypted
 at rest, with a conversation list to revisit past chats; the anonymous teaser even carries
 over on login). Model names are shown (the multi-model "council"); ¥ cost/tokens never are.
 Signed-in usage is bounded per-account, the anonymous teaser per-IP, all under the platform
-spend caps (see [docs/ops.md](docs/ops.md) §7.7 — **the first 3 anonymous turns are
-server-paid, so set the caps before going public**).
+spend caps (see [docs/ops.md](docs/ops.md) §7.7 — the anonymous teaser is **off by default**;
+when you enable it its turns are server-paid, so set the caps before going public).
 
 **Fusion 2.0** (2026-06-21) makes the chat multimodal and agentic, reusing the report engine:
 attach **documents** (PDF/Excel/CSV/Word — every model reads them) or **images** (vision-capable
@@ -41,6 +42,11 @@ models see them; `qwen-vl-max` gives a domestic vision path); **organize** with 
 / Markdown-export; toggle **🌐 live web search** (Qwen `enable_search` + Claude's native tool); and
 **🛠 Agent mode**, where one model runs a tool loop and **generates real files** (Excel / PDF / PPT
 / Word / SVG) you can download. Attachments are encrypted at rest and account/conversation-scoped.
+Pin a **per-conversation persona** (🎭 角色 — a preset like 财务分析师 / 合同审查顾问, or a custom
+system prompt the whole council follows). And turn any conversation into a finished report with
+**📄 生成完整报告**: the chat transcript + its attached data seed the report team, which runs
+headless (a live feed polls progress) and delivers the same branded, source-verified PDF as the
+工作流 product — the bridge from "chat" to "deliverable".
 
 The report/analytics product described below now lives under the **Agents** section
 (sign-in required): the AI team that turns your Excel into a source-verified weekly
@@ -148,7 +154,7 @@ docker compose up -d      # nginx → gunicorn app + scheduler worker + PostgreS
 
 Set the production env (`SECRET_KEY`, `DATABASE_URL`, `ADMIN_EMAILS`, `SMTP_*`,
 `FERNET_KEYS`, payment merchant keys, spend caps — all documented in
-[.env.example](.env.example)), run `alembic upgrade head` (0001–0009), and schedule
+[.env.example](.env.example)), run `alembic upgrade head` (0001–0017), and schedule
 `scripts/backup.sh`. The full runbook — deploy, backup/restore, monitoring, and the
 per-phase ops notes — is **[docs/ops.md](docs/ops.md)**.
 
@@ -292,9 +298,10 @@ Company_Agent_Demo/
 │   └── onboarding.py / helpdocs.py / lifecycle.py(10)
 ├── admin/queries.py        ← the ops dashboard's SQL (unit-tested)          (10)
 ├── agent_team/analytics.py ← first-party founder-only events (track/prune)  (12)
-├── migrations/             ← Alembic 0001–0009 (`alembic upgrade head`)
+├── migrations/             ← Alembic 0001–0017 (`alembic upgrade head`)
 ├── templates_industry/     ← industry packs as editable YAML                 (4)
 ├── docs/ops.md             ← the operations runbook   docs/help/ ← /help docs
+├── docs/china-launch-guide.md ← China go-live runbook (ICP备案 / 经营性ICP-EDI / 算法备案; HTTPS)
 ├── docs/product-brief.md   ← what we sell & why it defends (the three moats)
 ├── docs/ui-redesign-plan.md← the customer-UI redesign plan + per-phase record
 ├── assets/                 ← bundled CJK font + 示例销售数据.csv

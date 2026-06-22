@@ -21,6 +21,13 @@ const RECON_ICON =
      <path d="M16 11l2 0M6 13l2 0"></path>
    </svg>`;
 
+const MARKET_ICON =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+     <circle cx="12" cy="12" r="9"></circle>
+     <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"></path>
+   </svg>`;
+
 const CARDS = [
   {
     path: "/agents", icon: REPORT_ICON,
@@ -31,6 +38,11 @@ const CARDS = [
     path: "/cross-border", icon: RECON_ICON,
     title: "跨境财务",
     desc: "出口跨境电商一站核对：回款核对·收汇结汇·三流合一·进项发票·退税，可溯源交付。",
+  },
+  {
+    path: "/markets", icon: MARKET_ICON,
+    title: "跨境市场情报日报",
+    desc: "跨境电商专属：设置关注的平台·市场·类目，每天早 8 点自动汇总政策合规·成本利润·需求机会·竞争态势与截止事项，可溯源交付。",
   },
 ];
 

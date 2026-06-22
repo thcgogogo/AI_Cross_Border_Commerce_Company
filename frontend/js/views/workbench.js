@@ -35,9 +35,17 @@ function fmtCountdown(ms) {
 
 const channelLabel = (c) => ({ email: "邮箱", wechat: "企业微信", service_account: "服务号" }[c] || c);
 
-// Card titles keep their emoji as decoration only (Phase 10 B7).
+// Card titles render a tinted line-icon chip (Claude Design). The map keys are the
+// emoji the call sites already pass, so the (icon,label) signature is unchanged.
+const CARD_ICONS = {
+  "⏰": `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2"/><path d="M5 3 2 6M19 3l3 3"/></svg>`,
+  "📄": `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></svg>`,
+  "📊": `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>`,
+  "📂": `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13h5l1.5 3h5L21 13"/><path d="M5 6h14l2 7v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5z"/></svg>`,
+  "🧠": `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="8" r="2.2"/><circle cx="18" cy="6" r="2.2"/><circle cx="16" cy="17" r="2.2"/><circle cx="8" cy="16" r="2.2"/><path d="M7.6 9.6l5.6 5.6M8 8.3 16 6.4M9.7 14.8 14.6 7"/></svg>`,
+};
 const cardTitle = (icon, label) =>
-  `<h3 class="card-title"><span aria-hidden="true">${icon}</span> ${label}</h3>`;
+  `<h3 class="card-title"><span class="ct-ico" aria-hidden="true">${CARD_ICONS[icon] || icon}</span> ${label}</h3>`;
 
 export function mount(el, ctx) {
   const name = (state.account && state.account.name) || "";
@@ -51,7 +59,7 @@ export function mount(el, ctx) {
       <div class="card" id="wbLatest">${cardTitle("📄", "最新报告")}${skeleton({ lines: 2 })}</div>
       <div class="card" id="wbQuota">${cardTitle("📊", "本月额度")}${skeleton({ lines: 2 })}</div>
       <div class="card" id="wbInbox">${cardTitle("📂", "数据收件箱")}${skeleton({ lines: 2 })}</div>
-      <div class="card" id="wbBrain">
+      <div class="card wb-brain-dark" id="wbBrain">
         ${cardTitle("🧠", "企业大脑")}
         <p class="muted">它记住你的公司：指标、口径、术语、偏好。每份报告都让它更聪明。</p>
         <div class="wb-card-cta"><button type="button" class="ghost-btn" id="wbBrainGo">打开企业大脑</button></div>

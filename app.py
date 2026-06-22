@@ -57,6 +57,7 @@ from agent_team import (
     helpdocs,
     industry_packs,
     lifecycle,
+    market_intel_engine,
     metrics_store,
     onboarding,
     payments,
@@ -111,6 +112,8 @@ from agent_team.models import (
     RUN_KIND_AR,
     RUN_KIND_CROSSBORDER,
     RUN_KIND_FUSION_SEED,
+    RUN_KIND_MARKET_INTEL,
+    RUN_KIND_MI_COLLECT,
     RUN_KIND_RECON,
     RUN_KIND_REPORT,
     RUN_STOPPED_BUDGET,
@@ -121,6 +124,7 @@ from agent_team.models import (
     VOTE_VALUES,
 )
 from agent_team.ar_orchestrator import AROrchestrator
+from agent_team.market_intel_orchestrator import MarketIntelOrchestrator
 from agent_team.orchestrator import Orchestrator
 from agent_team.providers import ModelRouter
 from agent_team.settlement_orchestrator import SettlementOrchestrator
@@ -376,6 +380,7 @@ _LOCAL_MODE_BLOCKED_PREFIXES = (
     "/api/ar",
     "/api/crossborder",
     "/api/cross-border",   # the hyphenated 贸易方式 settings route — same cloud-only surface
+    "/api/market-intel",   # 跨境市场情报日报 — cloud-only (server-side web search + per-account scope)
     # Sign-in-required Fusion (multi-turn memory) is a cloud SaaS surface — accounts +
     # encrypted conversation storage don't apply to the single-user desktop daemon.
     # (The public model list /api/fusion/models stays reachable; it's just names.)
@@ -768,9 +773,13 @@ def company_brain_page():
 FOUNDER_SPA_PAGES = ("team", "costs", "models", "fusion", "api", "analytics")
 
 
+@app.route("/workflow")
 @app.route("/new")
 @app.route("/reports")
 @app.route("/reports/<int:run_id>")
+@app.route("/markets")
+@app.route("/markets/settings")
+@app.route("/markets/<int:run_id>")
 @app.route("/recon")
 @app.route("/recon/<int:run_id>")
 @app.route("/ar")
@@ -1475,6 +1484,111 @@ def _run_ar(memory, files_by_role, format_key=None, period_label=None,
             memory.set_error(f"{type(e).__name__}: {e}")
 
 
+def _run_market_intel_for_company(memory, pool, watchlist, *, company_name=None,
+                                  period_label=None, customer_id=None, company_id=None,
+                                  run_id=None, account_id=None):
+    """Background target for ONE 跨境市场情报日报 run (PHASE B). The expensive web search
+    already happened ONCE in the shared collection; this only slices `pool` to this
+    customer + words the prose. Bills through the SAME per-account path
+    (run_kind=RUN_KIND_MARKET_INTEL folds into the report quota/credits)."""
+    try:
+        MarketIntelOrchestrator(
+            memory, pool, watchlist, company_name=company_name, period_label=period_label,
+            token_manager=TOKENS,
+            cost_listener=_make_biller(customer_id, run_kind=RUN_KIND_MARKET_INTEL),
+            company_id=company_id, run_id=run_id, account_id=account_id).run()
+    except Exception as e:
+        if memory.snapshot().get("status") != "error":
+            memory.set_error(f"{type(e).__name__}: {e}")
+
+
+def _collect_market_intel_pool():
+    """PHASE A: run the SHARED weekly web-search collection across the deduped union of all
+    active watchlists ONCE, gate by publish date in Python, and store the pool. Returns the
+    pool dict (or None if there are no active watchlists). This runs NO LLM (it is purely
+    deterministic) — its only cost is the external search API, which is not token-metered —
+    so it records no per-customer quota Run (the per-customer reports below are the metered,
+    RUN_KIND_MARKET_INTEL runs; RUN_KIND_MI_COLLECT stays reserved for future audit use)."""
+    watchlists = metrics_store.list_active_mi_watchlists()
+    if not watchlists:
+        return None
+    pool = market_intel_engine.collect_daily_intel(watchlists)
+    try:
+        metrics_store.upsert_mi_pool(pool.get("period_label"), pool)
+    except Exception:
+        pass
+    return pool
+
+
+def _run_market_intel_daily():
+    """The daily 08:00 system job: collect ONCE, then fan out a per-customer report +
+    delivery for every active watchlist on a 企业版 plan (market_intel feature). One
+    expensive collection + N cheap personalizations."""
+    if not config.mi_enabled():
+        return
+    pool = _collect_market_intel_pool()
+    if not pool:
+        return
+    period_label = pool.get("period_label")
+    for wl in metrics_store.list_active_mi_watchlists():
+        company_id = wl.get("company_id")
+        if not company_id:
+            continue
+        email = metrics_store.get_company_account_email(company_id)
+        customer = CUSTOMERS.find_by_email(email) if email else None
+        customer_id = (customer or {}).get("id")
+        # 企业版-only: skip a watchlist whose account doesn't have the daily-report feature.
+        if not customer_id:
+            continue
+        plan_code, _sub, _locked = metrics_store.effective_plan(customer_id)
+        if not config.plan_has(plan_code, "market_intel"):
+            continue
+        company_name = (metrics_store.get_profile(company_id) or {}).get("company_name") or ""
+        job_id = uuid.uuid4().hex[:12]
+        goal = f"跨境市场情报日报：{period_label}"
+        memory = SharedMemory(job_id, store_dir=MEMORY_DIR, goal=goal,
+                              output_dir=os.path.join(OUTPUT_DIR, job_id))
+        JOBS[job_id] = memory
+        try:
+            run_id = metrics_store.create_run(company_id, goal, kind=RUN_KIND_MARKET_INTEL)
+        except Exception:
+            run_id = None
+        memory.set_company_id(company_id)
+        memory.set_run_id(run_id)
+        _run_market_intel_for_company(
+            memory, pool, wl, company_name=company_name, period_label=period_label,
+            customer_id=customer_id, company_id=company_id, run_id=run_id,
+            account_id=customer_id)
+        # Deliver the finished report on the customer's channels (best-effort).
+        try:
+            _deliver_market_intel(company_id, run_id, company_name, memory)
+        except Exception as e:
+            memory.log("ceo", f"日报送达跳过（{e}）。", type="info")
+
+
+def _deliver_market_intel(company_id, run_id, company_name, memory):
+    """Email / 企业微信 delivery of a finished 跨境市场情报日报, reusing delivery.deliver_report.
+    Channels come from the customer's 送达设置 (profile 'mi_delivery_channels', default email);
+    企业微信 is dropped if no group webhook is configured (it would silently fail otherwise)."""
+    if not (company_id and run_id):
+        return
+    profile = metrics_store.get_profile(company_id) or {}
+    branding = metrics_store.get_branding(company_id) or {}
+    channels = list(profile.get("mi_delivery_channels") or ["email"])
+    if "wechat" in channels and not branding.get("wechat_webhook"):
+        channels = [c for c in channels if c != "wechat"]
+    channels = channels or ["email"]
+    email = metrics_store.get_company_account_email(company_id)
+    snap = memory.snapshot()
+    pdf_path = metrics_store.report_pdf_path(company_id, run_id)
+    delivery.deliver_report(
+        company_id=company_id, run_id=run_id, channels=channels,
+        pdf_path=(pdf_path if os.path.isfile(pdf_path) else None),
+        report_markdown=snap.get("final_report") or "",
+        company_name=company_name or "本公司",
+        recipient_email=email, job_id=memory.job_id)
+
+
 def _run_crossborder(memory, kind, files_by_role, period_label=None,
                      company_id=None, run_id=None, account_id=None):
     """Background target for a 跨境财务 evidence-engine run (三流合一 / 退税 / 发票审核 /
@@ -1732,6 +1846,10 @@ SCHEDULER.add_system_job("reconciliation-nightly",
                          reconciliation.nightly_reconciliation_tick, "30 3 * * *")
 SCHEDULER.add_system_job("lifecycle-daily",
                          lifecycle.daily_lifecycle_tick, "0 10 * * *")
+# 跨境市场情报日报 — collect ONCE then fan out a per-customer report every morning at 08:00
+# (Asia/Shanghai). Inert until MI_ENABLED (the job itself checks config.mi_enabled()).
+SCHEDULER.add_system_job("market-intel-daily",
+                         _run_market_intel_daily, config.mi_collection_cron())
 
 
 def _start_scheduler():
@@ -3870,6 +3988,214 @@ def recon_reports_list():
     return jsonify({"reports": metrics_store.list_settlement_reports(company_id)})
 
 
+# ---------------------------------------------------------------------------
+# 跨境市场情报日报 — watchlist config + on-demand generate + result + history.
+# Cloud-only (see _LOCAL_MODE_BLOCKED_PREFIXES). The watchlist is the paid INPUT;
+# the EXPENSIVE web search runs ONCE in the weekly system job (or the founder collect
+# trigger), and an on-demand run only personalizes the latest pool (COGS-safe).
+# Customer surfaces NEVER expose models / tokens / ¥.
+# ---------------------------------------------------------------------------
+@app.route("/api/market-intel/watchlist", methods=["GET"])
+def market_intel_watchlist_get():
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    wl = (metrics_store.get_mi_watchlist(company_id) if company_id else None) or {}
+    return jsonify({"watchlist": wl, "sections": [t for _k, t in config.MI_SECTIONS]})
+
+
+@app.route("/api/market-intel/watchlist", methods=["POST"])
+def market_intel_watchlist_save():
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    company_id = metrics_store.get_or_create_company(
+        customer.get("email"),
+        company_name=customer.get("company") or customer.get("name"))
+    body = request.get_json(silent=True) or {}
+    wl = metrics_store.save_mi_watchlist(company_id, {
+        "platforms": body.get("platforms"), "markets": body.get("markets"),
+        "category": body.get("category"), "competitors": body.get("competitors"),
+        "keywords": body.get("keywords"),
+        "active": body.get("active", True)})
+    return jsonify({"watchlist": wl})
+
+
+def _mi_delivery_view(customer, company_id):
+    """Customer-safe 送达设置 state: which channels, the (shared) 企业微信 webhook, and whether
+    the daily push is paused (the watchlist being inactive). NEVER exposes ¥/models."""
+    profile = (metrics_store.get_profile(company_id) if company_id else None) or {}
+    branding = (metrics_store.get_branding(company_id) if company_id else None) or {}
+    wl = (metrics_store.get_mi_watchlist(company_id) if company_id else None) or {}
+    return {
+        "channels": profile.get("mi_delivery_channels") or ["email"],
+        "wechat_webhook": branding.get("wechat_webhook") or "",
+        "email": (customer or {}).get("email") or "",
+        "paused": (wl.get("active") is False),
+        "has_watchlist": bool(wl),
+    }
+
+
+@app.route("/api/market-intel/delivery", methods=["GET"])
+def market_intel_delivery_get():
+    """The 跨境市场情报日报 送达设置 (its OWN delivery surface — NOT the report product's 定时与送达).
+    Cadence is fixed daily 08:00; only channels + the 企业微信 webhook + a pause toggle are settable."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    return jsonify({"delivery": _mi_delivery_view(customer, company_id)})
+
+
+@app.route("/api/market-intel/delivery", methods=["POST"])
+def market_intel_delivery_save():
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    plan_code, _sub, _locked = metrics_store.effective_plan(customer["id"])
+    if not config.plan_has(plan_code, "market_intel"):
+        return jsonify({"error": "跨境市场情报日报是企业版功能。"}), 402
+    company_id = metrics_store.get_or_create_company(
+        customer.get("email"), company_name=customer.get("company") or customer.get("name"))
+    body = request.get_json(silent=True) or {}
+
+    updates = {}
+    if "channels" in body:
+        updates["mi_delivery_channels"] = _clean_channels(body.get("channels")) or ["email"]
+    if "wechat_webhook" in body:
+        webhook = (body.get("wechat_webhook") or "").strip()
+        if webhook and not _valid_wechat_webhook(webhook):
+            return jsonify({"error": "仅支持企业微信群机器人地址"
+                                     "（https://qyapi.weixin.qq.com/…）。"}), 400
+        updates["wechat_webhook"] = webhook   # company-wide webhook (shared with branding)
+    if updates:
+        metrics_store.merge_profile(company_id, updates)
+
+    # Pause/resume = the watchlist's active flag (the daily fan-out skips inactive ones).
+    # Re-save the FULL current watchlist so flipping active never wipes the list fields.
+    if "paused" in body:
+        cur = metrics_store.get_mi_watchlist(company_id)
+        if cur:
+            cur["active"] = not bool(body.get("paused"))
+            metrics_store.save_mi_watchlist(company_id, cur)
+
+    return jsonify({"delivery": _mi_delivery_view(customer, company_id)})
+
+
+@app.route("/api/market-intel/run", methods=["POST"])
+@limiter.limit(config.run_rate_limit, key_func=_run_rate_key)
+def market_intel_run():
+    """On-demand '立即生成': personalize the LATEST shared pool for this account (no new
+    web search). 跨境市场情报日报 is a 企业版 SUBSCRIPTION feature (plan_has 'market_intel'),
+    NOT per-report-quota-metered — so this gates on the plan feature, not _plan_gate."""
+    load_dotenv(override=True)
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再生成跨境市场情报日报。"}), 401
+    allowed, reason = platform_guard.check(customer["id"], customer.get("daily_cap_yuan"))
+    if not allowed:
+        return jsonify({"error": reason}), 503
+    plan_code, _sub, _locked = metrics_store.effective_plan(customer["id"])
+    if not config.plan_has(plan_code, "market_intel"):
+        return jsonify({"error": "跨境市场情报日报是企业版功能，升级后每天早 8 点自动送达。"}), 402
+
+    company_id = metrics_store.get_or_create_company(
+        customer.get("email"),
+        company_name=customer.get("company") or customer.get("name"))
+    watchlist = metrics_store.get_mi_watchlist(company_id)
+    if not watchlist:
+        return jsonify({"error": "请先在「关注列表」中设置平台、市场与类目。"}), 400
+    pool = metrics_store.get_latest_mi_pool()
+    if not pool:
+        return jsonify({"error": "今日情报尚未采集，系统每天早 8 点自动采集并送达。"}), 409
+
+    period_label = pool.get("period_label")
+    job_id = uuid.uuid4().hex[:12]
+    goal = f"跨境市场情报日报：{period_label}"
+    memory = SharedMemory(job_id, store_dir=MEMORY_DIR, goal=goal,
+                          output_dir=os.path.join(OUTPUT_DIR, job_id))
+    JOBS[job_id] = memory
+    company_name = (customer.get("company") or customer.get("name") or "").strip()
+    run_id = None
+    try:
+        run_id = metrics_store.create_run(company_id, goal, kind=RUN_KIND_MARKET_INTEL)
+    except Exception as e:
+        memory.log("system", f"企业大脑暂不可用（{e}）；继续运行。", type="info")
+    memory.set_company_id(company_id)
+    memory.set_run_id(run_id)
+
+    thread = threading.Thread(
+        target=_run_market_intel_for_company,
+        kwargs=dict(memory=memory, pool=pool, watchlist=watchlist,
+                    company_name=company_name, period_label=period_label,
+                    customer_id=customer["id"], company_id=company_id, run_id=run_id,
+                    account_id=customer["id"]),
+        daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id, "run_id": run_id})
+
+
+@app.route("/api/market-intel/result/<int:run_id>")
+def market_intel_result(run_id):
+    """One 跨境市场情报日报 run as a CUSTOMER-SAFE document (no ¥ COGS / model names)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    run = metrics_store.get_run(run_id)
+    if not run:
+        return jsonify({"error": "市场情报记录不存在。"}), 404
+    if not company_id or run.get("company_id") != company_id:
+        return jsonify({"error": "无权访问该报告。"}), 403
+    report = metrics_store.get_mi_report(company_id, run_id) or {}
+    has_pdf = os.path.isfile(metrics_store.report_pdf_path(company_id, run_id))
+    out = {
+        "id": run_id, "status": run.get("status"),
+        "started_at": run.get("started_at"), "finished_at": run.get("finished_at"),
+        "period_label": report.get("period_label", ""),
+        "highlight_count": report.get("highlight_count", 0),
+        "deadline_count": report.get("deadline_count", 0),
+        "kept_count": report.get("kept_count", 0),
+        "final_report": report.get("report_markdown", ""),
+        "sources": report.get("source_rows", []),
+        "has_pdf": has_pdf,
+        "download_url": ("/api/reports/%s/download" % run_id) if has_pdf else None,
+    }
+    # Live runs not yet persisted: fall back to the in-memory job snapshot.
+    if not out["final_report"]:
+        job_id = (run.get("report_path") or "").strip()
+        if job_id and re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+            memory = _load_job_memory(job_id)
+            if memory is not None:
+                out["final_report"] = memory.snapshot().get("final_report") or ""
+    return jsonify(out)
+
+
+@app.route("/api/market-intel/reports")
+def market_intel_reports_list():
+    """This account's 跨境市场情报日报 history (newest first)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"reports": []})
+    return jsonify({"reports": metrics_store.list_mi_reports(company_id)})
+
+
+@app.route("/api/market-intel/collect", methods=["POST"])
+def market_intel_collect():
+    """FOUNDER-ONLY manual trigger of the shared weekly collection (for testing /
+    backfilling a week's pool). Customers never reach this."""
+    customer = _current_customer()
+    if not _is_admin(customer):
+        return jsonify({"error": "无权访问。"}), 403
+    pool = _collect_market_intel_pool()
+    if not pool:
+        return jsonify({"error": "没有任何启用的关注列表，无法采集。"}), 409
+    return jsonify({"period_label": pool.get("period_label"),
+                    "kept": pool.get("kept_count", 0),
+                    "dropped": pool.get("dropped_count", 0),
+                    "queries": pool.get("query_count", 0)})
+
+
 @app.route("/api/recon/exceptions")
 def recon_exceptions():
     """The non-blocking exception worklist (optionally one run / one status)."""
@@ -4223,9 +4549,10 @@ def ar_dunning_send(msg_id):
         return jsonify({"error": "无权操作该草稿，或草稿不存在。"}), 404
     if msg.get("tier") == DUNNING_TIER_HANDOFF or not (msg.get("body") or "").strip():
         return jsonify({"error": "该条目为转人工/法务，无可发送的催收消息。"}), 400
-    if msg.get("state") == "sent":
+    if msg.get("state") == DUNNING_STATE_SENT:
         return jsonify({"error": "该催收消息已发送，请勿重复发送。"}), 409
 
+    # Validate the send target BEFORE claiming, so a bad request never burns the claim.
     data = request.get_json(silent=True) or {}
     channel = (data.get("channel") or "email").strip()
     body = msg.get("body") or ""
@@ -4233,21 +4560,34 @@ def ar_dunning_send(msg_id):
         to = (data.get("to") or "").strip()
         if not to:
             return jsonify({"error": "请填写收件人邮箱。"}), 400
-        subject = "应收账款付款提醒"
-        ok, err = delivery.send_email(to, subject, body)
     elif channel == "wechat":
         webhook = metrics_store.get_branding(company_id).get("wechat_webhook")
-        ok, err = delivery.send_wechat_webhook(webhook, body)
     else:
         return jsonify({"error": "不支持的发送渠道。"}), 400
+
+    # Atomically claim the row BEFORE the network send: a concurrent double-click /
+    # retried request / second tab loses the race here and cannot double-dun.
+    claim = metrics_store.claim_dunning_for_send(company_id, msg_id)
+    if claim is None:
+        return jsonify({"error": "无权操作该草稿，或草稿不存在。"}), 404
+    if claim.get("already_sent"):
+        return jsonify({"error": "该催收消息已发送，请勿重复发送。"}), 409
+    prior_state = claim.get("prior_state")
+
+    if channel == "email":
+        ok, err = delivery.send_email(to, "应收账款付款提醒", body)
+    else:  # wechat (validated above)
+        ok, err = delivery.send_wechat_webhook(webhook, body)
 
     did = metrics_store.record_delivery(
         channel, DELIVERY_SENT if ok else DELIVERY_FAILED,
         run_id=msg.get("run_id"), error=(None if ok else err))
     if not ok:
+        # Delivery failed — release the claim so the human can retry.
+        metrics_store.release_dunning_claim(company_id, msg_id, prior_state)
         return jsonify({"ok": False, "error": err or "发送失败"}), 502
-    updated = metrics_store.set_dunning_state(
-        company_id, msg_id, DUNNING_STATE_SENT, channel=channel, delivery_id=did)
+    updated = metrics_store.finalize_dunning_sent(
+        company_id, msg_id, channel=channel, delivery_id=did)
     return jsonify({"ok": True, "message": updated})
 
 

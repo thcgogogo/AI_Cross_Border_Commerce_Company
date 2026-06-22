@@ -143,7 +143,7 @@ def test_plans_catalog_matches_brief():
     assert pro["monthly_price_yuan"] == 599.0
     assert pro["monthly_report_quota"] >= 100   # "high-volume reports"
     assert set(pro["features"]) == {"scheduled_delivery", "contract_review",
-                                    "priority_models"}
+                                    "priority_models", "market_intel"}
 
     # The feature-gate helper the later phases (B5/B9) will call.
     assert config.plan_has("pro", "scheduled_delivery") is True

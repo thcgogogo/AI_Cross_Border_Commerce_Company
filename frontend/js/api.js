@@ -91,6 +91,17 @@ export const classifyReconException = (excId, label) =>
   postJSON(`/api/recon/exceptions/${encodeURIComponent(excId)}/classify`, { label });
 export const reconLedgerUrl = (runId) => `/api/recon/ledger/${encodeURIComponent(runId)}`;
 
+// 市场情报周报
+export const getMarketIntelWatchlist = () => getJSON("/api/market-intel/watchlist");
+export const saveMarketIntelWatchlist = (watchlist) =>
+  postJSON("/api/market-intel/watchlist", watchlist);
+export const startMarketIntel = () => postJSON("/api/market-intel/run", {});
+export const getMarketIntelResult = (runId) =>
+  getJSON(`/api/market-intel/result/${encodeURIComponent(runId)}`);
+export const getMarketIntelHistory = () => getJSON("/api/market-intel/reports");
+export const getMarketIntelDelivery = () => getJSON("/api/market-intel/delivery");
+export const saveMarketIntelDelivery = (body) => postJSON("/api/market-intel/delivery", body);
+
 // ---- 应收账款管理 + 催收 (AR aging + dunning) ----------------------------------
 export const getArPacks = () => getJSON("/api/ar/packs");
 export const startAr = (formData) => postForm("/api/ar/run", formData);

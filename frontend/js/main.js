@@ -17,6 +17,8 @@ import * as reportView from "./views/report_view.js";
 import * as workflow from "./views/workflow.js";
 import * as workflowHub from "./views/workflow_hub.js";
 import * as crossBorder from "./views/cross_border.js";
+import * as marketIntel from "./views/market_intel.js";
+import * as account from "./views/account.js";
 import * as fTeam from "./founder/team.js";
 import * as fCosts from "./founder/costs.js";
 import * as fModels from "./founder/models.js";
@@ -35,7 +37,7 @@ const $ = (id) => document.getElementById(id);
 // in-page tab pre-selected (see ROUTES + views/workflow.js), so deep links keep working.
 // Every sub-path the one workflow page owns — used to light the 工作流 nav as active.
 const AGENTS_PATHS = ["/workflow", "/agents", "/new", "/reports", "/schedule", "/brain",
-  "/account", "/cross-border"];
+  "/cross-border", "/markets"];
 const FOUNDER_NAV = [
   { path: "/founder/team", label: "团队与模型" },
   { path: "/founder/costs", label: "成本控制台" },
@@ -57,6 +59,12 @@ const ROUTES = [
   { pattern: /^\/new$/, view: () => workflow, auth: true, params: () => ({ tab: "generate" }) },
   { pattern: /^\/reports$/, view: () => workflow, auth: true, params: () => ({ tab: "history" }) },
   { pattern: /^\/reports\/(\d+)$/, view: () => reportView, auth: true, params: (m) => ({ runId: m[1] }) },
+  // 市场情报周报 — its OWN 工作流 section (a dedicated 跨境电商 product), NOT a tab inside the
+  // report product. A standalone view, like the 跨境财务 hub. /markets/<runId> opens one report.
+  { pattern: /^\/markets$/, view: () => marketIntel, auth: true, params: () => ({}) },
+  // 送达设置 — market-intel's OWN delivery subpage (NOT the report product's /schedule).
+  { pattern: /^\/markets\/settings$/, view: () => marketIntel, auth: true, params: () => ({ settings: true }) },
+  { pattern: /^\/markets\/(\d+)$/, view: () => marketIntel, auth: true, params: (m) => ({ runId: m[1] }) },
   // 跨境财务 hub: ONE section, 贸易方式 selector + mode-gated sub-tabs. The legacy
   // /recon + /ar deep links are rewritten into its sub-tabs in render() (below).
   { pattern: /^\/cross-border$/, view: () => crossBorder, auth: true, params: () => ({ tab: "recon" }) },
@@ -65,7 +73,9 @@ const ROUTES = [
     params: (m) => ({ tab: m[1], runId: m[2] }) },
   { pattern: /^\/schedule$/, view: () => workflow, auth: true, params: () => ({ tab: "schedule" }) },
   { pattern: /^\/brain$/, view: () => workflow, auth: true, params: () => ({ tab: "brain" }) },
-  { pattern: /^\/account$/, view: () => workflow, auth: true, params: () => ({ tab: "account" }) },
+  // 账户与套餐 — its OWN top-level section (peer to 工作流/Fusion), mounted standalone (NOT a
+  // report-product tab). The legacy /account deep link still resolves here.
+  { pattern: /^\/account$/, view: () => account, auth: true, params: () => ({}) },
   { pattern: /^\/founder\/team$/, view: () => fTeam, auth: true },
   { pattern: /^\/founder\/costs$/, view: () => fCosts, auth: true },
   { pattern: /^\/founder\/models$/, view: () => fModels, auth: true },
@@ -206,6 +216,8 @@ function renderNav() {
     const open = AGENTS_PATHS.some((p) => (p === "/agents" ? current === "/agents" : current.startsWith(p)));
     // 工作流 is a plain link to the hub page; the two sub-pages live on the hub.
     html += `<a class="nav-link ${open ? "active" : ""}" href="/workflow" data-nav>工作流</a>`;
+    // 账户与套餐 — its own top-level section (separate from 工作流 + Fusion).
+    html += navLinkHTML({ path: "/account", label: "账户" }, current);
   } else {
     html += navLinkHTML({ path: "/agents", label: "工作流" }, current);
   }
@@ -244,6 +256,7 @@ function renderNavSheet() {
   let html = navLinkHTML({ path: "/", label: "Fusion" }, current);
   if (state.account) {
     html += navLinkHTML({ path: "/workflow", label: "工作流" }, current);
+    html += navLinkHTML({ path: "/account", label: "账户与套餐" }, current);
   } else {
     html += navLinkHTML({ path: "/agents", label: "工作流" }, current);
   }

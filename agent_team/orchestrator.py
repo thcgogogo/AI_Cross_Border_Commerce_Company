@@ -498,6 +498,11 @@ class Orchestrator:
         """If planning fails, just run every worker in org-chart order."""
         goal = self.memory.goal()
         defaults = {
+            "research_agent": f"Search the live web for the most CURRENT, authoritative "
+                              f"information relevant to: {goal}. Gather recent facts, news, "
+                              f"figures, and context; cite each source and its publication "
+                              f"date; flag anything that looks out of date. Hand the team a "
+                              f"clear research brief they can analyze.",
             "document_analyst": f"Read every uploaded document and extract the facts, "
                                 f"figures, and key points relevant to: {goal}",
             "records_manager": f"Catalog every uploaded document into an organized records "

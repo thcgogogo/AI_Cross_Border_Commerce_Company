@@ -52,8 +52,9 @@ def test_domestic_complete_never_builds_anthropic_client(monkeypatch):
 
     captured = {}
 
-    def fake_openai_chat(model_id, messages, max_tokens, max_retries=3):
+    def fake_openai_chat(model_id, messages, max_tokens, max_retries=3, web_search=False):
         captured["model"] = model_id
+        captured["web_search"] = web_search
         return {"text": "DOMESTIC-OK", "input_tokens": 10, "output_tokens": 5}
 
     monkeypatch.setattr(providers, "_openai_chat", fake_openai_chat)
@@ -62,6 +63,7 @@ def test_domestic_complete_never_builds_anthropic_client(monkeypatch):
     out = r.complete("sys", "user", model="deepseek-v4-flash", budget=None)
     assert out == "DOMESTIC-OK"
     assert captured["model"] == "deepseek-v4-flash"
+    assert captured["web_search"] is False  # default off; ModelRouter forwards the flag
     assert r._anthropic_obj is None  # the Anthropic path was never taken
 
 

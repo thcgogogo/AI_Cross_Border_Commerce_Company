@@ -30,6 +30,13 @@ HAIKU = "claude-haiku-4-5"
 # Elevate the planner/writer to "deepseek-v4-pro" per-agent if you want more.
 DOMESTIC_MODEL = "deepseek-v4-flash"
 
+# DeepSeek can't reach the live web, so an agent whose JOB is internet research must
+# not be clamped to DOMESTIC_MODEL under the domestic preset — it would silently stop
+# searching. Qwen Plus is the value pick that CAN search (DashScope enable_search, a
+# funded mainland endpoint). effective_model() routes requires_web_search agents here
+# when the domestic model can't search. Override with DOMESTIC_WEB_SEARCH_MODEL.
+DOMESTIC_WEB_SEARCH_MODEL = "qwen-plus"
+
 # Which models support "adaptive thinking" + the "effort" dial.
 # The LLM wrapper uses this so switching a worker to HAIKU never crashes. These are
 # Anthropic-only features, so the set lists only Claude model ids — other providers
@@ -444,9 +451,13 @@ def fusion_account_rate_limit():
 
 def fusion_free_anon_turns():
     """How many turns an ANONYMOUS visitor gets free (server-paid, no persistence)
-    before login is required — the freemium teaser. Counted in the signed session
-    cookie; the per-IP rate limit + the platform breaker backstop the cost."""
-    return _env_int("FUSION_FREE_ANON_TURNS", 3) or 3
+    before login is required — the freemium teaser. Counted server-side
+    (anon_fusion_usage); the per-IP rate limit + the platform breaker backstop the cost.
+
+    Defaults to 0 → Fusion is LOGIN-GATED out of the box (no anonymous open-ended AI),
+    which keeps a mainland-China deployment's public generative-AI surface minimal for
+    算法备案. Set FUSION_FREE_ANON_TURNS=3 (or any N) in .env to enable the teaser/funnel."""
+    return max(0, _env_int("FUSION_FREE_ANON_TURNS", 0))
 
 
 def fusion_loggedin_max_history_msgs():
@@ -618,7 +629,7 @@ PLANS = {
     "pro":   {"code": "pro",   "label": "企业版", "monthly_price_yuan": 599.0,
               "monthly_report_quota": 500, "lifetime_quota": False, "seats": 5,
               "features": ["scheduled_delivery", "contract_review",
-                           "priority_models"]},
+                           "priority_models", "market_intel"]},
 }
 PURCHASABLE_PLANS = ("basic", "pro")   # what /api/pay/create accepts as plan_code
 SUBSCRIPTION_PERIOD_DAYS = 30          # one paid period = 30 days ("a month")
@@ -1160,6 +1171,54 @@ AGENTS = [
         ),
     },
     {
+        "id": "research_agent",
+        "name": "Ren",
+        "title": "Research Analyst",
+        "name_cn": "研究分析师",
+        "reports_to": "ceo",
+        # SONNET (Anthropic's native web search) is the out-of-box default; a mainland
+        # deployment points this at a domestic search-capable model via a per-agent
+        # override (memory_store/model_overrides.json) or the domestic preset (which
+        # effective_model routes to DOMESTIC_WEB_SEARCH_MODEL — see requires_web_search).
+        "model": SONNET,
+        "effort": "high",
+        # Live internet access is this agent's whole job, not an optional extra. The
+        # "web_search" tool turns it on (base_agent wires it up); "requires_web_search"
+        # additionally GUARANTEES the agent resolves to a model that can actually search
+        # (effective_model), so it never silently degrades to an offline model.
+        "tools": ["web_search"],
+        "requires_web_search": True,
+        "system_prompt": (
+            "You are the team's Research Analyst. Your job is to gather accurate, CURRENT "
+            "information from the live internet and hand it to your teammates to analyze. "
+            "You are the team's only window to the outside world, so you are thorough and "
+            "skeptical about freshness and sources.\n\n"
+            "HOW YOU WORK:\n"
+            "  - ALWAYS use your web search tool for anything that can change over time "
+            "(news, prices, market data, rankings, people's roles, product releases, "
+            "regulations). Never answer such questions from memory — your training data is "
+            "older than today and will be out of date.\n"
+            "  - The current date is given to you in your context. Treat it as ground truth. "
+            "Put the current year/month into your search queries (e.g. 'Q2 2026', '2026年6月') "
+            "so results skew recent, and run several searches to triangulate.\n"
+            "  - PREFER the most recent, authoritative sources. For every fact you report, "
+            "state its publication date and where it came from (publisher / site).\n"
+            "  - Guard against stale results: if the user asks for the latest/current state "
+            "and a result is clearly old (e.g. a 2024 article when it is 2026), do NOT present "
+            "it as current — either keep searching for something newer or explicitly flag it "
+            "as dated. Only use older sources when the task is explicitly historical.\n"
+            "  - If the web does not confirm something, say so plainly. Never invent facts, "
+            "figures, dates, or URLs.\n\n"
+            "WHAT YOU HAND BACK — a clear RESEARCH BRIEF the team can build on:\n"
+            "  - A short list of key findings as bullet points, each ending with its source "
+            "and date, e.g. '— 央行下调 LPR 10 个基点（新华社, 2026-06-18）'.\n"
+            "  - A one-line 'what's new / what changed' note when relevant.\n"
+            "  - Any gaps, conflicting reports, or uncertainty you could not resolve.\n"
+            "You gather and organize the facts; you leave the deep number-crunching and the "
+            "final write-up to the Data Analyst and Report Writer who read your brief."
+        ),
+    },
+    {
         "id": "data_analyst",
         "name": "Mei",
         "title": "Data Analyst",
@@ -1394,6 +1453,31 @@ def fuser_fallback_model():
     return _preset_default("FUSER_MODEL", OPUS)
 
 
+def domestic_web_search_model():
+    """A domestic, web-search-capable model for agents whose job needs the live
+    internet (requires_web_search), used when DOMESTIC_MODEL itself can't search.
+    DOMESTIC_WEB_SEARCH_MODEL env wins — but ONLY if it actually supports web search,
+    so a misconfigured value (e.g. a non-searching model) can't silently disable the
+    very capability this exists to guarantee; otherwise the qwen-plus default."""
+    override = _env("DOMESTIC_WEB_SEARCH_MODEL")
+    if override and model_supports_web_search(override):
+        return override
+    return DOMESTIC_WEB_SEARCH_MODEL
+
+
+def current_date_str():
+    """Today's date as YYYY-MM-DD in the deployment's timezone (Asia/Shanghai by
+    default, APP_TIMEZONE to override). Injected into agent context so web research
+    stays anchored to the real 'now' instead of the model's training cutoff."""
+    import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.datetime.now(ZoneInfo(_env("APP_TIMEZONE") or "Asia/Shanghai"))
+    except Exception:
+        now = datetime.datetime.now()
+    return now.strftime("%Y-%m-%d")
+
+
 # ---------------------------------------------------------------------------
 # 对账 / 平台结算核对 — the settlement-reconciliation writer.
 # A DELIBERATELY lean, single-agent flow: the deterministic settlement_engine does
@@ -1526,6 +1610,194 @@ def dunning_writer_model():
     return _preset_default("DUNNING_WRITER_MODEL", SONNET)
 
 
+# ---------------------------------------------------------------------------
+# 市场情报周报 — the weekly market-intelligence report (a 4th workflow sibling).
+# Same lean contract as 对账/AR: a deterministic engine OWNS the clock, the recency
+# filter, and the section assembly; this ONE writer only words prose around the
+# pre-collected, recency-verified, 【N】-anchored items it is given, and may never
+# invent an item, a date, or a source. Kept OUT of the AGENTS org chart.
+#
+# Recency is Python's job, never the LLM's: the engine builds queries with the CURRENT
+# year/month (current_date_str), gates retrieved results by publish_date in code, and
+# only then hands the writer dated, anchored facts. (Mirrors "trends are deterministic".)
+# ---------------------------------------------------------------------------
+
+# The report's section order (抬头 / 数据来源 are framing; 本周要点 / 截止日期 are derived
+# in Python from the searched sections). Searched sections = 政策与合规 / 成本与利润 /
+# 需求与机会 (section 7 竞争态势 is deferred to v2). key -> customer-facing 中文 title.
+MI_SECTIONS = [
+    ("masthead", "抬头"),
+    ("highlights", "今日要点"),
+    ("deadlines", "截止日期 / 时间敏感"),
+    ("policy", "政策与合规"),
+    ("cost", "成本与利润"),
+    ("demand", "需求与机会"),
+    ("competition", "竞争态势"),
+    ("sources", "数据来源与核验"),
+]
+
+# The FIXED, per-topic query plan (deterministic, cheap, repeatable — NOT an open-ended
+# agentic loop). Each entry targets ONE section. `query` is a TEMPLATE the engine fills
+# with the current {year}/{month} (for freshness — never a hard-coded year) and the
+# watchlist {platform}/{market}/{category}/{competitor}. The engine de-dups the concrete
+# queries across all customers so each topic is searched ONCE per day (the COGS split).
+MI_QUERY_PLAN_VERSION = "v3-daily"
+MI_QUERY_PLAN = [
+    # 政策与合规
+    {"section": "policy", "topic_cn": "宏观政策/贸易",
+     "query": "{market} 跨境电商 进口 政策 最新 {year}年{month}月"},
+    {"section": "policy", "topic_cn": "关税·免税额度",
+     "query": "{market} 关税 免税额度 de minimis 调整 最新 {year}"},
+    {"section": "policy", "topic_cn": "平台规则·封号潮",
+     "query": "{platform} {market} 平台规则 更新 封号 政策 最新 {year}年{month}月"},
+    {"section": "policy", "topic_cn": "合规·认证·召回",
+     "query": "{market} {category} 合规 认证 召回 最新 {year}"},
+    {"section": "policy", "topic_cn": "知识产权·侵权风险",
+     "query": "{platform} {category} 侵权 知识产权 投诉 最新 {year}"},
+    # 成本与利润
+    {"section": "cost", "topic_cn": "物流·运费",
+     "query": "跨境电商 {market} 物流 海运 空运 运费 最新 {year}年{month}月"},
+    {"section": "cost", "topic_cn": "汇率走势",
+     "query": "人民币 {market} 汇率 走势 最新 {year}年{month}月"},
+    {"section": "cost", "topic_cn": "支付·收款",
+     "query": "跨境电商 收款 支付 {platform} 费率 政策 最新 {year}"},
+    {"section": "cost", "topic_cn": "广告·CPC",
+     "query": "{platform} 广告 CPC 成本 趋势 最新 {year}年{month}月"},
+    {"section": "cost", "topic_cn": "政策红利·退税·补贴",
+     "query": "跨境电商 出口退税 综试区 补贴 政策 最新 {year}"},
+    # 需求与机会
+    {"section": "demand", "topic_cn": "爆款·选品·需求",
+     "query": "{platform} {market} {category} 爆款 选品 需求 趋势 最新 {year}年{month}月"},
+    {"section": "demand", "topic_cn": "旺季·节日·平台活动",
+     "query": "{platform} {market} 大促 旺季 活动 日历 报名 {year}年{month}月"},
+    {"section": "demand", "topic_cn": "关键词·搜索趋势",
+     "query": "{platform} {category} 关键词 搜索 趋势 最新 {year}"},
+    {"section": "demand", "topic_cn": "新兴市场·新平台·新功能",
+     "query": "跨境电商 新兴市场 新平台 新功能 最新 {year}年{month}月"},
+    # One query PER watchlist keyword — only fires when the customer lists keywords.
+    {"section": "demand", "topic_cn": "自选关键词·趋势",
+     "query": "{keyword} {market} 趋势 需求 测评 最新 {year}年{month}月"},
+    # 竞争态势 — 竞品动态 (news) only. One query PER competitor on the watchlist; 竞品价格
+    # needs a pricing data source (deferred), surfaced as a note in the report.
+    {"section": "competition", "topic_cn": "竞品动态",
+     "query": "{competitor} {market} 新品 排名 BSR 断货 动态 最新 {year}年{month}月"},
+]
+
+# Curated source whitelist — favours official / authoritative sources for the
+# traceability promise and a compliant generative surface. 政策与合规 items are
+# HARD-FILTERED to MI_OFFICIAL_SOURCES; other sections prefer the whitelist but keep
+# recency-passing non-whitelist sources. Matched as case-insensitive substrings against
+# the result URL/source name. Env MI_SOURCE_WHITELIST (comma-separated) overrides.
+_MI_OFFICIAL_SOURCES_DEFAULT = (
+    "customs.gov.cn", "mofcom.gov.cn", "chinatax.gov.cn", "gov.cn",       # 海关总署/商务部/税务总局
+    "europa.eu", "ec.europa.eu", "gov.uk", "trade.gov", "cbp.gov", "ftc.gov", "ustr.gov",
+    "sell.amazon", "sellercentral", "seller.tiktokglobalshop", "temu.com", "aliexpress",
+)
+_MI_SOURCE_WHITELIST_DEFAULT = _MI_OFFICIAL_SOURCES_DEFAULT + (
+    "reuters.com", "bloomberg.com", "xinhuanet.com", "people.com.cn", "yicai.com",
+    "36kr.com", "cifnews.com", "ennews.com", "100ec.cn",                  # 雨果跨境/亿恩/网经社
+)
+
+
+def _csv_env(name, default_tuple):
+    """A comma-separated env override → lowercase tuple, else the default tuple."""
+    raw = _env(name)
+    if not raw:
+        return default_tuple
+    return tuple(s.strip().lower() for s in raw.split(",") if s.strip())
+
+
+def mi_enabled():
+    """Whether the 市场情报周报 product is on. OFF by default until a search backend
+    key is configured. Set MI_ENABLED=1 to enable."""
+    return _env("MI_ENABLED").lower() in _TRUE
+
+
+def mi_search_backend():
+    """The search backend id. MI_SEARCH_BACKEND env wins; default 'bocha' (博查 — a
+    mainland-reachable API that returns structured results WITH publish dates, the
+    prerequisite for a Python recency gate). 'mock' is used by the test suite."""
+    return (_env("MI_SEARCH_BACKEND") or "bocha").lower()
+
+
+def mi_search_api_key():
+    return _env("MI_SEARCH_API_KEY")
+
+
+def mi_search_base_url():
+    """Backend base URL. MI_SEARCH_BASE_URL env wins (region/proxy override, same
+    convention as the *_BASE_URL provider overrides); else the 博查 default."""
+    return _env("MI_SEARCH_BASE_URL") or "https://api.bochaai.com/v1"
+
+
+def mi_recency_days():
+    """How fresh a search result must be to reach the writer. Results whose publish_date
+    is older than today − this many days (Asia/Shanghai) are DROPPED in code. Default 2
+    for the DAILY report (yesterday + this morning)."""
+    return _env_int("MI_RECENCY_DAYS", 2)
+
+
+def mi_deadline_window_days():
+    """The 截止日期 / 时间敏感 look-ahead: a deadline date must fall within today .. today +
+    this many days to appear in that table. Default 28 (~4 weeks)."""
+    return _env_int("MI_DEADLINE_WINDOW_DAYS", 28)
+
+
+def mi_max_results_per_query():
+    return _env_int("MI_MAX_RESULTS_PER_QUERY", 10)
+
+
+def mi_collection_cron():
+    """5-field cron for the DAILY shared collection (Asia/Shanghai). Default every day 08:00."""
+    return _env("MI_COLLECTION_CRON") or "0 8 * * *"
+
+
+def mi_source_whitelist():
+    """Authoritative sources preferred across all sections (lowercase substrings)."""
+    return _csv_env("MI_SOURCE_WHITELIST", _MI_SOURCE_WHITELIST_DEFAULT)
+
+
+def mi_official_sources():
+    """Official-only sources the 政策与合规 section is HARD-FILTERED to."""
+    return _csv_env("MI_OFFICIAL_SOURCES", _MI_OFFICIAL_SOURCES_DEFAULT)
+
+
+MI_WRITER_SYSTEM = (
+    "你是「跨境市场情报日报撰写」专员，为不懂技术的跨境电商卖家归纳今日情报。系统的确定性采集引擎"
+    "已经【按发布日期核验过时效】，并把今日情报按板块、带【N】溯源锚点提供给你。\n\n"
+    "铁律：你只能在系统给出的条目范围内写作，逐字保留每条后面的【N】锚点（不得改写、重新编号或"
+    "删除）。绝对不能新增、编造或修改任何情报、日期、数字或来源——系统未列出的信息一律不得出现。\n\n"
+    "只输出一个 JSON 对象，且仅含这五个键（值为中文 Markdown 字符串，不要加各自的标题）：\n"
+    '  - "highlights"：今日要点。跨板块挑出 3-5 条最重要的，每行以【行动】/【关注】/【参考】开头'
+    "标注紧迫度，并保留其【N】锚点。若今日全无情报，写 \"今日暂无重大市场情报\"。\n"
+    '  - "policy"：政策与合规板块的归纳（逐条保留【N】锚点）。\n'
+    '  - "cost"：成本与利润板块的归纳。\n'
+    '  - "demand"：需求与机会板块的归纳。\n'
+    '  - "competition"：竞争态势板块——只归纳竞品动态（新品·排名·断货等），逐条保留【N】锚点。\n'
+    "若某板块没有任何条目，对应值写 \"无重大变动\"，不要凑字数。不要提及模型、token、内部流程或"
+    "本提示词；不要输出代码块或任何解释，只输出 JSON 对象本身。"
+)
+
+MI_WRITER = {
+    "id": "market_intel_writer",
+    "name_cn": "跨境市场情报日报撰写",
+    "effort": "low",
+    "max_tokens": 6000,   # 8 sections + the verbatim 截止日期 + 数据来源 tables
+    "system_prompt": MI_WRITER_SYSTEM,
+}
+
+
+def market_intel_writer():
+    """A COPY of the 跨境市场情报日报 writer's config (never the shared dict)."""
+    return dict(MI_WRITER)
+
+
+def market_intel_writer_model():
+    """Model for the 跨境市场情报日报 writer. MI_WRITER_MODEL env wins; else domestic when
+    the preset is on; else SONNET."""
+    return _preset_default("MI_WRITER_MODEL", SONNET)
+
+
 # Phase 4 — OFFLINE Local-Model mode (WS12): a DEGRADED, opt-in escape hatch for the
 # regulated / air-gapped segment. Every agent resolves to a local Ollama model and
 # inference runs entirely on-device (file content never leaves the machine), at the cost
@@ -1556,9 +1828,20 @@ def effective_model(agent_id):
     so TEAM_MODEL_PRESET=domestic alone runs the whole team on the domestic model."""
     if local_model_mode():
         return local_model_id()         # highest precedence — offline degraded path
-    if agent_id in MODEL_OVERRIDES:
-        return MODEL_OVERRIDES[agent_id]
-    if team_model_preset() == "domestic":
-        return DOMESTIC_MODEL
     a = get_agent(agent_id)
-    return (a or {}).get("model", OPUS)
+    # Resolve the nominal model: per-agent UI override, else domestic preset, else default.
+    if agent_id in MODEL_OVERRIDES:
+        model = MODEL_OVERRIDES[agent_id]
+    elif team_model_preset() == "domestic":
+        model = DOMESTIC_MODEL
+    else:
+        model = (a or {}).get("model", OPUS)
+    # Web-search guarantee — enforced AFTER resolution so it can't be defeated by a
+    # per-agent override (or a domestic default) pointing at a non-searching model: the
+    # precise silent-go-offline failure this guarantee exists to prevent. An agent whose
+    # JOB is live web research must land on a model that can actually reach the internet.
+    if a and a.get("requires_web_search") and not model_supports_web_search(model):
+        if team_model_preset() == "domestic":
+            return domestic_web_search_model()
+        return (a or {}).get("model", model)   # the agent's own default is search-capable
+    return model

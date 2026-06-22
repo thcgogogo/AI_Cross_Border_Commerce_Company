@@ -1,6 +1,10 @@
 # Secrets — NEVER commit your real key
 .env
 
+# TLS certificates/keys dropped into certs/ for HTTPS (keep the folder via .gitkeep)
+certs/*
+!certs/.gitkeep
+
 # Uploaded files, per-job memory, and per-run generated artifacts
 # (outputs/ files committed before this rule stay tracked — git ignores the
 # pattern for already-tracked paths)

@@ -65,8 +65,9 @@ _FALSY = {"否", "0", "false", "no", "n", "未登记", "未", "f", "无", ""}
 
 
 def _truthy(raw):
-    """Parse the 是否综服平台登记 flag. "是"/"1"/"true"/non-empty-nonzero → True;
-    "否"/"0"/"" → False. Tolerant + deterministic. PROVISIONAL token set."""
+    """Parse the 是否综服平台登记 flag. "是"/"1"/"true" → True; "否"/"0"/""/unrecognized
+    → False (FAIL CLOSED). A non-zero numeric counts as 登记. Tolerant + deterministic.
+    PROVISIONAL token set."""
     s = _clean(raw)
     if s is None:
         return False
@@ -75,11 +76,14 @@ def _truthy(raw):
         return True
     if t in _FALSY:
         return False
-    # unknown non-empty token: treat a non-zero numeric as登记, else fall back to登记
+    # Unknown non-empty token: a non-zero numeric counts as 登记; anything else FAILS
+    # CLOSED. 综服平台登记 is an eligibility precondition for 无票免税 (财税[2018]103号 条件一),
+    # so an unrecognized registration value must NOT silently auto-qualify the export —
+    # treat it as 未登记 until a human confirms the column's real vocabulary.
     try:
         return Decimal(t) != _ZERO
     except Exception:  # noqa: BLE001
-        return True
+        return False
 
 
 # Default generic column_map (Chinese headers) + tolerances + PROVISIONAL policy params.

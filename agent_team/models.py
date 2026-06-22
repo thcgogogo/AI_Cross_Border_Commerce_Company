@@ -87,14 +87,20 @@ RUN_KIND_RECON = "recon"     # 对账 / 平台结算核对 — a settlement-reco
 RUN_KIND_AR = "ar"           # 应收账款管理 + 催收 — an AR aging + dunning-draft run
 RUN_KIND_CROSSBORDER = "crossborder"  # 跨境财务 三流合一/退税/发票/无票免税 — one shared kind
 RUN_KIND_FUSION_SEED = "fusion_seed"  # a full report seeded FROM a Fusion conversation (R6 hand-off)
+RUN_KIND_MARKET_INTEL = "market_intel"  # 市场情报周报 — a per-customer weekly market-intelligence report
+RUN_KIND_MI_COLLECT = "mi_collect"  # 市场情报 SHARED weekly web-search collection (infra, not per customer)
 RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT, RUN_KIND_DEVICE, RUN_KIND_RECON,
-             RUN_KIND_AR, RUN_KIND_CROSSBORDER, RUN_KIND_FUSION_SEED)
+             RUN_KIND_AR, RUN_KIND_CROSSBORDER, RUN_KIND_FUSION_SEED,
+             RUN_KIND_MARKET_INTEL, RUN_KIND_MI_COLLECT)
 
 # Run kinds that count against the shared report quota / can consume a 单次 credit.
 # 对账 and 应收账款 both fold into the existing report quota (owner decisions
 # 2026-06-16 / 2026-06-19) so they sit here next to the weekly report; import + device
 # runs never count. `runs.kind` is a plain String(32), so adding new kinds needs NO
-# enum migration.
+# enum migration. 跨境市场情报日报 is a 企业版 SUBSCRIPTION feature (plan_has "market_intel"),
+# delivered daily — so it is NOT per-report-quota-metered (that would exhaust the tiers at
+# ~30/month); RUN_KIND_MARKET_INTEL + its SHARED collection (mi_collect) both stay OUT, like
+# import/device. COGS still meters to the account, it just never consumes a 单次 credit.
 QUOTA_RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_RECON, RUN_KIND_AR, RUN_KIND_CROSSBORDER,
                    RUN_KIND_FUSION_SEED)
 
@@ -1183,4 +1189,67 @@ class FusionAttachment(Base):
     parsed_text = Column(Text, nullable=True)                    # ENCRYPTED extracted text
     status = Column(String(16), nullable=False, default=FUSION_ATTACH_READY,
                     server_default=FUSION_ATTACH_READY)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# 市场情报周报 — the weekly market-intelligence report (additive; mirrors the
+# 对账/AR additive table pattern). Three tables: the per-company watchlist (the
+# paid INPUT), the SHARED weekly intel pool (collected once, reused by every
+# customer that week — the COGS split), and the per-customer report summary.
+# ---------------------------------------------------------------------------
+class MIWatchlist(Base):
+    """One row per company: what this customer wants the weekly 市场情报周报 scoped to.
+    This is the report's INPUT (the equivalent of 'upload Excel' in the other products),
+    configured once at onboarding and editable from the 市场情报 tab. The list fields are
+    stored as JSON text. A dedicated table (not CompanyProfile.profile_json) so the weekly
+    collection job can enumerate the distinct (platform×market×category) topics to search
+    once across all customers."""
+    __tablename__ = "mi_watchlists"
+    __table_args__ = (UniqueConstraint("company_id", name="uq_mi_watchlist_company"),)
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    platforms = Column(Text, nullable=True)      # JSON list, e.g. ["amazon","temu"]
+    markets = Column(Text, nullable=True)        # JSON list, e.g. ["US","DE"]
+    category = Column(String(128), nullable=True)
+    competitors = Column(Text, nullable=True)    # JSON list of brands / ASINs
+    keywords = Column(Text, nullable=True)       # JSON list
+    active = Column(Boolean, nullable=False, default=True, server_default="1")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class MIIntelPool(Base):
+    """The SHARED weekly intel artifact — collected ONCE per ISO week (Phase A), then
+    sliced/personalized per customer (Phase B). `items_json` holds the recency-gated,
+    whitelisted, bucketed, 【N】-anchored items + their source rows. One row per
+    `period_label` (e.g. '2026-W25'); reused by every per-customer run that week, which
+    is how the product avoids N web-search collections for N customers."""
+    __tablename__ = "mi_intel_pool"
+    __table_args__ = (UniqueConstraint("period_label", name="uq_mi_pool_period"),)
+
+    id = Column(Integer, primary_key=True)
+    period_label = Column(String(32), nullable=False, index=True)   # ISO week, e.g. 2026-W25
+    status = Column(String(16), nullable=False, default="ready", server_default="ready")
+    query_plan_version = Column(String(32), nullable=True)
+    items_json = Column(Text, nullable=True)
+    collected_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class MIReport(Base):
+    """One 市场情报周报 run's result (customer-scoped). One row per (company, run),
+    mirroring SettlementReport. `summary_json` holds the personalized report payload +
+    its 【N】 source rows; the final report markdown lives in the run's memory snapshot /
+    rendered PDF (same as 对账). `period_label` is the covered week."""
+    __tablename__ = "mi_reports"
+    __table_args__ = (UniqueConstraint("company_id", "run_id",
+                                       name="uq_mi_report_company_run"),)
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("runs.id"), nullable=False, index=True)
+    account_id = Column(String(32), nullable=True, index=True)   # loose ref accounts.id
+    period_label = Column(String(32), nullable=True)
+    summary_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

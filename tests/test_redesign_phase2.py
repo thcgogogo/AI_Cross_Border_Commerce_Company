@@ -64,8 +64,8 @@ def test_root_serves_chinese_module_shell():
 # ---------------------------------------------------------------------------
 # 2. SPA paths: logged-out → /login, logged-in → the shell
 # ---------------------------------------------------------------------------
-SPA_PATHS = ["/new", "/reports", "/reports/7", "/schedule", "/brain", "/account",
-             "/founder/team", "/founder/costs", "/founder/models",
+SPA_PATHS = ["/workflow", "/new", "/reports", "/reports/7", "/schedule", "/brain",
+             "/account", "/founder/team", "/founder/costs", "/founder/models",
              "/founder/fusion", "/founder/api"]
 
 

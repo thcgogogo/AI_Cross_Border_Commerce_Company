@@ -283,10 +283,12 @@ def _anthropic_to_openai_tools(tool_specs):
 
 
 def _openai_chat_with_tools(model_id, messages, tool_specs, executor, max_tokens,
-                            max_retries=3, max_iterations=8):
+                            max_retries=3, max_iterations=8, web_search=False):
     """An OpenAI-compatible function-calling loop so a NON-Anthropic model (DeepSeek, Qwen,
     MiniMax, Kimi…) can call tools — e.g. the deliverables file builders. `executor(name,
-    args) -> str` runs the tool and returns a short result string. Returns {text,
+    args) -> str` runs the tool and returns a short result string. With web_search=True on
+    a Qwen model, also flips on DashScope's enable_search so the model can browse the live
+    web WHILE it calls tools; ignored for providers without a switch. Returns {text,
     input_tokens, output_tokens}."""
     pid, p = _provider_cfg(model_id)
     key = provider_key(model_id)
@@ -296,11 +298,12 @@ def _openai_chat_with_tools(model_id, messages, tool_specs, executor, max_tokens
     client = openai.OpenAI(api_key=key, base_url=config.provider_base_url(pid),
                            timeout=120.0, max_retries=max_retries)
     tools = _anthropic_to_openai_tools(tool_specs)
+    extra = {"extra_body": {"enable_search": True}} if (web_search and pid == "qwen") else {}
     msgs, texts, in_tok, out_tok = list(messages), [], 0, 0
     for _ in range(max_iterations):
         try:
             resp = client.chat.completions.create(model=model_id, messages=msgs,
-                                                  tools=tools, max_tokens=max_tokens)
+                                                  tools=tools, max_tokens=max_tokens, **extra)
         except openai.OpenAIError as e:
             raise LLMError(f"{p.get('label', pid)} API error: {e}")
         usage = getattr(resp, "usage", None)
@@ -458,7 +461,13 @@ class ModelRouter:
             self.token_manager.ensure_can_spend(budget)  # may raise BudgetExceededError
         messages = [{"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content}]
-        result = _openai_chat(model, messages, max_tokens, max_retries=max_retries)
+        # web_search only reaches the provider where it's actually wired: Qwen flips on
+        # DashScope's enable_search (in _openai_chat). Other OpenAI-compatible providers
+        # (Kimi/DeepSeek/…) have NO search switch here and silently ignore the flag —
+        # config.effective_model() is the safety net that keeps requires_web_search agents
+        # on a search-capable model (Qwen/Anthropic) so they never land here blind.
+        result = _openai_chat(model, messages, max_tokens, max_retries=max_retries,
+                              web_search=web_search)
         inp, out = result["input_tokens"], result["output_tokens"]
         if self.token_manager and budget:
             self.token_manager.record_cost(budget, config.cost_cny(model, inp, out))
@@ -481,15 +490,16 @@ class ModelRouter:
             self.last_stop_reason = anthropic_client.last_stop_reason
             return text
         # Non-Anthropic: run the OpenAI-compatible tool loop so the model can actually CALL
-        # the file builders (it used to degrade to a text-only completion). Web search stays
-        # Anthropic-only here; the file-generation tools are what this unblocks.
+        # the file builders (it used to degrade to a text-only completion). web_search is
+        # forwarded too — on Qwen it flips DashScope's enable_search so an agent with BOTH
+        # file tools and web_search (e.g. the data analyst) can browse the live web here.
         self.last_stop_reason = None
         if self.token_manager and budget:
             self.token_manager.ensure_can_spend(budget)   # may raise BudgetExceededError
         messages = [{"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content}]
         result = _openai_chat_with_tools(model, messages, tool_specs, tool_executor,
-                                         max_tokens, max_retries=max_retries,
+                                         max_tokens, max_retries=max_retries, web_search=web_search,
                                          max_iterations=max_iterations)
         inp, out = result["input_tokens"], result["output_tokens"]
         if self.token_manager and budget:

@@ -203,8 +203,11 @@ function railHTML() {
     </li>`;
   }).join("");
   return `<aside class="fusion-rail">
-    <button type="button" class="fusion-new-convo" data-new>＋ 新对话</button>
-    <input type="search" class="fusion-search" id="fusionSearch" placeholder="搜索对话…" value="${esc(convoQuery)}">
+    <button type="button" class="fusion-new-convo" data-new><span class="fusion-new-plus" aria-hidden="true">＋</span> 新对话</button>
+    <div class="fusion-search-wrap">
+      <span class="fusion-search-ic" aria-hidden="true">⌕</span>
+      <input type="search" class="fusion-search" id="fusionSearch" placeholder="搜索对话…" value="${esc(convoQuery)}">
+    </div>
     <ul class="fusion-convos">${items || `<li class="fusion-convos-empty muted">${q ? "没有匹配的对话" : "还没有对话"}</li>`}</ul>
   </aside>`;
 }
@@ -513,15 +516,23 @@ function controlsHTML() {
     </div>`;
   }
 
+  // Decorative line-icons matching the Claude Design toolbar (accent stroke via CSS).
+  const ICON_WEB = `<svg class="fusion-pic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>`;
+  const ICON_AGENT = `<svg class="fusion-pic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 7l-1.5-1.5a2.1 2.1 0 0 0-3 0l-5 5a2.1 2.1 0 0 0 0 3L6 18a2.1 2.1 0 0 0 3 0l5-5"/><path d="M13 5l6 6"/></svg>`;
+  const ICON_PERSONA = `<svg class="fusion-pic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>`;
+
   return `<div class="fusion-controls">
     <div class="fusion-presets">
-      ${presetChip("quality", "高质量")}
-      ${presetChip("budget", "经济")}
+      <div class="fusion-tierseg">
+        ${presetChip("quality", "高质量")}
+        ${presetChip("budget", "经济")}
+      </div>
+      <span class="fusion-div" aria-hidden="true"></span>
       <button type="button" class="fusion-adv-toggle ${advanced ? "on" : ""}" data-adv
-        aria-expanded="${advanced ? "true" : "false"}">自定义模型 ${advanced ? "▴" : "▾"}</button>
-      ${state.fusionAccountTier === "full" ? `<button type="button" class="fusion-preset ${webSearch ? "on" : ""}" data-websearch aria-pressed="${webSearch}" title="部分模型支持（Claude / Qwen）">🌐 联网搜索</button>` : ""}
-      ${state.fusionAccountTier === "full" ? `<button type="button" class="fusion-preset ${agentMode ? "on" : ""}" data-agent aria-pressed="${agentMode}" title="单模型 + 工具，可生成 Excel / PDF / PPT / Word 文件">🛠 Agent</button>` : ""}
-      ${state.account ? `<button type="button" class="fusion-preset ${activePersona ? "on" : ""}" data-persona-toggle aria-pressed="${personaOpen}" title="给这个对话设定一个角色（系统指令），整组模型都会遵循">🎭 角色${activePersona ? " ·已设" : ""}</button>` : ""}
+        aria-expanded="${advanced ? "true" : "false"}">自定义模型 <span class="fusion-caret">${advanced ? "▴" : "▾"}</span></button>
+      ${state.fusionAccountTier === "full" ? `<button type="button" class="fusion-preset ${webSearch ? "on" : ""}" data-websearch aria-pressed="${webSearch}" title="部分模型支持（Claude / Qwen）">${ICON_WEB}联网搜索</button>` : ""}
+      ${state.fusionAccountTier === "full" ? `<button type="button" class="fusion-preset ${agentMode ? "on" : ""}" data-agent aria-pressed="${agentMode}" title="单模型 + 工具，可生成 Excel / PDF / PPT / Word 文件">${ICON_AGENT}Agent</button>` : ""}
+      ${state.account ? `<button type="button" class="fusion-preset ${activePersona ? "on" : ""}" data-persona-toggle aria-pressed="${personaOpen}" title="给这个对话设定一个角色（系统指令），整组模型都会遵循">${ICON_PERSONA}角色${activePersona ? " ·已设" : ""}</button>` : ""}
     </div>
     ${personaPanelHTML()}
     ${picker}

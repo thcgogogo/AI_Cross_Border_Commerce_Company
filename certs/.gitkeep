@@ -1,0 +1,5 @@
+# Put your SSL certificate here for HTTPS, e.g. your-domain.pem + your-domain.key
+# (downloaded as the "Nginx" bundle from Aliyun SSL证书). Then enable the HTTPS
+# block at the bottom of ../nginx.conf and run `docker compose up -d`.
+# This .gitkeep just keeps the (otherwise empty) folder in git so the compose
+# `./certs:/etc/nginx/certs:ro` mount works on a fresh clone. Never commit real keys.

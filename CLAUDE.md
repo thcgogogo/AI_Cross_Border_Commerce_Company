@@ -12,8 +12,10 @@ customer never writes a prompt, never picks a model, never sees a token. There a
 
 - **Fusion** (`/fusion`; the `/` home is a marketing landing that funnels here) — a public,
   **multi-turn** multi-model chatbot: one question fans out to several models and one fused
-  answer is reconciled from them. An **anonymous** visitor gets **3 free turns** (server-paid,
-  per-IP capped) then a **login gate**; **signed-in** users are free with **persisted,
+  answer is reconciled from them. Fusion is **login-gated by default** (`FUSION_FREE_ANON_TURNS=0`,
+  to keep a mainland deployment's public generative-AI surface minimal for 算法备案); set it to
+  `N` to enable the freemium teaser (an **anonymous** visitor then gets N server-paid, per-IP-capped
+  free turns before the **login gate**). **Signed-in** users are free with **persisted,
   encrypted per-conversation memory** (account-owned `fusion_conversations`/`fusion_messages`)
   + a conversation rail + a **free-vs-paid model split** (free clamps to a cheap subset, paid
   gets the full fan-out). The anon teaser conversation carries over into per-account memory on
@@ -28,7 +30,16 @@ customer never writes a prompt, never picks a model, never sees a token. There a
   `enable_search` + Claude's native tool, full-tier, fuser reconciles); and **agent mode** (R5 —
   one model runs an **OpenAI-compatible tool loop** in `providers.gateway_chat_with_tools` that
   GENERATES files via `deliverables`, saved as downloadable `fusion_attachments`). The non-Anthropic
-  tool loop is the same one that unblocks the report team's file generation.
+  tool loop is the same one that unblocks the report team's file generation. Then **R6**: a
+  **per-conversation persona** (角色 — a preset from `config.FUSION_PERSONAS` or a custom system
+  prompt ≤`FUSION_PERSONA_MAX_CHARS`=2000, prepended as a system message the whole council follows;
+  `PATCH /api/fusion/conversations/<id>` takes `system_prompt`, `GET /api/fusion/personas`; migration
+  `0017_fusion_persona`); and **R6 pt2 — the chat→report-team hand-off** (the moat: `POST
+  /api/fusion/conversations/<id>/handoff` seeds a real report run from the conversation transcript +
+  its document attachments → `Run(kind="fusion_seed")` → the orchestrator runs headless → branded PDF;
+  the SPA polls `/api/status/<job_id>` then opens `/reports/<run_id>`. `RUN_KIND_FUSION_SEED` ∈
+  `RUN_KINDS`/`QUOTA_RUN_KINDS` + the 历史报告 listing; gated by the REPORT product's economics
+  (platform breaker + `_plan_gate`), NOT the Fusion free-vs-paid split).
 - **工作流** (sign-in required; the customer nav tab — formerly "Agents") — the
   report/analytics product: the AI team that turns Excel into a verified weekly report,
   delivered on a schedule. The whole flow is now ONE consolidated page, **数据分析+报告
@@ -64,7 +75,7 @@ pip install -e .              # then: tangent-agent   (loopback server + tray ic
 
 # Production
 docker compose up -d          # nginx → 4 gunicorn workers + scheduler worker + Postgres 16 + redis
-alembic upgrade head          # migrations 0001–0016 (head = 0016_fusion_pin)
+alembic upgrade head          # migrations 0001–0017 (head = 0017_fusion_persona)
 ```
 
 There is **no configured linter/formatter** (no ruff/black/flake8 config); match the
@@ -200,6 +211,9 @@ cloud-only (`_LOCAL_MODE_BLOCKED_PREFIXES`):
 - `README.md` — full feature tour, the phase-by-phase build record, and a troubleshooting
   table (start here for any "how do I run X" question).
 - `docs/ops.md` — the production runbook (deploy, backup/restore, monitoring, spend caps).
+- `docs/china-launch-guide.md` — the dummy-proof mainland-China go-live runbook (the legal
+  filings 营业执照/ICP备案/经营性ICP-EDI/算法备案, the company-asset checklist, and the
+  console-vs-laptop-vs-server deploy + monitoring steps; charging-from-day-one path).
 - `docs/product-brief.md` — what is sold and the three moats; `docs/ui-redesign-plan.md`
   — the customer-UI redesign plan + per-phase record.
 - `docs/local-agents/` — the locally-deployable-agents plan and coding-agent prompts;

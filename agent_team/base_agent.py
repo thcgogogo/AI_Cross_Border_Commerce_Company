@@ -173,10 +173,15 @@ class Agent:
             parts.append(teammate_work)
 
         if "web_search" in (self.cfg.get("tools") or []):
+            today = config.current_date_str()
             parts.append(
-                "\nYou can search the live web to verify facts or pull in current "
-                "information (recent news, prices, today's events) when the task needs it. "
-                "Search when accuracy depends on up-to-date facts; cite what you find."
+                f"\nTODAY'S DATE IS {today} (Asia/Shanghai). You can search the live web to "
+                "verify facts or pull in current information (recent news, prices, today's "
+                "events). When accuracy depends on up-to-date facts, SEARCH — do not answer "
+                "from memory, which is older than today and may be wrong. Bias your queries "
+                f"toward the present (include {today[:7]} or {today[:4]}), cite each fact with "
+                "its source and publication date, and do NOT present clearly dated material "
+                f"(e.g. a {int(today[:4]) - 2} result) as current unless the task is historical."
             )
 
         parts.append(

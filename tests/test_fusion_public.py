@@ -94,6 +94,7 @@ def test_fusion_quota_endpoint(fresh_db, client, monkeypatch):
 def test_anonymous_turns_are_not_persisted(fresh_db, client, monkeypatch):
     from agent_team import metrics_store
     from agent_team.models import FusionConversation, FusionMessage
+    monkeypatch.setenv("FUSION_FREE_ANON_TURNS", "3")   # enable the teaser (default is now 0)
     monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())
     _anon_turn(client, "hi")
     with db.session_scope() as s:
@@ -142,6 +143,7 @@ def test_spend_feeds_breaker(fresh_db, monkeypatch):
 
 def test_breaker_refuses_anonymous_chat(fresh_db, client, monkeypatch):
     # Within the free quota, but the breaker is tripped → 503 (not a free answer).
+    monkeypatch.setenv("FUSION_FREE_ANON_TURNS", "3")   # enable the teaser (default is now 0)
     monkeypatch.setattr(app.platform_guard, "check",
                         lambda *a, **k: (False, "系统繁忙，请稍后再试"))
     monkeypatch.setattr(app.providers, "gateway_chat", _fake_gateway())

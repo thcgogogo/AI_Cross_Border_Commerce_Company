@@ -214,6 +214,7 @@ def reconcile(platform, bank, ledger, *, pack, learned_rules=None, period_label=
     coupon = sum((p.get("coupon_amount") or _ZERO for p in success), _ZERO)      # 优惠
     fee_total = sum((p["_fee"] for p in success), _ZERO)                          # 手续费
     commission = sum((p.get("commission") or _ZERO for p in success), _ZERO)     # 佣金
+    n_commission = sum(1 for p in success if (p.get("commission") or _ZERO))      # 计佣笔数
     refund_total = sum((p.get("refund_amount") or _ZERO for p in refunds), _ZERO)  # 退款
     net_stated = sum((p.get("net_amount") or _ZERO for p in success), _ZERO)     # Σ应结金额
     settled = net_stated - fee_total - refund_total - commission                 # 实收(应结净额)
@@ -262,7 +263,7 @@ def reconcile(platform, bank, ledger, *, pack, learned_rules=None, period_label=
     attributions = _build_attributions(
         rules, fee_total, len(success), refund_total, len(refunds),
         in_transit_lag, len(in_transit_orders), withdraw_diff,
-        commission=commission, n_commission=len(success),
+        commission=commission, n_commission=n_commission,
         reserve=reserve_amount, n_reserve=reserve_count, fx_spread=fx_spread)
 
     # --- Bridge-balance self-audit (pure Python; independent of the residual) ---
@@ -334,6 +335,8 @@ def _match_orders(ledger, platform_orders, tol):
             by_key.setdefault(k, []).append(p)
     matched, partial, unmatched_ours, unmatched_theirs = [], [], [], []
     ledger_keys = set()  # built in this single pass; used by the theirs-only check below
+    consumed = set()     # ids of platform orders already claimed — L1 is 1:1, so a repeated
+                         # 订单号 (split shipment / re-export) can't double-count one order
     for lg in ledger:
         k = lg.get("merchant_order_no") or lg.get("platform_txn_no")
         if k:
@@ -342,12 +345,19 @@ def _match_orders(ledger, platform_orders, tol):
         if not cands:
             unmatched_ours.append(lg)
             continue
-        # Prefer the candidate whose amount matches (a 订单号 can repeat — a refund row
+        # Each platform order matches at most ONE ledger row. Among the not-yet-claimed
+        # candidates, prefer one whose amount matches (a 订单号 can repeat — a refund row
         # alongside the success row, or a corrected amount) before falling back to the
-        # first, so a duplicate key doesn't mislabel a real match as 部分匹配.
+        # first, so a duplicate key neither mislabels a real match as 部分匹配 nor inflates
+        # 已匹配 by claiming the same platform order twice.
         gl = lg.get("gross_amount") or _ZERO
-        p = next((c for c in cands if _amt_match(gl, c.get("gross_amount") or _ZERO, tol)),
-                 cands[0])
+        avail = [c for c in cands if id(c) not in consumed]
+        if not avail:
+            unmatched_ours.append(lg)  # all platform orders for this key already claimed
+            continue
+        p = next((c for c in avail if _amt_match(gl, c.get("gross_amount") or _ZERO, tol)),
+                 avail[0])
+        consumed.add(id(p))
         if _amt_match(gl, p.get("gross_amount") or _ZERO, tol):
             matched.append((lg, p))
         else:

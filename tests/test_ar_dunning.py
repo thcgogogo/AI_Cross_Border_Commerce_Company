@@ -152,3 +152,28 @@ def test_orchestrator_drafts_are_never_sent_and_rerun_does_not_double_dun(fresh_
     c1_msgs = [m for m in after if m["customer_key"] == "C1"]
     assert len(c1_msgs) == 1                       # no second draft was created
     assert c1_msgs[0]["state"] == "sent"           # the original, untouched
+
+
+def test_send_claim_is_atomic_no_double_dun(fresh_db, tmp_path):
+    """B1 regression: two concurrent /send requests must NOT both deliver. The atomic
+    claim lets exactly ONE win (state->sent BEFORE the network send); the loser gets
+    'already_sent'. A failed delivery releases the claim so the human can retry."""
+    cid = ms.get_or_create_company("boss@x.com", company_name="Acme")
+    rid = ms.create_run(cid, "应收 1", kind="ar")
+    _run_ar(tmp_path, cid, rid, "arC")
+    mid = [m for m in ms.list_dunning_messages(cid) if m["customer_key"] == "C1"][0]["id"]
+
+    # First claim wins and stamps SENT before any send happens.
+    first = ms.claim_dunning_for_send(cid, mid)
+    assert first and first.get("claimed")
+    assert first["message"]["state"] == "sent" and first["message"]["sent_at"]
+    # A concurrent second claim loses the race — it must NOT re-send.
+    assert ms.claim_dunning_for_send(cid, mid) == {"already_sent": True}
+    assert ms.get_dunning_message(cid, mid)["state"] == "sent"
+
+    # A failed delivery releases the claim, restoring the pre-claim state for retry.
+    ms.release_dunning_claim(cid, mid, first["prior_state"])
+    reverted = ms.get_dunning_message(cid, mid)
+    assert reverted["state"] != "sent" and not reverted["sent_at"]
+    # ...and a fresh claim can win again (idempotent retry).
+    assert (ms.claim_dunning_for_send(cid, mid) or {}).get("claimed")

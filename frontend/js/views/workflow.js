@@ -14,17 +14,16 @@ import * as reportNew from "./report_new.js";
 import * as reports from "./reports.js";
 import * as schedule from "./schedule.js";
 import * as brain from "./brain.js";
-import * as account from "./account.js";
 import { esc } from "../components.js";
 
 // key ↔ canonical path ↔ the existing view module that renders that section.
+// (账户与套餐 is NOT here — it's its own top-level section, mounted standalone by main.js.)
 const TABS = [
   { key: "home", path: "/agents", label: "工作台", mod: workbench },
   { key: "generate", path: "/new", label: "生成报告", mod: reportNew },
   { key: "history", path: "/reports", label: "历史报告", mod: reports },
   { key: "schedule", path: "/schedule", label: "定时与送达", mod: schedule },
   { key: "brain", path: "/brain", label: "企业大脑", mod: brain },
-  { key: "account", path: "/account", label: "账户与套餐", mod: account },
 ];
 
 function tabStripHTML(activeKey) {

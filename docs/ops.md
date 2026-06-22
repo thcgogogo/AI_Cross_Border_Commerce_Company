@@ -358,19 +358,22 @@ just the why (and what to change if your topology differs):
 
 ### 7.7 The Fusion chat (cost exposure)
 
-Fusion (`/fusion`) is a freemium multi-model chatbot: an **anonymous** visitor gets a few
-free turns (default 3) on `/api/fusion/chat` — **the server pays** for those on its own
-provider keys — then a login gate appears. Signed-in use is free (COGS is internal, never
-charged to the customer's balance) and persisted per-account. Treat the anonymous teaser as
-a deliberate, bounded cost. The guards, in order of importance:
+Fusion (`/fusion`) is a multi-model chatbot. It is **login-gated by default**
+(`FUSION_FREE_ANON_TURNS=0`) — anonymous visitors hit the login gate immediately, keeping a
+mainland deployment's public generative-AI surface minimal for 算法备案. Set
+`FUSION_FREE_ANON_TURNS=N` to enable the freemium teaser: an **anonymous** visitor then gets N
+free turns on `/api/fusion/chat` — **the server pays** for those on its own provider keys —
+then the login gate appears. Signed-in use is free (COGS is internal, never charged to the
+customer's balance) and persisted per-account. Treat the anonymous teaser as a deliberate,
+bounded cost. The guards, in order of importance:
 
 - **Set the platform spend caps** (`PLATFORM_HOURLY_CAP_YUAN` / `PLATFORM_DAILY_CAP_YUAN`,
   §7.1) **before exposing it publicly** — both anonymous (billed to no account) and signed-in
   Fusion spend are metered into the same breaker, so once rolling spend crosses a cap the chat
   refuses with 503 until you reset. This is the hard kill-switch.
-- **Free-anon-turn cap** `FUSION_FREE_ANON_TURNS` (default `3`) — how many turns an anonymous
-  visitor gets before the login gate (counted **server-side**, atomic, keyed by the `anon_id`
-  cookie — table `anon_fusion_usage`, migration `0014` — so clearing the session can't reset it).
+- **Free-anon-turn cap** `FUSION_FREE_ANON_TURNS` (default `0` = login-gated) — how many turns an
+  anonymous visitor gets before the login gate (counted **server-side**, atomic, keyed by the
+  `anon_id` cookie — table `anon_fusion_usage`, migration `0014` — so clearing the session can't reset it).
 - **Rate limits**: anonymous turns are per-IP (`FUSION_RATE_LIMIT`); signed-in turns are
   **per-account** (`FUSION_ACCOUNT_RATE_LIMIT`, default `20 per day`, keyed on the customer).
   The per-IP path needs `TRUST_PROXY` set (§7.6) to key on the real client behind nginx.

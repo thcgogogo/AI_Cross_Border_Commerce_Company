@@ -121,6 +121,9 @@ from .models import (
     SettlementReport,
     ARReport,
     ARFlag,
+    MIWatchlist,
+    MIIntelPool,
+    MIReport,
     CrossBorderReport,
     CrossBorderFlag,
     CB_FLAG_OPEN,
@@ -2642,6 +2645,187 @@ def list_settlement_reports(company_id, limit=60):
         return [_settlement_report_to_dict(r) for r in rows]
 
 
+# ---------------------------------------------------------------------------
+# 市场情报周报 — watchlist (the paid input) + the shared weekly pool + per-customer reports
+# ---------------------------------------------------------------------------
+_MI_LIST_FIELDS = ("platforms", "markets", "competitors", "keywords")
+
+
+def _mi_watchlist_to_dict(row):
+    if row is None:
+        return None
+    def _load(v):
+        try:
+            return json.loads(v) if v else []
+        except ValueError:
+            return []
+    return {
+        "id": row.id, "company_id": row.company_id,
+        "platforms": _load(row.platforms), "markets": _load(row.markets),
+        "competitors": _load(row.competitors), "keywords": _load(row.keywords),
+        "category": row.category or "", "active": bool(row.active),
+        "updated_at": _iso(row.updated_at),
+    }
+
+
+def get_mi_watchlist(company_id):
+    """This company's 市场情报 watchlist (the report's input), or None if unset."""
+    if not company_id:
+        return None
+    with db.session_scope() as s:
+        row = s.query(MIWatchlist).filter_by(company_id=company_id).one_or_none()
+        return _mi_watchlist_to_dict(row)
+
+
+def save_mi_watchlist(company_id, watchlist):
+    """Upsert this company's watchlist. List fields are stored as JSON; `category` is a
+    plain string; `active` defaults to True. Returns the saved dict."""
+    if not company_id:
+        return None
+    wl = watchlist or {}
+    with db.session_scope() as s:
+        row = (s.query(MIWatchlist).filter_by(company_id=company_id)
+               .with_for_update().one_or_none())
+        if row is None:
+            row = MIWatchlist(company_id=company_id)
+            s.add(row)
+        for f in _MI_LIST_FIELDS:
+            vals = wl.get(f)
+            if isinstance(vals, str):
+                vals = [x.strip() for x in vals.split(",") if x.strip()]
+            setattr(row, f, json.dumps([str(x).strip() for x in (vals or [])
+                                        if str(x).strip()], ensure_ascii=False))
+        row.category = (wl.get("category") or "").strip()[:128]
+        if "active" in wl:
+            row.active = bool(wl.get("active"))
+        row.updated_at = datetime.utcnow()
+        s.flush()
+        return _mi_watchlist_to_dict(row)
+
+
+def list_active_mi_watchlists():
+    """ALL active watchlists across accounts — what the weekly collection job enumerates
+    to build the deduped (platform×market×category) query universe + the per-customer fan-out.
+    Each dict includes company_id + account-resolved fields for the run."""
+    with db.session_scope() as s:
+        rows = (s.query(MIWatchlist).filter_by(active=True)
+                .order_by(MIWatchlist.company_id.asc()).all())
+        return [_mi_watchlist_to_dict(r) for r in rows]
+
+
+def get_company_account_email(company_id):
+    """The owning account's email for a company (companies key on account_email, no FK).
+    Used by the weekly 市场情报 fan-out to resolve the customer for billing + delivery."""
+    if not company_id:
+        return None
+    with db.session_scope() as s:
+        row = s.query(Company).filter_by(id=company_id).one_or_none()
+        return (row.account_email if row else None)
+
+
+def upsert_mi_pool(period_label, pool):
+    """Store (or replace) the SHARED weekly intel pool for an ISO week. `pool` is the
+    engine output dict; serialized to items_json. Returns the period_label."""
+    if not period_label:
+        return None
+    payload = json.dumps(pool or {}, ensure_ascii=False)
+    with db.session_scope() as s:
+        row = (s.query(MIIntelPool).filter_by(period_label=period_label)
+               .with_for_update().one_or_none())
+        if row is None:
+            row = MIIntelPool(period_label=period_label)
+            s.add(row)
+        row.items_json = payload
+        row.status = "ready"
+        row.query_plan_version = (pool or {}).get("query_plan_version")
+        row.collected_at = datetime.utcnow()
+        s.flush()
+        return period_label
+
+
+def get_latest_mi_pool():
+    """The most recently collected weekly pool (the engine output dict), or None. Used by
+    on-demand '立即生成' so a customer report reuses the week's single collection."""
+    with db.session_scope() as s:
+        row = s.query(MIIntelPool).order_by(MIIntelPool.id.desc()).first()
+        if row is None or not row.items_json:
+            return None
+        try:
+            return json.loads(row.items_json)
+        except ValueError:
+            return None
+
+
+def get_mi_pool(period_label):
+    if not period_label:
+        return None
+    with db.session_scope() as s:
+        row = s.query(MIIntelPool).filter_by(period_label=period_label).one_or_none()
+        if row is None or not row.items_json:
+            return None
+        try:
+            return json.loads(row.items_json)
+        except ValueError:
+            return None
+
+
+def _mi_report_to_dict(r):
+    if r is None:
+        return None
+    try:
+        payload = json.loads(r.summary_json) if r.summary_json else {}
+    except ValueError:
+        payload = {}
+    return {
+        "id": r.id, "run_id": r.run_id, "company_id": r.company_id,
+        "period_label": r.period_label or "",
+        "highlight_count": payload.get("highlight_count", 0),
+        "deadline_count": payload.get("deadline_count", 0),
+        "kept_count": payload.get("kept_count", 0),
+        "source_rows": payload.get("source_rows") or [],
+        "report_markdown": payload.get("report_markdown") or "",
+        "created_at": _iso(r.created_at),
+    }
+
+
+def save_mi_report(company_id, run_id, payload, *, account_id=None, period_label=None):
+    """Upsert one 市场情报周报 run's result (keyed company_id+run_id). `payload` is the
+    customer-safe report dict (markdown + source_rows + counts — no ¥/model/token)."""
+    if not (company_id and run_id):
+        return None
+    blob = json.dumps(payload or {}, ensure_ascii=False)
+    with db.session_scope() as s:
+        row = (s.query(MIReport).filter_by(company_id=company_id, run_id=run_id)
+               .with_for_update().one_or_none())
+        if row is None:
+            row = MIReport(company_id=company_id, run_id=run_id)
+            s.add(row)
+        row.account_id = account_id
+        row.period_label = period_label or (payload or {}).get("period_label")
+        row.summary_json = blob
+        s.flush()
+        return _mi_report_to_dict(row)
+
+
+def get_mi_report(company_id, run_id):
+    """One 市场情报周报 result as a customer-safe dict, ownership-filtered. None if missing."""
+    if not (company_id and run_id):
+        return None
+    with db.session_scope() as s:
+        row = s.query(MIReport).filter_by(company_id=company_id, run_id=run_id).one_or_none()
+        return _mi_report_to_dict(row)
+
+
+def list_mi_reports(company_id, limit=60):
+    """This account's 市场情报周报 history, newest first."""
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        rows = (s.query(MIReport).filter_by(company_id=company_id)
+                .order_by(MIReport.id.desc()).limit(int(limit)).all())
+        return [_mi_report_to_dict(r) for r in rows]
+
+
 def _settlement_exc_to_dict(e):
     try:
         detail = (json.loads(e.detail_json) if e.detail_json else {}).get("detail", "")
@@ -3281,6 +3465,74 @@ def set_dunning_state(company_id, message_id, state, *, channel=None, delivery_i
                 m.delivery_id = int(delivery_id)
         m.state = state
         m.updated_at = now
+        return _dunning_to_dict(m)
+
+
+def claim_dunning_for_send(company_id, message_id):
+    """Atomically CLAIM a draft for sending so two concurrent /send requests can't both
+    deliver (the no-double-dun guarantee). Under the row lock: if the message is already
+    sent/claimed, refuse; otherwise stamp state=SENT + sent_at to claim it before any
+    network send happens. The caller MUST then either finalize_dunning_sent() on a
+    successful delivery, or release_dunning_claim() if delivery fails (so a human can
+    retry). Returns {"already_sent": True} if lost the race, {"claimed": True,
+    "prior_state": ..., "message": {...}} on a successful claim, or None if not found."""
+    if not company_id or not message_id:
+        return None
+    with db.session_scope() as s:
+        m = (s.query(DunningMessage)
+             .filter_by(id=message_id, company_id=company_id)
+             .with_for_update().one_or_none())
+        if m is None:
+            return None
+        if m.state == DUNNING_STATE_SENT or m.sent_at is not None:
+            return {"already_sent": True}
+        now = datetime.utcnow()
+        prior_state = m.state
+        if m.approved_at is None:
+            m.approved_at = now
+        m.sent_at = now
+        m.state = DUNNING_STATE_SENT
+        m.updated_at = now
+        return {"claimed": True, "prior_state": prior_state,
+                "message": _dunning_to_dict(m)}
+
+
+def finalize_dunning_sent(company_id, message_id, *, channel=None, delivery_id=None):
+    """Attach the delivery channel + id after a CLAIMED send succeeded. The row is
+    already SENT (claimed); this only records how/where it went out."""
+    if not company_id or not message_id:
+        return None
+    with db.session_scope() as s:
+        m = (s.query(DunningMessage)
+             .filter_by(id=message_id, company_id=company_id)
+             .with_for_update().one_or_none())
+        if m is None:
+            return None
+        if channel:
+            m.channel = channel[:16]
+        if delivery_id is not None:
+            m.delivery_id = int(delivery_id)
+        m.updated_at = datetime.utcnow()
+        return _dunning_to_dict(m)
+
+
+def release_dunning_claim(company_id, message_id, prior_state):
+    """Revert a claim when the delivery FAILED, restoring the pre-claim state and
+    clearing sent_at so the human can retry. Never demotes an already-finalized send."""
+    if not company_id or not message_id:
+        return None
+    with db.session_scope() as s:
+        m = (s.query(DunningMessage)
+             .filter_by(id=message_id, company_id=company_id)
+             .with_for_update().one_or_none())
+        if m is None:
+            return None
+        m.sent_at = None
+        m.delivery_id = None
+        m.state = prior_state if prior_state in (
+            DUNNING_STATE_DRAFT, DUNNING_STATE_EDITED,
+            DUNNING_STATE_APPROVED, DUNNING_STATE_DISMISSED) else DUNNING_STATE_APPROVED
+        m.updated_at = datetime.utcnow()
         return _dunning_to_dict(m)
 
 

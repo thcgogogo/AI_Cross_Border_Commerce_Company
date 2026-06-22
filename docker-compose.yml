@@ -111,8 +111,14 @@ services:
         condition: service_healthy
     ports:
       - "${HTTP_PORT:-80}:80"
+      # 443 is published so HTTPS works the moment you enable the TLS block in
+      # nginx.conf — harmless until then (nothing listens on 443 yet).
+      - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Your SSL cert/key live here (read-only). Empty until you drop a cert in;
+      # see the HTTPS section at the bottom of nginx.conf.
+      - ./certs:/etc/nginx/certs:ro
 
 volumes:
   pgdata:
