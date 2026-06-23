@@ -22,7 +22,7 @@ console — the customer-facing promise is 成本透明，绝不超支.
 
 ---
 
-## Two surfaces: Fusion + Agents
+## Two surfaces: Fusion + 工作流
 
 **Fusion** (`/fusion`) is a public, multi-turn multi-model chatbot: ask a question, several
 models answer, and one fused answer is reconciled from them (when one model is wrong, the
@@ -48,9 +48,12 @@ system prompt the whole council follows). And turn any conversation into a finis
 headless (a live feed polls progress) and delivers the same branded, source-verified PDF as the
 工作流 product — the bridge from "chat" to "deliverable".
 
-The report/analytics product described below now lives under the **Agents** section
-(sign-in required): the AI team that turns your Excel into a source-verified weekly
-经营周报. Everything in "The build record" and the moats applies to Agents.
+The report/analytics product described below now lives under the **工作流** section
+(sign-in required; the customer nav tab, **formerly "Agents"**) — one consolidated
+**数据分析 + 报告生成** page run by the multi-agent AI team: a CEO agent plans each job and
+delegates to specialists (文档分析师, 资料管理员, 数据分析师, 报告撰写人, 媒体制作人) who share
+one working memory to turn your Excel into a source-verified weekly 经营周报. Everything in
+"The build record" and the moats applies to 工作流.
 
 ---
 
