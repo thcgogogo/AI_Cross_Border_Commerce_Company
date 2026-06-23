@@ -1883,6 +1883,16 @@ code { background: var(--inset); border: 1px solid var(--line); padding: 1px 6px
    =========================================================================== */
 .page-head { margin: 8px 0 22px; }
 .page-head h1 { margin: 0 0 8px; font-size: 30px; font-weight: 600; letter-spacing: -.02em; }
+/* 现金位置 lives INSIDE the 跨境财务 hub: pin its horizontal padding to the hub topbar's 24px so
+   its title/cards line up with 跨境财务 + the tab strip at every width (the global .page drops to
+   16px at the mobile breakpoint, which would otherwise sit 8px inside the hub chrome). */
+.cp-page { padding-left: 24px; padding-right: 24px; }
+/* 现金位置 dashboard header: title/lead left, the 立即计算 primary action right-aligned. */
+.cp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.cp-head .cp-head-text { min-width: 0; }
+.cp-head .cp-head-text p { margin: 0; }
+.cp-head .run-btn { width: auto; margin: 0; padding: 12px 26px; flex: none; }
+@media (max-width: 640px) { .cp-head .run-btn { width: 100%; } }
 .back-link { display: inline-block; margin-bottom: 10px; color: var(--muted); text-decoration: none; font-size: 13px; }
 .back-link:hover { color: var(--accent); }
 .field .req { color: #c0392b; font-style: normal; font-size: 11px; font-weight: 600; margin-left: 4px; }

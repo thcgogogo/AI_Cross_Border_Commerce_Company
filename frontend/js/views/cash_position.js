@@ -14,7 +14,7 @@
 // ===========================================================================
 import * as api from "../api.js";
 import { state } from "../state.js";
-import { esc, pageHead, renderMarkdown, skeleton, statusPillHTML } from "../components.js";
+import { esc, renderMarkdown, skeleton, statusPillHTML } from "../components.js";
 import { pollJobStatus } from "../poll.js";
 
 const fmtY = (n) => "¥" + Number(n || 0).toLocaleString("zh-CN",
@@ -38,12 +38,17 @@ export async function mount(el, ctx) {
 
 // ---- dashboard ------------------------------------------------------------
 async function mountDashboard(el, ctx, base) {
-  el.innerHTML = `<div class="page">
-    <div class="wb-hero">
-      ${pageHead("现金位置 / 资金跑道",
-        "你真正能动用的钱有多少、还能撑多久 — 基于你已对账的真实数据，每个数字可溯源。")}
+  // Mounted INSIDE the 跨境财务 hub (the tab strip already names this section), so align to the
+  // hub chrome + sibling tabs (.page.page-narrow + .page-head) and keep the heading lightweight
+  // rather than a second full-width hero that duplicates the tab and breaks the left margin.
+  el.innerHTML = `<div class="page page-narrow cp-page">
+    <header class="page-head cp-head">
+      <div class="cp-head-text">
+        <h1>现金位置 / 资金跑道</h1>
+        <p class="muted">你真正能动用的钱有多少、还能撑多久 — 基于你已对账的真实数据，每个数字可溯源。</p>
+      </div>
       <button type="button" class="run-btn" id="cpRun">立即计算</button>
-    </div>
+    </header>
     <div id="cpBanner"></div>
     <div class="card-grid">
       <div class="card" id="cpPos">${skeleton({ title: true, lines: 2 })}</div>
@@ -388,7 +393,7 @@ async function mountResult(el, ctx, runId, base) {
       <td>${fmtY(w.committed_in)}</td><td>${fmtY(w.out)}</td>
       <td class="muted">${fmtY(w.locked)}</td></tr>`).join("");
 
-  el.innerHTML = `<div class="page page-narrow recon-result">
+  el.innerHTML = `<div class="page page-narrow cp-page recon-result">
     <header class="page-head">
       <a class="back-link" href="${esc(base)}" data-nav>← 现金位置 / 资金跑道</a>
       <h1>现金位置与资金跑道</h1>
