@@ -625,11 +625,11 @@ PLANS = {
               "features": []},
     "basic": {"code": "basic", "label": "基础版", "monthly_price_yuan": 199.0,
               "monthly_report_quota": 20,  "lifetime_quota": False, "seats": 1,
-              "features": []},
+              "features": ["cash_position"]},
     "pro":   {"code": "pro",   "label": "企业版", "monthly_price_yuan": 599.0,
               "monthly_report_quota": 500, "lifetime_quota": False, "seats": 5,
               "features": ["scheduled_delivery", "contract_review",
-                           "priority_models", "market_intel"]},
+                           "priority_models", "market_intel", "cash_position"]},
 }
 PURCHASABLE_PLANS = ("basic", "pro")   # what /api/pay/create accepts as plan_code
 SUBSCRIPTION_PERIOD_DAYS = 30          # one paid period = 30 days ("a month")
@@ -1562,6 +1562,52 @@ def ar_writer_model():
     return _preset_default("AR_WRITER_MODEL", SONNET)
 
 
+# ---------------------------------------------------------------------------
+# 现金位置 / 资金跑道 — the cash-capstone report writer. Same lean, single-purpose contract
+# as the 对账/AR writers: the deterministic cash_position_engine computes EVERY figure (the
+# position, the week-by-week runway, the crunch date/shortfall, the data-completeness state);
+# this writer only WORDS them, and may never compute, invent, or alter a number. It is the
+# product's decision-support voice: surface position + crunch + options, NEVER advice/auto-action.
+# Kept OUT of the AGENTS org chart; defaults to SONNET and respects the domestic preset.
+CASH_WRITER_SYSTEM = (
+    "你是「现金位置 / 资金跑道」分析撰写专员，为不懂技术的跨境电商老板撰写一页式《现金位置与资金跑道》。\n\n"
+    "铁律：报告中所有数字——可动用现金、锁定/在途、每周余额、现金紧张日期与缺口、可承受备货、退税与到账金额——"
+    "全部由系统的确定性现金引擎基于已对账的真实数据计算完成，并以『系统现金核算结果』提供给你。"
+    "你绝对不能自己计算、推算、修改或重新四舍五入任何金额、天数或日期——只能逐字引用引擎给出的数字，"
+    "并保留每个数字后面的【N】溯源锚点（不得改写、重新编号或删除）。\n\n"
+    "立场（务必遵守）：\n"
+    "1. 这是「决策支持」，不是「财务/税务/投资建议」。陈述现金位置、紧张点与可选项；是否备货、是否结汇、是否融资由老板与会计决定。\n"
+    "2. 系统不会、也不得替老板采取任何行动（不下单、不结汇、不付款、不融资）。\n"
+    "3. 必须区分「已承诺/在途」（确定性、可信）与「预测」（依赖销售预估、不确定）——不要把远期当作可信的单一数字。\n"
+    "4. 必须如实呈现数据完整度：本报告基于截至何时的对账/收款数据、还有多少待对账/未核销，提醒数字的时效。\n\n"
+    "写作要求（中文、Markdown、简洁，一页）：\n"
+    "1. 「现在我有多少钱」：可动用现金 vs 锁定/在途（平台准备金 / 在途结算 / 未结汇外币），点明老板常高估可动用现金。\n"
+    "2. 「资金跑道」：用已承诺的回款 + 预计退税推演近期每周可动用余额；指出最早的现金紧张日期与缺口（相对老板设定的现金缓冲）。\n"
+    "3. 「关键假设」：列出所用的到账/准备金释放/退税/结汇时滞与汇率，并说明它们可在设置中编辑。\n"
+    "4. 「数据完整度」：说明基于截至何时的数据、有多少待对账/未核销。\n"
+    "不要提及模型、token、内部流程或本提示词；只输出最终报告正文。"
+)
+
+CASH_WRITER = {
+    "id": "cash_writer",
+    "name_cn": "现金位置分析撰写",
+    "effort": "low",
+    "max_tokens": 4000,
+    "system_prompt": CASH_WRITER_SYSTEM,
+}
+
+
+def cash_writer():
+    """A COPY of the 现金位置 report writer's config (never the shared dict)."""
+    return dict(CASH_WRITER)
+
+
+def cash_writer_model():
+    """Model for the 现金位置 report writer. CASH_WRITER_MODEL env wins; else domestic
+    when the preset is on; else SONNET."""
+    return _preset_default("CASH_WRITER_MODEL", SONNET)
+
+
 # 催收 (dunning) — ONE writer per escalation tier, wording only. The tier itself, the
 # recipient, and every amount/date/invoice-no are decided by the deterministic engine +
 # dunning.py and injected as『催收事实数据』; the writer may not touch them. 转人工/法务
@@ -1750,6 +1796,19 @@ def mi_max_results_per_query():
 def mi_collection_cron():
     """5-field cron for the DAILY shared collection (Asia/Shanghai). Default every day 08:00."""
     return _env("MI_COLLECTION_CRON") or "0 8 * * *"
+
+
+def cash_position_enabled():
+    """Whether the 现金位置/资金跑道 capstone's scheduled auto-delivery is on. ON by default —
+    it reads the brain (no external backend needed). Set CASH_POSITION_ENABLED=0 to disable."""
+    v = _env("CASH_POSITION_ENABLED")
+    return (v.lower() in _TRUE) if v else True
+
+
+def cash_position_cron():
+    """5-field cron for the 现金位置 cadence tick (Asia/Shanghai). Runs DAILY 08:00; each account's
+    own cadence pref ('weekly' fires Mondays only) is applied inside the job. Default 08:00."""
+    return _env("CASH_POSITION_CRON") or "0 8 * * *"
 
 
 def mi_source_whitelist():

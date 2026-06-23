@@ -17,6 +17,7 @@ import { esc, tabsHTML } from "../components.js";
 import * as recon from "./recon.js";
 import * as ar from "./ar.js";
 import * as cbEngine from "./cb_engine.js";
+import * as cashPosition from "./cash_position.js";
 
 // 贸易方式 options (value mirrors metrics_store.CROSS_BORDER_MODES).
 const MODES = [
@@ -27,9 +28,10 @@ const MODES = [
   { key: "1210", label: "1210 保税" },
 ];
 
-// Every facet of the hub. `recon` and `ar` are live (reuse the existing views);
-// the rest are phase-gated previews until their engines ship.
+// Every facet of the hub. `cash` (the forward capstone), `recon` and `ar` are live (reuse the
+// existing views); the rest are phase-gated previews until their engines ship.
 const SUBTABS = {
+  cash:      { label: "现金位置 / 资金跑道", live: true },
   recon:     { label: "回款核对 + 收汇结汇", live: true },
   threeflow: { label: "三流合一核验", live: false },
   rebate:    { label: "退税核算", live: false },
@@ -39,16 +41,18 @@ const SUBTABS = {
 };
 
 // 贸易方式 → the ordered sub-tabs that render for that mode (plan §3 gating).
-// 回款核对 + 三流合一 are universal; the tax/AR facet is mode-specific.
+// 现金位置 (the forward capstone) is the universal LEAD tab — it CONSUMES the other tabs'
+// reconciled output, so it sits first in every mode. 回款核对 + 三流合一 are universal too;
+// the tax/AR facet is mode-specific.
 const GATING = {
-  "9810":    ["recon", "threeflow", "rebate", "invoice"],
-  "general": ["recon", "threeflow", "rebate", "invoice"],
-  "9710":    ["recon", "threeflow", "ar", "invoice"],
-  "9610":    ["recon", "threeflow", "vatexempt", "invoice"],
-  "1210":    ["recon", "threeflow", "invoice"],
+  "9810":    ["cash", "recon", "threeflow", "rebate", "invoice"],
+  "general": ["cash", "recon", "threeflow", "rebate", "invoice"],
+  "9710":    ["cash", "recon", "threeflow", "ar", "invoice"],
+  "9610":    ["cash", "recon", "threeflow", "vatexempt", "invoice"],
+  "1210":    ["cash", "recon", "threeflow", "invoice"],
 };
 const DEFAULT_MODE = "9810";   // 海外仓 / Amazon FBA — the first customer
-const DEFAULT_TAB = "recon";
+const DEFAULT_TAB = "cash";    // the forward cash position — the seller's daily-decision lead screen
 
 // ---------------------------------------------------------------------------
 export async function mount(el, ctx) {
@@ -115,7 +119,8 @@ export async function mount(el, ctx) {
   // all go through the one config-driven cb_engine view.
   const subCtx = { params: { runId }, navigate: ctx.navigate, base: `/cross-border/${activeTab}` };
   let subCleanup = null;
-  if (activeTab === "recon") subCleanup = await recon.mount(bodyHost, subCtx);
+  if (activeTab === "cash") subCleanup = await cashPosition.mount(bodyHost, subCtx);
+  else if (activeTab === "recon") subCleanup = await recon.mount(bodyHost, subCtx);
   else if (activeTab === "ar") subCleanup = await ar.mount(bodyHost, subCtx);
   else subCleanup = await cbEngine.mount(bodyHost, subCtx, activeTab);
 

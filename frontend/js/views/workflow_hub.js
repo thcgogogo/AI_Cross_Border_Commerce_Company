@@ -37,7 +37,7 @@ const CARDS = [
   {
     path: "/cross-border", icon: RECON_ICON,
     title: "跨境财务",
-    desc: "出口跨境电商一站核对：回款核对·收汇结汇·三流合一·进项发票·退税，可溯源交付。",
+    desc: "出口跨境电商一站核对：现金位置·资金跑道·回款核对·收汇结汇·三流合一·进项发票·退税，可溯源交付。",
   },
   {
     path: "/markets", icon: MARKET_ICON,

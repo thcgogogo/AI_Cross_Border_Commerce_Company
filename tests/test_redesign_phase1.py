@@ -143,13 +143,17 @@ def test_plans_catalog_matches_brief():
     assert pro["monthly_price_yuan"] == 599.0
     assert pro["monthly_report_quota"] >= 100   # "high-volume reports"
     assert set(pro["features"]) == {"scheduled_delivery", "contract_review",
-                                    "priority_models", "market_intel"}
+                                    "priority_models", "market_intel", "cash_position"}
 
     # The feature-gate helper the later phases (B5/B9) will call.
     assert config.plan_has("pro", "scheduled_delivery") is True
     assert config.plan_has("basic", "scheduled_delivery") is False
     assert config.plan_has("free", "contract_review") is False
     assert config.plan_has("nonsense-code", "scheduled_delivery") is False  # → free
+    # 现金位置/资金跑道 is a basic+pro feature (free excluded), unlike the pro-only ones above.
+    assert config.plan_has("basic", "cash_position") is True
+    assert config.plan_has("pro", "cash_position") is True
+    assert config.plan_has("free", "cash_position") is False
 
 
 # ---------------------------------------------------------------------------

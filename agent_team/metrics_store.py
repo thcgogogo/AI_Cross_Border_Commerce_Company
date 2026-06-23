@@ -124,6 +124,8 @@ from .models import (
     MIWatchlist,
     MIIntelPool,
     MIReport,
+    CashPositionSettings,
+    CashPositionReport,
     CrossBorderReport,
     CrossBorderFlag,
     CB_FLAG_OPEN,
@@ -3330,6 +3332,174 @@ def classify_crossborder_flag(company_id, flag_id, label):
         e.updated_at = datetime.utcnow()
         s.flush()
         return _crossborder_flag_to_dict(e)
+
+
+# ---------------------------------------------------------------------------
+# 现金位置 / 资金跑道 — the forward cash capstone (a READ-ONLY consumer of the 跨境财务 hub).
+# latest_settlement_summary is an additive read over already-persisted 对账 summary_json; it
+# changes NO existing settlement code or behavior. Settings (assumptions/manual inputs the hub
+# cannot know) + per-run reports get their own dedicated tables.
+# ---------------------------------------------------------------------------
+def latest_settlement_summary(company_id, period_label=None, platform=None):
+    """The newest 对账 run's FULL summary blob for the 现金位置 capstone:
+    {summary, attributions, orders, bridge, platform, period_label, created_at}, or None when
+    no 对账 has run (graceful — the capstone degrades to a data-completeness notice). Additive
+    read-only over the already-persisted SettlementReport.summary_json; mirrors
+    read_reconciled_received / latest_settlement_orders and touches no settlement code."""
+    if not company_id:
+        return None
+    with db.session_scope() as s:
+        q = s.query(SettlementReport).filter_by(company_id=company_id)
+        if period_label:
+            q = q.filter_by(period_label=period_label)
+        if platform:
+            q = q.filter_by(platform=platform)
+        row = q.order_by(SettlementReport.id.desc()).first()
+        if row is None:
+            return None
+        try:
+            blob = json.loads(row.summary_json) if row.summary_json else {}
+        except ValueError:
+            blob = {}
+        return {
+            "summary": blob.get("summary") or {},
+            "attributions": blob.get("attributions") or [],
+            "orders": blob.get("orders") or [],
+            "bridge": blob.get("bridge") or {},
+            "platform": row.platform or "",
+            "period_label": row.period_label or "",
+            "created_at": _iso(row.created_at),
+        }
+
+
+_CASH_JSON_FIELDS = ("assumptions", "manual_inputs", "prefs")
+
+
+def _cash_settings_to_dict(row):
+    if row is None:
+        return None
+
+    def _load(v):
+        try:
+            d = json.loads(v) if v else {}
+        except ValueError:
+            d = {}
+        return d if isinstance(d, dict) else {}
+
+    return {
+        "id": row.id, "company_id": row.company_id,
+        "assumptions": _load(row.assumptions),
+        "manual_inputs": _load(row.manual_inputs),
+        "prefs": _load(row.prefs),
+        "active": bool(row.active),
+        "updated_at": _iso(row.updated_at),
+    }
+
+
+def get_cash_settings(company_id):
+    """This company's 现金位置 settings (editable assumptions + manual inputs + prefs), or None
+    if never set. The cash capstone falls back to cash_templates PROVISIONAL defaults when None."""
+    if not company_id:
+        return None
+    with db.session_scope() as s:
+        row = s.query(CashPositionSettings).filter_by(company_id=company_id).one_or_none()
+        return _cash_settings_to_dict(row)
+
+
+def save_cash_settings(company_id, settings):
+    """Upsert this company's 现金位置 settings. Only the JSON blobs present in `settings`
+    (assumptions / manual_inputs / prefs) are replaced — a partial update preserves the rest.
+    `active` toggles scheduled-cadence opt-in. Returns the saved dict. Mirrors save_mi_watchlist."""
+    if not company_id:
+        return None
+    data = settings or {}
+    with db.session_scope() as s:
+        row = (s.query(CashPositionSettings).filter_by(company_id=company_id)
+               .with_for_update().one_or_none())
+        if row is None:
+            row = CashPositionSettings(company_id=company_id)
+            s.add(row)
+        for f in _CASH_JSON_FIELDS:
+            if f in data:
+                blob = data.get(f)
+                setattr(row, f, json.dumps(blob if isinstance(blob, dict) else {},
+                                           ensure_ascii=False))
+        if "active" in data:
+            row.active = bool(data.get("active"))
+        row.updated_at = datetime.utcnow()
+        s.flush()
+        return _cash_settings_to_dict(row)
+
+
+def list_active_cash_settings():
+    """All accounts opted into scheduled 现金位置 delivery (active=True) — what the cadence job
+    enumerates. Each dict includes company_id + the blobs for the run."""
+    with db.session_scope() as s:
+        rows = (s.query(CashPositionSettings).filter_by(active=True)
+                .order_by(CashPositionSettings.company_id.asc()).all())
+        return [_cash_settings_to_dict(r) for r in rows]
+
+
+def _cash_report_to_dict(r):
+    try:
+        blob = json.loads(r.summary_json) if r.summary_json else {}
+    except ValueError:
+        blob = {}
+    return {
+        "id": r.id, "run_id": r.run_id, "company_id": r.company_id,
+        "period_label": r.period_label or "", "bridge_ok": bool(r.bridge_ok),
+        "summary": blob.get("summary") or {},
+        "position": blob.get("position") or {},
+        "runway": blob.get("runway") or {},
+        "crunch": blob.get("crunch"),
+        "data_completeness": blob.get("data_completeness") or {},
+        "assumptions": blob.get("assumptions") or {},
+        "source_rows": blob.get("source_rows") or [],
+        "created_at": _iso(r.created_at),
+    }
+
+
+def save_cash_report(company_id, run_id, result, *, account_id=None, period_label=None):
+    """Upsert one 现金位置/资金跑道 run's result (keyed company_id+run_id). `result` is the
+    cash_position_engine output dict. Returns the saved report dict. Mirrors save_settlement_report."""
+    if not company_id or not run_id:
+        return None
+    result = result or {}
+    bridge = result.get("bridge") or {}
+    payload = json.dumps(result, ensure_ascii=False)
+    with db.session_scope() as s:
+        row = (s.query(CashPositionReport)
+               .filter_by(company_id=company_id, run_id=run_id)
+               .with_for_update().one_or_none())
+        if row is None:
+            row = CashPositionReport(company_id=company_id, run_id=run_id)
+            s.add(row)
+        row.account_id = account_id
+        row.period_label = period_label or (result.get("summary") or {}).get("period_label")
+        row.summary_json = payload
+        row.bridge_ok = bool(bridge.get("ok", True))
+        s.flush()
+        return _cash_report_to_dict(row)
+
+
+def get_cash_report(company_id, run_id):
+    """One 现金位置 result as a customer-safe dict (no ¥ COGS stored here), ownership-filtered."""
+    if not company_id or not run_id:
+        return None
+    with db.session_scope() as s:
+        row = (s.query(CashPositionReport)
+               .filter_by(company_id=company_id, run_id=run_id).one_or_none())
+        return _cash_report_to_dict(row) if row is not None else None
+
+
+def list_cash_reports(company_id, limit=60):
+    """This account's 现金位置 history, newest first."""
+    if not company_id:
+        return []
+    with db.session_scope() as s:
+        rows = (s.query(CashPositionReport).filter_by(company_id=company_id)
+                .order_by(CashPositionReport.id.desc()).limit(int(limit)).all())
+        return [_cash_report_to_dict(r) for r in rows]
 
 
 # ---- 催收 (dunning) sent-state — the no-double-dun machinery -----------------

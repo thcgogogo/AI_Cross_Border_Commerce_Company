@@ -89,9 +89,10 @@ RUN_KIND_CROSSBORDER = "crossborder"  # 跨境财务 三流合一/退税/发票/
 RUN_KIND_FUSION_SEED = "fusion_seed"  # a full report seeded FROM a Fusion conversation (R6 hand-off)
 RUN_KIND_MARKET_INTEL = "market_intel"  # 市场情报周报 — a per-customer weekly market-intelligence report
 RUN_KIND_MI_COLLECT = "mi_collect"  # 市场情报 SHARED weekly web-search collection (infra, not per customer)
+RUN_KIND_CASH_POSITION = "cash_position"  # 现金位置/资金跑道 — forward cash capstone consuming the 跨境财务 hub
 RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT, RUN_KIND_DEVICE, RUN_KIND_RECON,
              RUN_KIND_AR, RUN_KIND_CROSSBORDER, RUN_KIND_FUSION_SEED,
-             RUN_KIND_MARKET_INTEL, RUN_KIND_MI_COLLECT)
+             RUN_KIND_MARKET_INTEL, RUN_KIND_MI_COLLECT, RUN_KIND_CASH_POSITION)
 
 # Run kinds that count against the shared report quota / can consume a 单次 credit.
 # 对账 and 应收账款 both fold into the existing report quota (owner decisions
@@ -100,7 +101,9 @@ RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_IMPORT, RUN_KIND_DEVICE, RUN_KIND_RECON,
 # enum migration. 跨境市场情报日报 is a 企业版 SUBSCRIPTION feature (plan_has "market_intel"),
 # delivered daily — so it is NOT per-report-quota-metered (that would exhaust the tiers at
 # ~30/month); RUN_KIND_MARKET_INTEL + its SHARED collection (mi_collect) both stay OUT, like
-# import/device. COGS still meters to the account, it just never consumes a 单次 credit.
+# import/device. 现金位置/资金跑道 (RUN_KIND_CASH_POSITION) is likewise a basic+pro SUBSCRIPTION
+# feature (plan_has "cash_position"), delivered on cadence + recomputed on demand, so it also
+# stays OUT. COGS still meters to the account, it just never consumes a 单次 credit.
 QUOTA_RUN_KINDS = (RUN_KIND_REPORT, RUN_KIND_RECON, RUN_KIND_AR, RUN_KIND_CROSSBORDER,
                    RUN_KIND_FUSION_SEED)
 
@@ -1252,4 +1255,49 @@ class MIReport(Base):
     account_id = Column(String(32), nullable=True, index=True)   # loose ref accounts.id
     period_label = Column(String(32), nullable=True)
     summary_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CashPositionSettings(Base):
+    """One row per company: the editable assumptions + manual inputs the 现金位置/资金跑道
+    capstone needs that the 跨境财务 hub CANNOT know. The hub is the source of the reconciled
+    position; this is everything else (the seller's plans + their timing/FX assumptions). A
+    dedicated table (not CompanyProfile.profile_json) so the scheduled cadence job can enumerate
+    accounts that opted in, and so the structured blobs round-trip cleanly. All three JSON blobs
+    are PROVISIONAL-defaulted by cash_templates until the seller edits them; every value is
+    surfaced in the UI as an editable assumption. Mirrors MIWatchlist."""
+    __tablename__ = "cash_position_settings"
+    __table_args__ = (UniqueConstraint("company_id", name="uq_cash_settings_company"),)
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    # JSON blobs (Text): assumptions = {buffer_cny, fx_rate, horizon_weeks, lags:{...}};
+    # manual_inputs = {restock:[...], supplier_terms, ad_budget, fixed_costs, duties, financing};
+    # prefs = {trade_mode, cadence, delivery_channels:[...]}.
+    assumptions = Column(Text, nullable=True)
+    manual_inputs = Column(Text, nullable=True)
+    prefs = Column(Text, nullable=True)
+    active = Column(Boolean, nullable=False, default=False, server_default="0")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CashPositionReport(Base):
+    """One 现金位置/资金跑道 run's result (customer-scoped), one row per (company, run),
+    mirroring SettlementReport / MIReport. `summary_json` holds the deterministic engine output
+    (position + runway + crunch + data_completeness + assumptions + 【N】 source rows); the final
+    report markdown lives in the run's memory snapshot / rendered PDF. `bridge_ok` denormalizes
+    the engine's per-week self-audit for the history list. Every figure is the engine's — no LLM
+    writes a number."""
+    __tablename__ = "cash_position_reports"
+    __table_args__ = (UniqueConstraint("company_id", "run_id",
+                                       name="uq_cash_report_company_run"),)
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("runs.id"), nullable=False, index=True)
+    account_id = Column(String(32), nullable=True, index=True)   # loose ref accounts.id
+    period_label = Column(String(32), nullable=True)
+    summary_json = Column(Text, nullable=True)
+    bridge_ok = Column(Boolean, nullable=False, default=True, server_default="1")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

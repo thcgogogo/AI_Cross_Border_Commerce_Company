@@ -127,6 +127,17 @@ export const dismissArDunning = (id) =>
 export const sendArDunning = (id, payload) =>
   postJSON(`/api/ar/dunning/${encodeURIComponent(id)}/send`, payload);
 
+// ---- 现金位置 / 资金跑道 (cash position + runway — the 跨境财务 capstone) -----------
+export const getCashSettings = () => getJSON("/api/cash/settings");
+export const saveCashSettings = (body) => postJSON("/api/cash/settings", body);
+export const startCash = (body = {}) => postJSON("/api/cash/run", body);
+export const getCashResult = (runId) =>
+  getJSON(`/api/cash/result/${encodeURIComponent(runId)}`);
+export const getCashHistory = () => getJSON("/api/cash/reports");
+// Phase 2 — synchronous, deterministic solver + scenarios (no run, instant).
+export const cashSolve = (body = {}) => postJSON("/api/cash/solve", body);
+export const cashScenario = (levers = {}) => postJSON("/api/cash/scenario", { levers });
+
 // ---- 跨境财务 (cross-border finance hub) — 贸易方式 settings --------------------
 export const getCrossBorderSettings = () => getJSON("/api/cross-border/settings");
 export const saveCrossBorderSettings = (payload) => postJSON("/api/cross-border/settings", payload);

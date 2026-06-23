@@ -47,6 +47,8 @@ from agent_team import (
     alerts,
     analytics,
     ar_templates,
+    cash_position_engine,
+    cash_templates,
     config,
     crossborder_orchestrator,
     crypto,
@@ -107,6 +109,7 @@ from agent_team.models import (
     ORDER_TOPUP,
     QUOTA_RUN_KINDS,
     RUN_FAILED,
+    RUN_KIND_CASH_POSITION,
     RUN_KIND_DEVICE,
     RUN_KIND_IMPORT,
     RUN_KIND_AR,
@@ -124,6 +127,8 @@ from agent_team.models import (
     VOTE_VALUES,
 )
 from agent_team.ar_orchestrator import AROrchestrator
+from agent_team.cash_position_orchestrator import (CashPositionOrchestrator,
+                                                   assemble_cash_inputs)
 from agent_team.market_intel_orchestrator import MarketIntelOrchestrator
 from agent_team.orchestrator import Orchestrator
 from agent_team.providers import ModelRouter
@@ -1603,6 +1608,92 @@ def _run_crossborder(memory, kind, files_by_role, period_label=None,
             memory.set_error(f"{type(e).__name__}: {e}")
 
 
+def _run_cash_position(memory, *, period_label=None, customer_id=None, company_id=None,
+                       run_id=None, account_id=None):
+    """Background target for a 现金位置/资金跑道 run — the cash-capstone sibling of _run_recon.
+    The capstone CONSUMES the 跨境财务 hub READ-ONLY (it reads persisted 对账/退税 results, never
+    re-reconciling). RUN_KIND_CASH_POSITION is a basic+pro subscription feature (NOT
+    report-quota-metered), like market-intel; COGS still meters per account."""
+    try:
+        CashPositionOrchestrator(
+            memory, period_label=period_label, token_manager=TOKENS,
+            cost_listener=_make_biller(customer_id, run_kind=RUN_KIND_CASH_POSITION),
+            company_id=company_id, run_id=run_id, account_id=account_id).run()
+    except Exception as e:
+        if memory.snapshot().get("status") != "error":
+            memory.set_error(f"{type(e).__name__}: {e}")
+
+
+def _deliver_cash_position(company_id, run_id, company_name, memory):
+    """Email / 企业微信 delivery of a finished 现金位置/资金跑道 report, reusing delivery.deliver_report.
+    Channels come from the cash settings' prefs (default email); 企业微信 is dropped if no group
+    webhook is configured (it would silently fail otherwise). Mirrors _deliver_market_intel."""
+    if not (company_id and run_id):
+        return
+    settings = metrics_store.get_cash_settings(company_id) or {}
+    prefs = settings.get("prefs") or {}
+    branding = metrics_store.get_branding(company_id) or {}
+    channels = list(prefs.get("delivery_channels") or ["email"])
+    if "wechat" in channels and not branding.get("wechat_webhook"):
+        channels = [c for c in channels if c != "wechat"]
+    channels = channels or ["email"]
+    email = metrics_store.get_company_account_email(company_id)
+    snap = memory.snapshot()
+    pdf_path = metrics_store.report_pdf_path(company_id, run_id)
+    delivery.deliver_report(
+        company_id=company_id, run_id=run_id, channels=channels,
+        pdf_path=(pdf_path if os.path.isfile(pdf_path) else None),
+        report_markdown=snap.get("final_report") or "",
+        company_name=company_name or "本公司",
+        recipient_email=email, job_id=memory.job_id)
+
+
+def _run_cash_position_cadence():
+    """Scheduled system job: for every account opted into 现金位置 auto-delivery (an active
+    cash_position_settings row) on a basic/pro plan with the cash_position feature, recompute the
+    forward position from the hub READ-ONLY and deliver it. cadence ('weekly'|'daily') is
+    per-account — a 'weekly' account fires only on Mondays. One headless run each, billed COGS."""
+    if not config.cash_position_enabled():
+        return
+    # Weekday in Asia/Shanghai (the scheduler's tz) — a naive datetime.now() on a non-Shanghai
+    # server would gate weekly delivery on the wrong day.
+    from zoneinfo import ZoneInfo
+    is_monday = datetime.now(ZoneInfo("Asia/Shanghai")).weekday() == 0
+    for st in metrics_store.list_active_cash_settings():
+        company_id = st.get("company_id")
+        if not company_id:
+            continue
+        cadence = ((st.get("prefs") or {}).get("cadence") or "weekly").lower()
+        if cadence == "weekly" and not is_monday:
+            continue
+        email = metrics_store.get_company_account_email(company_id)
+        customer = CUSTOMERS.find_by_email(email) if email else None
+        customer_id = (customer or {}).get("id")
+        if not customer_id:
+            continue
+        plan_code, _sub, _locked = metrics_store.effective_plan(customer_id)
+        if not config.plan_has(plan_code, "cash_position"):
+            continue
+        company_name = (metrics_store.get_profile(company_id) or {}).get("company_name") or ""
+        job_id = uuid.uuid4().hex[:12]
+        goal = "现金位置与资金跑道"
+        memory = SharedMemory(job_id, store_dir=MEMORY_DIR, goal=goal,
+                              output_dir=os.path.join(OUTPUT_DIR, job_id))
+        JOBS[job_id] = memory
+        try:
+            run_id = metrics_store.create_run(company_id, goal, kind=RUN_KIND_CASH_POSITION)
+        except Exception:
+            run_id = None
+        memory.set_company_id(company_id)
+        memory.set_run_id(run_id)
+        _run_cash_position(memory, customer_id=customer_id, company_id=company_id,
+                           run_id=run_id, account_id=customer_id)
+        try:
+            _deliver_cash_position(company_id, run_id, company_name, memory)
+        except Exception as e:
+            memory.log("ceo", f"现金位置送达跳过（{e}）。", type="info")
+
+
 # ---------------------------------------------------------------------------
 # Scheduled runs ("定时任务") — the product shows up on its own cadence.
 # A fire reuses the EXACT interactive billing/run path: the same plan gate
@@ -1850,6 +1941,12 @@ SCHEDULER.add_system_job("lifecycle-daily",
 # (Asia/Shanghai). Inert until MI_ENABLED (the job itself checks config.mi_enabled()).
 SCHEDULER.add_system_job("market-intel-daily",
                          _run_market_intel_daily, config.mi_collection_cron())
+
+# 现金位置/资金跑道 — recompute + deliver the forward cash position on each opted-in account's
+# cadence (weekly→Mondays, daily→every day). The job itself applies per-account cadence + the
+# cash_position feature gate; ON by default (reads the brain, no external backend).
+SCHEDULER.add_system_job("cash-position-cadence",
+                         _run_cash_position_cadence, config.cash_position_cron())
 
 
 def _start_scheduler():
@@ -4194,6 +4291,203 @@ def market_intel_collect():
                     "kept": pool.get("kept_count", 0),
                     "dropped": pool.get("dropped_count", 0),
                     "queries": pool.get("query_count", 0)})
+
+
+# ---------------------------------------------------------------------------
+# 现金位置 / 资金跑道 — the 跨境财务 capstone. A READ-ONLY consumer of the hub; gated to
+# basic+pro (plan_has "cash_position"), NOT report-quota-metered. Customer-safe throughout
+# (no models / tokens / ¥ COGS). The interactive affordability solver + scenarios are Phase 2.
+# ---------------------------------------------------------------------------
+def _cash_feature_ok(customer):
+    """(allowed, plan_code) — True only on a plan that includes the cash_position feature."""
+    plan_code, _sub, _locked = metrics_store.effective_plan(customer["id"])
+    return config.plan_has(plan_code, "cash_position"), plan_code
+
+
+@app.route("/api/cash/settings", methods=["GET"])
+def cash_settings_get():
+    """The seller's editable 现金位置 assumptions + manual inputs + prefs, merged over the
+    PROVISIONAL cash_templates defaults so the UI always has values to render. trade_mode falls
+    back to the hub's saved 贸易方式 so the seller need not set it twice."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    saved = (metrics_store.get_cash_settings(company_id) if company_id else None) or {}
+    hub_mode = (metrics_store.get_cross_border_settings(company_id) or {}).get("mode") \
+        if company_id else None
+    prefs = dict(cash_templates.default_prefs(hub_mode))
+    prefs.update(saved.get("prefs") or {})
+    mode = prefs.get("trade_mode") or hub_mode
+    return jsonify({
+        "assumptions": cash_templates.merged_assumptions(mode, saved.get("assumptions")),
+        "manual_inputs": {**cash_templates.default_manual_inputs(),
+                          **(saved.get("manual_inputs") or {})},
+        "prefs": prefs,
+        "active": bool(saved.get("active", False)),
+        "defaults": {"assumptions": cash_templates.default_assumptions(mode)},
+    })
+
+
+@app.route("/api/cash/settings", methods=["POST"])
+def cash_settings_save():
+    """Save the editable assumptions / manual inputs / prefs (partial update). 企业版+基础版 only."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    ok, _plan = _cash_feature_ok(customer)
+    if not ok:
+        return jsonify({"error": "现金位置 / 资金跑道是基础版及以上版本的功能。"}), 402
+    company_id = metrics_store.get_or_create_company(
+        customer.get("email"), company_name=customer.get("company") or customer.get("name"))
+    body = request.get_json(silent=True) or {}
+    patch = {k: body[k] for k in ("assumptions", "manual_inputs", "prefs", "active")
+             if k in body}
+    saved = metrics_store.save_cash_settings(company_id, patch)
+    return jsonify({"settings": saved})
+
+
+@app.route("/api/cash/run", methods=["POST"])
+@limiter.limit(config.run_rate_limit, key_func=_run_rate_key)
+def cash_run():
+    """On-demand '立即计算': recompute the forward position/runway from the hub READ-ONLY +
+    current settings. 现金位置 is a basic+pro SUBSCRIPTION feature (NOT per-report-quota-metered),
+    so this gates on the plan feature, not _plan_gate."""
+    load_dotenv(override=True)
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录后再生成现金位置报告。"}), 401
+    allowed, reason = platform_guard.check(customer["id"], customer.get("daily_cap_yuan"))
+    if not allowed:
+        return jsonify({"error": reason}), 503
+    ok, _plan = _cash_feature_ok(customer)
+    if not ok:
+        return jsonify({"error": "现金位置 / 资金跑道是基础版及以上版本的功能。"}), 402
+
+    company_id = metrics_store.get_or_create_company(
+        customer.get("email"),
+        company_name=customer.get("company") or customer.get("name"))
+    body = request.get_json(silent=True) or {}
+    period_label = (body.get("period") or "").strip() or None
+
+    job_id = uuid.uuid4().hex[:12]
+    goal = "现金位置与资金跑道"
+    memory = SharedMemory(job_id, store_dir=MEMORY_DIR, goal=goal,
+                          output_dir=os.path.join(OUTPUT_DIR, job_id))
+    JOBS[job_id] = memory
+    run_id = None
+    try:
+        run_id = metrics_store.create_run(company_id, goal, kind=RUN_KIND_CASH_POSITION)
+    except Exception as e:
+        memory.log("system", f"企业大脑暂不可用（{e}）；继续运行。", type="info")
+    memory.set_company_id(company_id)
+    memory.set_run_id(run_id)
+
+    thread = threading.Thread(
+        target=_run_cash_position,
+        kwargs=dict(memory=memory, period_label=period_label, customer_id=customer["id"],
+                    company_id=company_id, run_id=run_id, account_id=customer["id"]),
+        daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id, "run_id": run_id})
+
+
+@app.route("/api/cash/result/<int:run_id>")
+def cash_result(run_id):
+    """One 现金位置/资金跑道 run as a CUSTOMER-SAFE document (no ¥ COGS / model names)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    run = metrics_store.get_run(run_id)
+    if not run:
+        return jsonify({"error": "现金位置记录不存在。"}), 404
+    if not company_id or run.get("company_id") != company_id:
+        return jsonify({"error": "无权访问该报告。"}), 403
+    report = metrics_store.get_cash_report(company_id, run_id) or {}
+    has_pdf = os.path.isfile(metrics_store.report_pdf_path(company_id, run_id))
+    out = {
+        "id": run_id, "status": run.get("status"),
+        "started_at": run.get("started_at"), "finished_at": run.get("finished_at"),
+        "period_label": report.get("period_label", ""),
+        "summary": report.get("summary", {}),
+        "position": report.get("position", {}),
+        "runway": report.get("runway", {}),
+        "crunch": report.get("crunch"),
+        "data_completeness": report.get("data_completeness", {}),
+        "assumptions": report.get("assumptions", {}),
+        "sources": report.get("source_rows", []),
+        "final_report": "",
+        "has_pdf": has_pdf,
+        "download_url": ("/api/reports/%s/download" % run_id) if has_pdf else None,
+    }
+    job_id = (run.get("report_path") or "").strip()
+    if job_id and re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+        memory = _load_job_memory(job_id)
+        if memory is not None:
+            out["final_report"] = memory.snapshot().get("final_report") or ""
+    return jsonify(out)
+
+
+@app.route("/api/cash/reports")
+def cash_reports_list():
+    """This account's 现金位置/资金跑道 history (newest first)."""
+    customer, company_id = _brain_company()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    if not company_id:
+        return jsonify({"reports": []})
+    return jsonify({"reports": metrics_store.list_cash_reports(company_id)})
+
+
+@app.route("/api/cash/solve", methods=["POST"])
+def cash_solve():
+    """The interactive AFFORDABILITY solver — SYNCHRONOUS, deterministic, NO LLM, NO Run row.
+    Computes the max safe 备货 from the committed runway and (optionally) whether a specific PO
+    is affordable. Compute-on-request: recomputes from the saved settings + hub READ-ONLY."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    ok, _plan = _cash_feature_ok(customer)
+    if not ok:
+        return jsonify({"error": "现金位置 / 资金跑道是基础版及以上版本的功能。"}), 402
+    company_id = metrics_store.get_or_create_company(
+        customer.get("email"), company_name=customer.get("company") or customer.get("name"))
+    body = request.get_json(silent=True) or {}
+    assumptions, hub, manual = assemble_cash_inputs(company_id)
+    as_of = datetime.now().date()
+    base = cash_position_engine.project_cash(as_of=as_of, assumptions=assumptions,
+                                             hub=hub, manual=manual)
+    try:
+        from_week = int(body.get("from_week") or 0)
+    except (TypeError, ValueError):
+        from_week = 0
+    out = {"max_safe": cash_position_engine.max_safe_restock(base, from_week=from_week)}
+    po = body.get("po") or {}
+    if po and po.get("amount"):
+        out["affordability"] = cash_position_engine.affordability(
+            as_of=as_of, assumptions=assumptions, hub=hub, manual=manual, po=po)
+    return jsonify(out)
+
+
+@app.route("/api/cash/scenario", methods=["POST"])
+def cash_scenario():
+    """What-if SCENARIOS — SYNCHRONOUS, deterministic, NO LLM, NO Run row. Re-rolls under levers
+    (sales_delta_pct / rebate_delay_days / po_delay_weeks) vs the baseline, from the saved
+    settings + hub READ-ONLY."""
+    customer = _current_customer()
+    if not customer:
+        return jsonify({"error": "请先登录。"}), 401
+    ok, _plan = _cash_feature_ok(customer)
+    if not ok:
+        return jsonify({"error": "现金位置 / 资金跑道是基础版及以上版本的功能。"}), 402
+    company_id = metrics_store.get_or_create_company(
+        customer.get("email"), company_name=customer.get("company") or customer.get("name"))
+    body = request.get_json(silent=True) or {}
+    levers = body.get("levers") or body
+    assumptions, hub, manual = assemble_cash_inputs(company_id)
+    out = cash_position_engine.scenario(
+        as_of=datetime.now().date(), assumptions=assumptions, hub=hub, manual=manual,
+        levers=levers)
+    return jsonify(out)
 
 
 @app.route("/api/recon/exceptions")

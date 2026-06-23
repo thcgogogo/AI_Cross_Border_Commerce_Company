@@ -67,7 +67,7 @@ const ROUTES = [
   { pattern: /^\/markets\/(\d+)$/, view: () => marketIntel, auth: true, params: (m) => ({ runId: m[1] }) },
   // 跨境财务 hub: ONE section, 贸易方式 selector + mode-gated sub-tabs. The legacy
   // /recon + /ar deep links are rewritten into its sub-tabs in render() (below).
-  { pattern: /^\/cross-border$/, view: () => crossBorder, auth: true, params: () => ({ tab: "recon" }) },
+  { pattern: /^\/cross-border$/, view: () => crossBorder, auth: true, params: () => ({ tab: "cash" }) },
   { pattern: /^\/cross-border\/([a-z]+)$/, view: () => crossBorder, auth: true, params: (m) => ({ tab: m[1] }) },
   { pattern: /^\/cross-border\/([a-z]+)\/(\d+)$/, view: () => crossBorder, auth: true,
     params: (m) => ({ tab: m[1], runId: m[2] }) },
